@@ -1,4 +1,4 @@
-import type { Bot, ProvisioningJob, Scene, SkillPackage, Workspace } from './types'
+import type { Bot, MessageLog, ProvisioningJob, Scene, SkillPackage, Workspace } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -20,7 +20,13 @@ export const api = {
   setup: (password: string) => request('/auth/setup', { method: 'POST', body: JSON.stringify({ password }) }),
   login: (password: string) => request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: () => request('/auth/logout', { method: 'POST' }),
-  dashboard: () => request<{ workspaces: number; bots: number; scenes: number; skillPackages: number }>('/dashboard'),
+  dashboard: () => request<{ workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number }>('/dashboard'),
+  messageLogs: (filters: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+    return request<{ items: MessageLog[]; total: number }>(`/message-logs${params.size ? `?${params.toString()}` : ''}`)
+  },
+  messageLog: (id: string) => request<MessageLog>(`/message-logs/${encodeURIComponent(id)}`),
   settings: () => request<{ basePrompt: string }>('/settings'),
   saveSettings: (basePrompt: string) => request<{ basePrompt: string }>('/settings', { method: 'PUT', body: JSON.stringify({ basePrompt }) }),
   workspaces: () => request<Workspace[]>('/workspaces'),

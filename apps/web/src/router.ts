@@ -7,6 +7,7 @@ import PackagesView from './views/PackagesView.vue'
 import ScenesView from './views/ScenesView.vue'
 import WorkspacesView from './views/WorkspacesView.vue'
 import SettingsView from './views/SettingsView.vue'
+import MessagesView from './views/MessagesView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -17,6 +18,7 @@ export const router = createRouter({
     { path: '/bots', name: 'bots', component: BotsView },
     { path: '/scenes', name: 'scenes', component: ScenesView },
     { path: '/packages', name: 'packages', component: PackagesView },
+    { path: '/messages', name: 'messages', component: MessagesView },
     { path: '/settings', name: 'settings', component: SettingsView },
   ],
 })

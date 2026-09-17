@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { Bot, Boxes, Layers3, Puzzle, Workflow } from 'lucide-vue-next'
+import { Bot, Boxes, Layers3, MessageSquareText, Puzzle, Workflow } from 'lucide-vue-next'
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
-const stats = ref({ workspaces: 0, bots: 0, scenes: 0, skillPackages: 0 })
+const stats = ref({ workspaces: 0, bots: 0, scenes: 0, skillPackages: 0, messageLogs: 0 })
 onMounted(async () => { stats.value = await api.dashboard() })
 const metrics = [
   { key: 'workspaces' as const, label: '工作区', icon: Boxes },
   { key: 'bots' as const, label: '飞书 Bot', icon: Bot },
   { key: 'scenes' as const, label: '启用场景', icon: Workflow },
   { key: 'skillPackages' as const, label: '技能包', icon: Puzzle },
+  { key: 'messageLogs' as const, label: '消息记录', icon: MessageSquareText },
 ]
 </script>
 <template>

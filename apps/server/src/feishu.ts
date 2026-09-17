@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { FeishuProvider, feishuMarkdownCards, feishuSelectionCard, feishuTextCard, type FeishuCard, type FeishuCardAction } from '@codycodeagent/cody-web-core/feishu'
+import { FeishuProvider, feishuMarkdownCards, feishuSelectionCard, feishuStreamingCard, feishuTextCard, type FeishuCard, type FeishuCardAction } from '@codycodeagent/cody-web-core/feishu'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import type { SecretVault } from './crypto.js'
 import type { HubStore } from './db.js'
-import type { CodyBotRuntime, RuntimeAttachment } from './runtime.js'
+import type { CodyBotRuntime, RuntimeAttachment, RuntimeProgress } from './runtime.js'
 import type { ResolvedRoute } from './types.js'
 
 type ManagedProvider = { provider: FeishuProvider; fingerprint: string }
@@ -76,18 +76,72 @@ export class FeishuBotManager {
     // not turn every bot message into an agent turn or create reply loops.
     if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !route.scene || !this.store.messageMatchesScene(route.scene.id, message))) return
     if (!route.scene && message.conversation.scope !== 'private' && !message.addressedToAgent) return
-    if (!route.scene) await this.sendScenePicker(botId, provider, message)
+    const log = this.store.createMessageLog(botId, route, message)
+    let receiptReactionId = ''
+    try { receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo') }
+    catch (error) { console.warn('[feishu] failed to add receipt reaction:', provider.classifyError(error).message) }
+    if (!route.scene) await this.sendScenePicker(botId, provider, message).catch(error => console.warn('[feishu] failed to send scene picker:', provider.classifyError(error).message))
+    const note = this.responseNote(route)
+    let streamMessageId = ''
+    try {
+      streamMessageId = await this.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', note }), route.replyMode === 'topic', `${message.eventId}:answer`)
+    } catch (error) {
+      console.warn('[feishu] failed to create streaming card:', provider.classifyError(error).message)
+    }
+    let patchTimer: ReturnType<typeof setTimeout> | null = null
+    let latestProgress: RuntimeProgress = { phase: 'thinking', reasoning: '', answer: '' }
+    let patchTail = Promise.resolve()
+    const enqueuePatch = () => {
+      if (!streamMessageId) return
+      const snapshot = latestProgress
+      patchTail = patchTail.then(() => this.retryDelivery(provider, () => provider.updateCard(streamMessageId, feishuStreamingCard({
+        state: snapshot.phase === 'answering' ? 'answering' : 'thinking',
+        reasoning: snapshot.reasoning,
+        answer: snapshot.answer,
+        note,
+      })))).catch(error => console.warn('[feishu] streaming card update failed:', provider.classifyError(error).message))
+    }
+    const schedulePatch = (progress: RuntimeProgress) => {
+      latestProgress = progress
+      if (patchTimer) return
+      patchTimer = setTimeout(() => { patchTimer = null; enqueuePatch() }, 450)
+      patchTimer.unref?.()
+    }
     try {
       const attachments = await this.downloadAttachments(botId, provider, message)
-      const text = await this.runtime.execute(route, message, attachments)
-      const cards = feishuMarkdownCards(text, { note: this.responseNote(route) })
-      for (let index = 0; index < cards.length; index += 1) {
-        await this.replyCard(provider, message.messageId, cards[index]!, route.replyMode === 'topic', `${message.eventId}:answer:${index}`)
+      const text = await this.runtime.execute(route, message, attachments, schedulePatch)
+      if (patchTimer) { clearTimeout(patchTimer); patchTimer = null }
+      await patchTail
+      const cards = feishuMarkdownCards(text, { note })
+      if (streamMessageId) {
+        await this.retryDelivery(provider, () => provider.updateCard(streamMessageId, cards[0]!))
+        for (let index = 1; index < cards.length; index += 1) {
+          await this.replyCard(provider, message.messageId, cards[index]!, route.replyMode === 'topic', `${message.eventId}:answer:${index}`)
+        }
+      } else {
+        for (let index = 0; index < cards.length; index += 1) {
+          await this.replyCard(provider, message.messageId, cards[index]!, route.replyMode === 'topic', `${message.eventId}:answer:${index}`)
+        }
       }
+      this.store.finishMessageLog(log.id, { responseContent: text })
+      await this.finishReaction(provider, message.messageId, receiptReactionId, 'DONE')
     } catch (error) {
+      if (patchTimer) clearTimeout(patchTimer)
+      await patchTail
       const detail = error instanceof Error ? error.message : String(error)
-      await this.replyCard(provider, message.messageId, feishuTextCard('CodyBotHub 运行失败', detail, { color: 'red' }), route.replyMode === 'topic', `${message.eventId}:error`).catch(sendError => console.error('[feishu] failed to send error card:', sendError))
+      const errorCard = feishuStreamingCard({ state: 'failed', error: detail, note })
+      const sendError = streamMessageId
+        ? this.retryDelivery(provider, () => provider.updateCard(streamMessageId, errorCard))
+        : this.replyCard(provider, message.messageId, errorCard, route.replyMode === 'topic', `${message.eventId}:error`).then(() => undefined)
+      await sendError.catch(deliveryError => console.error('[feishu] failed to send error card:', deliveryError))
+      this.store.finishMessageLog(log.id, { responseContent: latestProgress.answer, error: detail })
+      await this.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
     }
+  }
+
+  private async finishReaction(provider: FeishuProvider, messageId: string, receiptReactionId: string, finalEmoji: 'DONE' | 'ERROR'): Promise<void> {
+    if (receiptReactionId) await provider.removeReaction(messageId, receiptReactionId).catch(error => console.warn('[feishu] failed to remove receipt reaction:', provider.classifyError(error).message))
+    await provider.addReaction(messageId, finalEmoji).catch(error => console.warn('[feishu] failed to add final reaction:', provider.classifyError(error).message))
   }
 
   private async downloadAttachments(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<RuntimeAttachment[]> {
@@ -101,16 +155,11 @@ export class FeishuBotManager {
   }
 
   private responseNote(route: ResolvedRoute): string {
-    const permissions = new Set(route.bot.permissions)
-    const sandbox = permissions.has('sandbox:danger-full-access')
-      ? 'YOLO'
-      : permissions.has('filesystem:read-only') ? '只读' : '工作区写入'
-    const network = permissions.has('network:deny') ? '禁用网络' : '允许网络'
     return [
       `工作区：${route.workspace.name}`,
       `场景：${route.scene?.name ?? '默认路由'}`,
       `技能包：${route.skillPackages.map(item => item.name).join('、') || '无'}`,
-      `权限：${sandbox} · ${network}`,
+      '权限：YOLO · 允许网络与工具',
     ].join('  |  ')
   }
 

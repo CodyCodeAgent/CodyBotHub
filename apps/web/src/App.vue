@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Bot, Boxes, LayoutDashboard, LogOut, Menu, Puzzle, Settings, Workflow, X } from 'lucide-vue-next'
+import { Bot, Boxes, LayoutDashboard, LogOut, Menu, MessageSquareText, Puzzle, Settings, Workflow, X } from 'lucide-vue-next'
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from './api'
@@ -14,6 +14,7 @@ const items = [
   { to: '/bots', label: '飞书 Bot', icon: Bot },
   { to: '/scenes', label: '场景路由', icon: Workflow },
   { to: '/packages', label: '技能包', icon: Puzzle },
+  { to: '/messages', label: '消息记录', icon: MessageSquareText },
   { to: '/settings', label: '平台设置', icon: Settings },
 ]
 const logout = async () => { await api.logout(); await router.push('/auth') }

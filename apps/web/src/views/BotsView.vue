@@ -6,7 +6,7 @@ import type { Bot, ProvisioningJob, Workspace } from '../types'
 const items = ref<Bot[]>([]), workspaces = ref<Workspace[]>([]), open = ref(false), saving = ref(false), error = ref('')
 const activeJob = ref<ProvisioningJob | null>(null)
 let pollHandle: ReturnType<typeof setInterval> | null = null
-const form = reactive({ id: '', createMode: 'existing' as 'existing'|'auto', name: '', description: '', appId: '', appSecret: '', prompt: '', permissionsText: '', operatorIdsText: '', replyMode: 'reply' as 'reply'|'topic', defaultWorkspaceId: '', workspaceIds: [] as string[] })
+const form = reactive({ id: '', createMode: 'existing' as 'existing'|'auto', name: '', description: '', appId: '', appSecret: '', prompt: '', operatorIdsText: '', replyMode: 'reply' as 'reply'|'topic', defaultWorkspaceId: '', workspaceIds: [] as string[] })
 const canCreate = computed(() => workspaces.value.length > 0)
 const load = async () => { [items.value, workspaces.value] = await Promise.all([api.bots(), api.workspaces()]) }
 const pollJob = async () => {
@@ -17,12 +17,12 @@ const pollJob = async () => {
 onMounted(async () => { await load(); activeJob.value = (await api.provisioningJobs()).find(job => ['starting','waiting_scan','creating'].includes(job.status)) ?? null; if (activeJob.value) pollHandle = setInterval(() => void pollJob(), 1200) })
 onUnmounted(() => { if (pollHandle) clearInterval(pollHandle) })
 const edit = (item?: Bot) => {
-  Object.assign(form, item ? { ...item, createMode: 'existing', appSecret: '', permissionsText: item.permissions.join('\n'), operatorIdsText: item.operatorIds.join('\n'), workspaceIds: [...item.workspaceIds] } : { id: '', createMode: 'existing', name: '', description: '', appId: '', appSecret: '', prompt: '', permissionsText: '', operatorIdsText: '', replyMode: 'reply', defaultWorkspaceId: workspaces.value[0]?.id ?? '', workspaceIds: workspaces.value[0] ? [workspaces.value[0].id] : [] })
+  Object.assign(form, item ? { ...item, createMode: 'existing', appSecret: '', operatorIdsText: item.operatorIds.join('\n'), workspaceIds: [...item.workspaceIds] } : { id: '', createMode: 'existing', name: '', description: '', appId: '', appSecret: '', prompt: '', operatorIdsText: '', replyMode: 'reply', defaultWorkspaceId: workspaces.value[0]?.id ?? '', workspaceIds: workspaces.value[0] ? [workspaces.value[0].id] : [] })
   error.value = ''; open.value = true
 }
 const toggleWorkspace = (id: string) => { const index = form.workspaceIds.indexOf(id); if (index >= 0) { if (id !== form.defaultWorkspaceId) form.workspaceIds.splice(index, 1) } else form.workspaceIds.push(id) }
 const makeDefault = (id: string) => { form.defaultWorkspaceId = id; if (!form.workspaceIds.includes(id)) form.workspaceIds.push(id) }
-const payload = () => ({ ...form, permissions: form.permissionsText.split('\n').map(v => v.trim()).filter(Boolean), operatorIds: form.operatorIdsText.split('\n').map(v => v.trim()).filter(Boolean) })
+const payload = () => ({ ...form, permissions: ['sandbox:danger-full-access'], operatorIds: form.operatorIdsText.split('\n').map(v => v.trim()).filter(Boolean) })
 const save = async () => { saving.value = true; error.value = ''; try { if (!form.id && form.createMode === 'auto') { activeJob.value = await api.startProvisioning(payload()); if (pollHandle) clearInterval(pollHandle); pollHandle = setInterval(() => void pollJob(), 1200) } else await api.saveBot(payload()); open.value = false; await load() } catch (e) { error.value = e instanceof Error ? e.message : '保存失败' } finally { saving.value = false } }
 const cancelJob = async () => { if (!activeJob.value) return; activeJob.value = await api.cancelProvisioning(activeJob.value.id) }
 const remove = async (item: Bot) => { if (!confirm(`删除 Bot“${item.name}”以及它的场景路由？`)) return; try { await api.deleteBot(item.id); await load() } catch (e) { alert(e instanceof Error ? e.message : '删除失败') } }
@@ -45,7 +45,7 @@ const workspaceName = (id: string) => workspaces.value.find(item => item.id === 
       <div class="field"><span class="field-label">可访问的工作区</span><div class="check-grid"><label v-for="workspace in workspaces" :key="workspace.id" class="check-card"><input type="checkbox" :checked="form.workspaceIds.includes(workspace.id)" :disabled="workspace.id === form.defaultWorkspaceId" @change="toggleWorkspace(workspace.id)" /><span>{{ workspace.name }}</span></label></div></div>
       <div class="field"><label for="default-workspace">默认工作区</label><select id="default-workspace" :value="form.defaultWorkspaceId" required @change="makeDefault(($event.target as HTMLSelectElement).value)"><option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">{{ workspace.name }}</option></select><small>未配置群和未匹配场景的消息会在这里运行。</small></div>
       <div class="field"><label for="bot-prompt">Bot Prompt</label><textarea id="bot-prompt" v-model="form.prompt" rows="5" placeholder="角色、语气、职责和限制…" /></div>
-      <div class="field"><label for="bot-permissions">权限策略</label><textarea id="bot-permissions" v-model="form.permissionsText" rows="4" class="mono" placeholder="filesystem:read\nshell:git\nnetwork:deny" /><small>每行一个权限声明，运行时会转换为 Core 权限配置。</small></div>
+      <div class="notice"><strong>YOLO 执行模式</strong><br />Bot 会以 <span class="mono">approvalPolicy: never</span> 和 <span class="mono">danger-full-access</span> 运行，允许网络、命令和工具调用。</div>
       <div class="field"><label for="bot-operators">群场景操作人</label><textarea id="bot-operators" v-model="form.operatorIdsText" rows="3" class="mono" placeholder="ou_xxxxxxxxx\n每行一个飞书 Open ID" /><small>这些人可以通过飞书卡片为群绑定场景。留空时使用飞书应用管理员。</small></div>
       <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
     </div><footer class="dialog-actions"><button type="button" class="ghost-button" @click="open = false">取消</button><button class="button" :disabled="saving">{{ saving ? '保存中…' : '保存 Bot' }}</button></footer></form></div>

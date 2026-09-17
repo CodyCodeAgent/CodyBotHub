@@ -95,6 +95,20 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         }
 
         if (method === 'GET' && url.pathname === '/api/dashboard') return sendJson(response, 200, store.stats())
+        if (method === 'GET' && url.pathname === '/api/message-logs') {
+          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
+          const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0
+          return sendJson(response, 200, store.listMessageLogs({
+            limit: number(limit, 50),
+            offset: number(offset, 0),
+            botId: url.searchParams.get('botId') ?? '',
+            sceneId: url.searchParams.get('sceneId') ?? '',
+            status: url.searchParams.get('status') ?? '',
+            query: url.searchParams.get('query') ?? '',
+          }))
+        }
+        const messageLogId = matchId(url.pathname, '/api/message-logs/')
+        if (messageLogId && method === 'GET') return sendJson(response, 200, store.getMessageLog(messageLogId))
         if (method === 'GET' && url.pathname === '/api/settings') return sendJson(response, 200, { basePrompt: store.getPlatformPrompt() })
         if (method === 'PUT' && url.pathname === '/api/settings') {
           const body = await readJson(request)

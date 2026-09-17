@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { channelCommandId, type ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
+import type { CodexEvent } from '@codycodeagent/cody-web-core/conversation'
 import { createAppServerHost, type AppServerHost } from '@codycodeagent/cody-web-core/runtime'
 import { buildTurnUserInput, CodexSessionManager, type CodexSkillOption, type ExecutionContext, type ExecutionPolicyProvider, type TurnInput, type TurnInputSkill } from '@codycodeagent/cody-web-core/session'
 import type { HubStore } from './db.js'
@@ -13,6 +14,12 @@ export type RuntimeAttachment = {
   sizeBytes: number
 }
 
+export type RuntimeProgress = {
+  phase: 'thinking' | 'answering'
+  reasoning: string
+  answer: string
+}
+
 export class CodyBotRuntime {
   private host: AppServerHost | null = null
   private manager: CodexSessionManager | null = null
@@ -21,10 +28,11 @@ export class CodyBotRuntime {
 
   constructor(private readonly store: HubStore, private readonly runtimeDirectory: string, private readonly codexCommand = 'codex') {}
 
-  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = []): Promise<string> {
+  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void): Promise<string> {
     const conversation = this.store.getOrCreateConversation(route, message.conversation.id, message.conversation.rootId ?? '')
     const manager = await this.ensureManager()
     await this.ensureConversation(manager, conversation, route)
+    const activeThreadId = manager.snapshot(conversation.id)?.threadId ?? conversation.threadId
     manager.setContext(conversation.id, this.context(route))
     const skills = this.resolveSkills(route)
     const localImages = attachments.filter(attachment => attachment.type === 'image').map(attachment => ({ path: attachment.path }))
@@ -38,9 +46,30 @@ export class CodyBotRuntime {
       approvalPolicy: 'never',
       ...this.permissions(route),
     }
-    const outcome = await manager.submit(conversation.id, turn, 'queue', channelCommandId(message)).completed
-    if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || 'Codex Turn failed'))
-    return outcome.assistantText.trim() || '任务已完成，但没有可显示的文本结果。'
+    let turnId = ''
+    let reasoning = ''
+    let answer = ''
+    const applyProgress = (event: CodexEvent): void => {
+      if (event.threadId !== activeThreadId || (turnId && event.turnId && event.turnId !== turnId)) return
+      const text = typeof event.data.text === 'string' ? event.data.text : ''
+      if (event.type === 'reasoning.delta' && text) reasoning += text
+      if (event.type === 'reasoning.break' && reasoning && !reasoning.endsWith('\n\n')) reasoning += '\n\n'
+      if (event.type === 'assistant.delta' && text) answer += text
+      if (event.type === 'assistant.completed' && text) answer = text
+      if ((event.type === 'reasoning.delta' || event.type === 'reasoning.break' || event.type === 'assistant.delta' || event.type === 'assistant.completed') && onProgress) {
+        onProgress({ phase: answer ? 'answering' : 'thinking', reasoning, answer })
+      }
+    }
+    const unsubscribe = manager.subscribe(applyProgress)
+    try {
+      const submission = manager.submit(conversation.id, turn, 'queue', channelCommandId(message))
+      turnId = (await submission.started).turnId
+      const outcome = await submission.completed
+      if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || 'Codex Turn failed'))
+      return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
+    } finally {
+      unsubscribe()
+    }
   }
 
   async dispose(): Promise<void> {
@@ -58,7 +87,11 @@ export class CodyBotRuntime {
 
   private async ensureManager(): Promise<CodexSessionManager> {
     if (this.manager) return this.manager
-    const policy: ExecutionPolicyProvider = { evaluate: () => ({ action: 'deny', reason: 'CodyBotHub unattended channel turns do not grant interactive approvals.' }) }
+    const policy: ExecutionPolicyProvider = {
+      evaluate: operation => /approval/iu.test(operation.method)
+        ? ({ action: 'allow', reason: 'CodyBotHub YOLO mode automatically approves tool execution.' })
+        : ({ action: 'deny', reason: 'CodyBotHub cannot answer interactive questions without a user response.' }),
+    }
     this.host = createAppServerHost({
       command: /(?:^|\s)app-server(?:\s|$)/u.test(this.codexCommand) ? this.codexCommand : `"${this.codexCommand}" app-server --stdio`,
       cwd: this.runtimeDirectory,
@@ -87,26 +120,22 @@ export class CodyBotRuntime {
 
   private context(route: ResolvedRoute): ExecutionContext {
     const cwd = realpathSync.native(route.workspace.path)
-    const policy = this.permissions(route)
     return {
       thread: {
         cwd,
         approvalPolicy: 'never',
-        sandbox: policy.sandboxPolicy?.type === 'dangerFullAccess' ? 'danger-full-access' : policy.sandboxPolicy?.type === 'readOnly' ? 'read-only' : 'workspace-write',
+        sandbox: 'danger-full-access',
         runtimeWorkspaceRoots: [cwd],
         baseInstructions: route.systemPrompt || null,
         experimentalRawEvents: false,
         ephemeral: false,
       },
-      turn: { cwd, runtimeWorkspaceRoots: [cwd], approvalPolicy: 'never', ...policy },
+      turn: { cwd, runtimeWorkspaceRoots: [cwd], approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } },
     }
   }
 
-  private permissions(route: ResolvedRoute): Pick<TurnInput, 'sandboxPolicy'> {
-    const permissions = new Set(route.bot.permissions)
-    if (permissions.has('sandbox:danger-full-access')) return { sandboxPolicy: { type: 'dangerFullAccess' } }
-    if (permissions.has('filesystem:read-only')) return { sandboxPolicy: { type: 'readOnly', networkAccess: !permissions.has('network:deny') } }
-    return { sandboxPolicy: { type: 'workspaceWrite', writableRoots: [], networkAccess: !permissions.has('network:deny'), excludeTmpdirEnvVar: false, excludeSlashTmp: false } }
+  private permissions(_route: ResolvedRoute): Pick<TurnInput, 'sandboxPolicy'> {
+    return { sandboxPolicy: { type: 'dangerFullAccess' } }
   }
 
   private resolveSkills(route: ResolvedRoute): TurnInputSkill[] {

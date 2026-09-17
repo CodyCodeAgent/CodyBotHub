@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { BotRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
+import type { BotRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 
 type Row = Record<string, unknown>
@@ -143,11 +143,39 @@ export class HubStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS message_logs (
+        id TEXT PRIMARY KEY,
+        event_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        bot_name TEXT NOT NULL,
+        chat_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL DEFAULT '',
+        sender_id TEXT NOT NULL DEFAULT '',
+        message_type TEXT NOT NULL,
+        inbound_content TEXT NOT NULL,
+        response_content TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('processing', 'completed', 'failed')),
+        error TEXT NOT NULL DEFAULT '',
+        workspace_id TEXT NOT NULL,
+        workspace_name TEXT NOT NULL,
+        scene_id TEXT NOT NULL DEFAULT '',
+        scene_name TEXT NOT NULL DEFAULT '',
+        skill_packages_json TEXT NOT NULL DEFAULT '[]',
+        received_at TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        completed_at TEXT NOT NULL DEFAULT '',
+        duration_ms INTEGER,
+        UNIQUE (bot_id, message_id)
+      );
       CREATE INDEX IF NOT EXISTS idx_scenes_bot ON scenes(bot_id, enabled, priority);
       CREATE INDEX IF NOT EXISTS idx_routes_chat ON conversation_routes(bot_id, chat_id, topic_id);
       DELETE FROM inbound_events WHERE rowid NOT IN (SELECT MIN(rowid) FROM inbound_events GROUP BY bot_id, message_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_message ON inbound_events(bot_id, message_id);
       CREATE INDEX IF NOT EXISTS idx_inbound_received ON inbound_events(received_at);
+      CREATE INDEX IF NOT EXISTS idx_message_logs_received ON message_logs(received_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_message_logs_bot ON message_logs(bot_id, received_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_message_logs_scene ON message_logs(scene_id, received_at DESC);
     `)
   }
 
@@ -358,11 +386,76 @@ export class HubStore {
   }
   private skillPackage = (row: Row): SkillPackageRecord => ({ id: String(row.id), workspaceId: String(row.workspace_id), name: String(row.name), description: String(row.description), prompt: String(row.prompt), skills: list(row.skills_json), fallbackMode: String(row.fallback_mode) as SkillPackageRecord['fallbackMode'], createdAt: String(row.created_at), updatedAt: String(row.updated_at) })
 
-  stats(): { workspaces: number; bots: number; scenes: number; skillPackages: number } {
+  stats(): { workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number } {
     const count = (table: string) => Number((this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as Row).count)
     const enabledScenes = Number((this.db.prepare('SELECT COUNT(*) AS count FROM scenes WHERE enabled = 1').get() as Row).count)
-    return { workspaces: count('workspaces'), bots: count('bots'), scenes: enabledScenes, skillPackages: count('skill_packages') }
+    return { workspaces: count('workspaces'), bots: count('bots'), scenes: enabledScenes, skillPackages: count('skill_packages'), messageLogs: count('message_logs') }
   }
+
+  createMessageLog(botId: string, route: ResolvedRoute, message: ChannelInboundMessage): MessageLogRecord {
+    const id = randomUUID()
+    const startedAt = now()
+    this.db.prepare(`INSERT INTO message_logs (
+      id, event_id, message_id, bot_id, bot_name, chat_id, topic_id, sender_id,
+      message_type, inbound_content, status, workspace_id, workspace_name,
+      scene_id, scene_name, skill_packages_json, received_at, started_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, ?, ?)`)
+      .run(
+        id, message.eventId, message.messageId, botId, route.bot.name,
+        message.conversation.id, message.conversation.rootId ?? '', message.sender.id,
+        message.content?.type ?? 'unknown', message.text.slice(0, 200_000),
+        route.workspace.id, route.workspace.name, route.scene?.id ?? '', route.scene?.name ?? '',
+        JSON.stringify(route.skillPackages.map(item => ({ id: item.id, name: item.name }))),
+        message.createdAtIso, startedAt,
+      )
+    return this.getMessageLog(id)
+  }
+
+  finishMessageLog(id: string, update: { responseContent?: string; error?: string }): MessageLogRecord {
+    const current = this.getMessageLog(id)
+    const completedAt = now()
+    const durationMs = Math.max(0, Date.parse(completedAt) - Date.parse(current.startedAt))
+    const error = update.error?.slice(0, 20_000) ?? ''
+    this.db.prepare(`UPDATE message_logs SET response_content = ?, status = ?, error = ?, completed_at = ?, duration_ms = ? WHERE id = ?`)
+      .run((update.responseContent ?? '').slice(0, 500_000), error ? 'failed' : 'completed', error, completedAt, durationMs, id)
+    return this.getMessageLog(id)
+  }
+
+  listMessageLogs(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}): { items: MessageLogRecord[]; total: number } {
+    const filters: string[] = []
+    const params: Array<string | number> = []
+    if (input.botId) { filters.push('bot_id = ?'); params.push(input.botId) }
+    if (input.sceneId) { filters.push('scene_id = ?'); params.push(input.sceneId) }
+    if (input.status && ['processing', 'completed', 'failed'].includes(input.status)) { filters.push('status = ?'); params.push(input.status) }
+    if (input.query?.trim()) {
+      filters.push('(inbound_content LIKE ? ESCAPE \'\\\' OR response_content LIKE ? ESCAPE \'\\\' OR message_id LIKE ?)')
+      const escaped = input.query.trim().replace(/[\\%_]/gu, value => `\\${value}`)
+      params.push(`%${escaped}%`, `%${escaped}%`, `%${input.query.trim()}%`)
+    }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM message_logs ${where}`).get(...params) as Row).count)
+    const limit = Math.min(200, Math.max(1, Math.trunc(input.limit ?? 50)))
+    const offset = Math.max(0, Math.trunc(input.offset ?? 0))
+    const rows = this.db.prepare(`SELECT * FROM message_logs ${where} ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
+    return { items: rows.map(this.messageLog), total }
+  }
+
+  getMessageLog(id: string): MessageLogRecord {
+    const row = this.db.prepare('SELECT * FROM message_logs WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Message log not found')
+    return this.messageLog(row)
+  }
+
+  private messageLog = (row: Row): MessageLogRecord => ({
+    id: String(row.id), eventId: String(row.event_id), messageId: String(row.message_id),
+    botId: String(row.bot_id), botName: String(row.bot_name), chatId: String(row.chat_id), topicId: String(row.topic_id), senderId: String(row.sender_id),
+    messageType: String(row.message_type), inboundContent: String(row.inbound_content), responseContent: String(row.response_content),
+    status: String(row.status) as MessageLogRecord['status'], error: String(row.error),
+    workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), sceneId: String(row.scene_id), sceneName: String(row.scene_name),
+    skillPackages: (() => { try { return JSON.parse(String(row.skill_packages_json)) as Array<{ id: string; name: string }> } catch { return [] } })(),
+    receivedAt: String(row.received_at), startedAt: String(row.started_at), completedAt: String(row.completed_at),
+    durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
+  })
 
   getBotSecret(botId: string): string {
     const row = this.db.prepare('SELECT app_secret_encrypted FROM bots WHERE id = ?').get(botId) as Row | undefined

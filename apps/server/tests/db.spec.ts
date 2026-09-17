@@ -108,4 +108,27 @@ describe('HubStore invariants', () => {
     expect(store.claimInboundEvent(bot.id, 'event-2', 'message-2')).toBe(true)
     store.close()
   })
+
+  it('stores reviewable message, route, skill package, response, and duration snapshots', () => {
+    const store = new HubStore(':memory:')
+    const linked = store.createWorkspace({ name: 'Review', path: '/tmp/review' })
+    const bot = store.createBot({ name: 'Reviewer', defaultWorkspaceId: linked.id })
+    const skillPackage = store.createSkillPackage({ workspaceId: linked.id, name: 'Triage', description: '', prompt: '', skills: [], fallbackMode: 'package_first' })
+    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: '', priority: 10, replyMode: 'inherit', enabled: true, matcher: { chatIds: ['oc_review'], messageTypes: ['text'], textIncludes: ['alarm'], cardTitleIncludes: [] }, skillPackageIds: [skillPackage.id] })
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-review', messageId: 'message-review',
+      conversation: { id: 'oc_review', scope: 'group' as const }, sender: { id: 'ou_reviewer', type: 'user' as const },
+      content: { type: 'text' }, text: 'alarm database latency', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const route = store.resolveRoute(bot.id, message)
+    const log = store.createMessageLog(bot.id, route, message)
+    expect(log).toMatchObject({ status: 'processing', sceneId: scene.id, sceneName: 'Alert', inboundContent: 'alarm database latency', skillPackages: [{ id: skillPackage.id, name: 'Triage' }] })
+    const completed = store.finishMessageLog(log.id, { responseContent: 'database recovered' })
+    expect(completed).toMatchObject({ status: 'completed', responseContent: 'database recovered' })
+    expect(completed.durationMs).toBeTypeOf('number')
+    expect(store.listMessageLogs({ query: 'recovered', sceneId: scene.id })).toMatchObject({ total: 1, items: [{ id: log.id }] })
+    expect(store.stats().messageLogs).toBe(1)
+    store.close()
+  })
 })

@@ -74,7 +74,7 @@ The package policy is also expressed in the Turn prompt so `package_first`, `mix
 - Feishu App Secrets are encrypted using AES-256-GCM with a local 0600 master key.
 - List APIs never return App Secrets.
 - Workspace paths must already exist and be directories.
-- Default execution is workspace-write and scoped to the selected Workspace. `network:deny`, `filesystem:read-only`, and the explicit `sandbox:danger-full-access` policy alter the Core sandbox.
+- Bot turns run in YOLO mode: `approvalPolicy: never` with Core `dangerFullAccess`, including network and tool access. The selected Workspace remains the turn cwd and routing boundary.
 
 ## Feishu application provisioning
 

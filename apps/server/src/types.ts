@@ -74,3 +74,28 @@ export interface SkillPackageRecord {
   createdAt: string
   updatedAt: string
 }
+
+export interface MessageLogRecord {
+  id: string
+  eventId: string
+  messageId: string
+  botId: string
+  botName: string
+  chatId: string
+  topicId: string
+  senderId: string
+  messageType: string
+  inboundContent: string
+  responseContent: string
+  status: 'processing' | 'completed' | 'failed'
+  error: string
+  workspaceId: string
+  workspaceName: string
+  sceneId: string
+  sceneName: string
+  skillPackages: Array<{ id: string; name: string }>
+  receivedAt: string
+  startedAt: string
+  completedAt: string
+  durationMs: number | null
+}
