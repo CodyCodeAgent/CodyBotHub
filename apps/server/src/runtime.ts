@@ -130,7 +130,13 @@ export class CodyBotRuntime {
         experimentalRawEvents: false,
         ephemeral: false,
       },
-      turn: { cwd, runtimeWorkspaceRoots: [cwd], approvalPolicy: 'never', sandboxPolicy: { type: 'dangerFullAccess' } },
+      turn: {
+        cwd,
+        runtimeWorkspaceRoots: [cwd],
+        approvalPolicy: 'never',
+        sandboxPolicy: { type: 'dangerFullAccess' },
+        summary: 'detailed',
+      },
     }
   }
 
