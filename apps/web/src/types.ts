@@ -1,0 +1,6 @@
+export interface Workspace { id: string; name: string; path: string; prompt: string; createdAt: string; updatedAt: string }
+export interface Bot { id: string; name: string; description: string; appId: string; hasAppSecret: boolean; prompt: string; permissions: string[]; operatorIds: string[]; replyMode: 'reply' | 'topic'; defaultWorkspaceId: string; workspaceIds: string[]; createdAt: string; updatedAt: string }
+export interface Matcher { chatIds: string[]; messageTypes: string[]; textIncludes: string[]; cardTitleIncludes: string[] }
+export interface Scene { id: string; botId: string; workspaceId: string; name: string; prompt: string; priority: number; replyMode: 'inherit' | 'reply' | 'topic'; enabled: boolean; matcher: Matcher; skillPackageIds: string[]; createdAt: string; updatedAt: string }
+export interface SkillPackage { id: string; workspaceId: string; name: string; description: string; prompt: string; skills: string[]; fallbackMode: 'package_first' | 'mixed' | 'package_only'; createdAt: string; updatedAt: string }
+export interface ProvisioningJob { id: string; status: 'starting'|'waiting_scan'|'creating'|'completed'|'failed'|'cancelled'; qrUrl: string; expiresAt: string; error: string; botId: string; createdAt: string; updatedAt: string }

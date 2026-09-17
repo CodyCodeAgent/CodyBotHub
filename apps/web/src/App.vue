@@ -1,0 +1,46 @@
+<script setup lang="ts">
+import { Bot, Boxes, LayoutDashboard, LogOut, Menu, Puzzle, Settings, Workflow, X } from 'lucide-vue-next'
+import { computed, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { api } from './api'
+
+const route = useRoute()
+const router = useRouter()
+const mobileOpen = ref(false)
+const isAuth = computed(() => route.name === 'auth')
+const items = [
+  { to: '/', label: '总览', icon: LayoutDashboard },
+  { to: '/workspaces', label: '工作区', icon: Boxes },
+  { to: '/bots', label: '飞书 Bot', icon: Bot },
+  { to: '/scenes', label: '场景路由', icon: Workflow },
+  { to: '/packages', label: '技能包', icon: Puzzle },
+  { to: '/settings', label: '平台设置', icon: Settings },
+]
+const logout = async () => { await api.logout(); await router.push('/auth') }
+</script>
+
+<template>
+  <RouterView v-if="isAuth" />
+  <div v-else class="app-shell">
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+    <button class="mobile-menu icon-button" aria-label="打开导航" @click="mobileOpen = true"><Menu :size="20" /></button>
+    <div v-if="mobileOpen" class="nav-scrim" @click="mobileOpen = false" />
+    <aside class="sidebar" :class="{ open: mobileOpen }">
+      <div class="brand">
+        <div class="brand-mark"><Bot :size="22" /></div>
+        <div><strong>CodyBotHub</strong><span>Feishu Agent Control</span></div>
+        <button class="close-nav icon-button" aria-label="关闭导航" @click="mobileOpen = false"><X :size="20" /></button>
+      </div>
+      <nav aria-label="主要导航">
+        <RouterLink v-for="item in items" :key="item.to" :to="item.to" @click="mobileOpen = false">
+          <component :is="item.icon" :size="18" /><span>{{ item.label }}</span>
+        </RouterLink>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="system-status"><span class="status-dot" />系统已连接</div>
+        <button class="ghost-button full" @click="logout"><LogOut :size="17" />退出登录</button>
+      </div>
+    </aside>
+    <main id="main-content" class="main" tabindex="-1"><RouterView /></main>
+  </div>
+</template>

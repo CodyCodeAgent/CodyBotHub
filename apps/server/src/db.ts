@@ -1,0 +1,468 @@
+import { randomUUID } from 'node:crypto'
+import { mkdirSync } from 'node:fs'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import type { BotRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
+import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
+
+type Row = Record<string, unknown>
+const now = () => new Date().toISOString()
+const list = (value: unknown): string[] => {
+  try { return JSON.parse(String(value)) as string[] } catch { return [] }
+}
+
+export class HubStore {
+  readonly db: DatabaseSync
+
+  constructor(filename: string) {
+    if (filename !== ':memory:') mkdirSync(path.dirname(filename), { recursive: true })
+    this.db = new DatabaseSync(filename)
+    this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;')
+    this.migrate()
+  }
+
+  close(): void { this.db.close() }
+
+  private migrate(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS admin_credentials (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        password_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS platform_settings (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        base_prompt TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS workspaces (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        prompt TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS bots (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        app_id TEXT NOT NULL DEFAULT '',
+        app_secret_encrypted TEXT NOT NULL DEFAULT '',
+        prompt TEXT NOT NULL DEFAULT '',
+        permissions_json TEXT NOT NULL DEFAULT '[]',
+        reply_mode TEXT NOT NULL DEFAULT 'reply' CHECK (reply_mode IN ('reply', 'topic')),
+        default_workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS bot_workspaces (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        PRIMARY KEY (bot_id, workspace_id)
+      );
+      CREATE TABLE IF NOT EXISTS scenes (
+        id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        name TEXT NOT NULL,
+        prompt TEXT NOT NULL DEFAULT '',
+        priority INTEGER NOT NULL DEFAULT 100,
+        reply_mode TEXT NOT NULL DEFAULT 'inherit' CHECK (reply_mode IN ('inherit', 'reply', 'topic')),
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        matcher_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (bot_id, name)
+      );
+      CREATE TABLE IF NOT EXISTS skill_packages (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        prompt TEXT NOT NULL DEFAULT '',
+        skills_json TEXT NOT NULL DEFAULT '[]',
+        fallback_mode TEXT NOT NULL DEFAULT 'package_first' CHECK (fallback_mode IN ('package_first', 'mixed', 'package_only')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, name)
+      );
+      CREATE TABLE IF NOT EXISTS scene_skill_packages (
+        scene_id TEXT NOT NULL REFERENCES scenes(id) ON DELETE CASCADE,
+        skill_package_id TEXT NOT NULL REFERENCES skill_packages(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (scene_id, skill_package_id)
+      );
+      CREATE TABLE IF NOT EXISTS bot_operators (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        feishu_open_id TEXT NOT NULL,
+        PRIMARY KEY (bot_id, feishu_open_id)
+      );
+      CREATE TABLE IF NOT EXISTS group_scene_bindings (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL,
+        scene_id TEXT NOT NULL REFERENCES scenes(id) ON DELETE CASCADE,
+        bound_by TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (bot_id, chat_id)
+      );
+      CREATE TABLE IF NOT EXISTS conversation_routes (
+        id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        scene_id TEXT REFERENCES scenes(id) ON DELETE SET NULL,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        chat_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL DEFAULT '',
+        core_thread_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (bot_id, scene_id, chat_id, topic_id)
+      );
+      CREATE TABLE IF NOT EXISTS inbound_events (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        PRIMARY KEY (bot_id, event_id)
+      );
+      CREATE TABLE IF NOT EXISTS provisioning_jobs (
+        id TEXT PRIMARY KEY,
+        status TEXT NOT NULL CHECK (status IN ('starting', 'waiting_scan', 'creating', 'completed', 'failed', 'cancelled')),
+        request_json TEXT NOT NULL,
+        qr_url TEXT NOT NULL DEFAULT '',
+        expires_at TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        bot_id TEXT REFERENCES bots(id) ON DELETE SET NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_scenes_bot ON scenes(bot_id, enabled, priority);
+      CREATE INDEX IF NOT EXISTS idx_routes_chat ON conversation_routes(bot_id, chat_id, topic_id);
+      DELETE FROM inbound_events WHERE rowid NOT IN (SELECT MIN(rowid) FROM inbound_events GROUP BY bot_id, message_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_message ON inbound_events(bot_id, message_id);
+      CREATE INDEX IF NOT EXISTS idx_inbound_received ON inbound_events(received_at);
+    `)
+  }
+
+  hasAdmin(): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM admin_credentials WHERE id = 1').get())
+  }
+  getAdminHash(): string | null {
+    const row = this.db.prepare('SELECT password_hash FROM admin_credentials WHERE id = 1').get() as Row | undefined
+    return row ? String(row.password_hash) : null
+  }
+  setAdminHash(hash: string): void {
+    const timestamp = now()
+    this.db.prepare(`INSERT INTO admin_credentials (id, password_hash, created_at, updated_at) VALUES (1, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at`).run(hash, timestamp, timestamp)
+  }
+  createSession(tokenHash: string, expiresAt: string): void {
+    this.db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(now())
+    this.db.prepare('INSERT INTO auth_sessions (token_hash, expires_at, created_at) VALUES (?, ?, ?)').run(tokenHash, expiresAt, now())
+  }
+  hasSession(tokenHash: string): boolean {
+    return Boolean(this.db.prepare('SELECT 1 FROM auth_sessions WHERE token_hash = ? AND expires_at > ?').get(tokenHash, now()))
+  }
+  deleteSession(tokenHash: string): void { this.db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(tokenHash) }
+
+  getPlatformPrompt(): string {
+    const row = this.db.prepare('SELECT base_prompt FROM platform_settings WHERE id = 1').get() as Row | undefined
+    return row ? String(row.base_prompt) : ''
+  }
+  setPlatformPrompt(value: string): string {
+    this.db.prepare(`INSERT INTO platform_settings (id, base_prompt, updated_at) VALUES (1, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET base_prompt = excluded.base_prompt, updated_at = excluded.updated_at`).run(value, now())
+    return value
+  }
+
+  listWorkspaces(): WorkspaceRecord[] {
+    return (this.db.prepare('SELECT * FROM workspaces ORDER BY name COLLATE NOCASE').all() as Row[]).map(this.workspace)
+  }
+  createWorkspace(input: { name: string; path: string; prompt?: string }): WorkspaceRecord {
+    const id = randomUUID(), timestamp = now()
+    this.db.prepare('INSERT INTO workspaces (id, name, path, prompt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(id, input.name, input.path, input.prompt ?? '', timestamp, timestamp)
+    return this.getWorkspace(id)
+  }
+  updateWorkspace(id: string, input: { name: string; path: string; prompt?: string }): WorkspaceRecord {
+    const result = this.db.prepare('UPDATE workspaces SET name = ?, path = ?, prompt = ?, updated_at = ? WHERE id = ?')
+      .run(input.name, input.path, input.prompt ?? '', now(), id)
+    if (!result.changes) throw new Error('Workspace not found')
+    return this.getWorkspace(id)
+  }
+  deleteWorkspace(id: string): void {
+    const used = this.db.prepare(`SELECT
+      (SELECT COUNT(*) FROM bot_workspaces WHERE workspace_id = ?) +
+      (SELECT COUNT(*) FROM scenes WHERE workspace_id = ?) +
+      (SELECT COUNT(*) FROM skill_packages WHERE workspace_id = ?) AS count`).get(id, id, id) as Row
+    if (Number(used.count) > 0) throw new Error('Workspace is still used by a Bot, Scene, or Skill Package')
+    if (!this.db.prepare('DELETE FROM workspaces WHERE id = ?').run(id).changes) throw new Error('Workspace not found')
+  }
+  private getWorkspace(id: string): WorkspaceRecord {
+    const row = this.db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Workspace not found')
+    return this.workspace(row)
+  }
+  private workspace = (row: Row): WorkspaceRecord => ({
+    id: String(row.id), name: String(row.name), path: String(row.path), prompt: String(row.prompt),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  })
+
+  listBots(): BotRecord[] {
+    return (this.db.prepare('SELECT * FROM bots ORDER BY name COLLATE NOCASE').all() as Row[]).map(row => this.bot(row))
+  }
+  createBot(input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string; prompt?: string; permissions?: string[]; operatorIds?: string[]; replyMode?: 'reply' | 'topic'; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+    const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
+    this.assertWorkspaces(workspaceIds)
+    const id = randomUUID(), timestamp = now()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO bots (id, name, description, app_id, app_secret_encrypted, prompt, permissions_json, reply_mode, default_workspace_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.description ?? '', input.appId ?? '', input.appSecretEncrypted ?? '', input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.replyMode ?? 'reply', input.defaultWorkspaceId, timestamp, timestamp)
+      const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
+      for (const workspaceId of workspaceIds) add.run(id, workspaceId)
+      this.setBotOperators(id, input.operatorIds ?? [])
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    return this.getBot(id)
+  }
+  updateBot(id: string, input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string | null; prompt?: string; permissions?: string[]; operatorIds?: string[]; replyMode?: 'reply' | 'topic'; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+    const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
+    this.assertWorkspaces(workspaceIds)
+    const current = this.db.prepare('SELECT app_secret_encrypted FROM bots WHERE id = ?').get(id) as Row | undefined
+    if (!current) throw new Error('Bot not found')
+    const removed = this.db.prepare(`SELECT COUNT(*) AS count FROM scenes WHERE bot_id = ? AND workspace_id NOT IN (${workspaceIds.map(() => '?').join(',')})`).get(id, ...workspaceIds) as Row
+    if (Number(removed.count) > 0) throw new Error('A Scene still uses a Workspace removed from this Bot')
+    const secret = input.appSecretEncrypted === null || input.appSecretEncrypted === undefined ? String(current.app_secret_encrypted) : input.appSecretEncrypted
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`UPDATE bots SET name = ?, description = ?, app_id = ?, app_secret_encrypted = ?, prompt = ?, permissions_json = ?, reply_mode = ?, default_workspace_id = ?, updated_at = ? WHERE id = ?`)
+        .run(input.name, input.description ?? '', input.appId ?? '', secret, input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.replyMode ?? 'reply', input.defaultWorkspaceId, now(), id)
+      this.db.prepare('DELETE FROM bot_workspaces WHERE bot_id = ?').run(id)
+      const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
+      for (const workspaceId of workspaceIds) add.run(id, workspaceId)
+      this.db.prepare('DELETE FROM bot_operators WHERE bot_id = ?').run(id)
+      this.setBotOperators(id, input.operatorIds ?? [])
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    return this.getBot(id)
+  }
+  deleteBot(id: string): void {
+    if (!this.db.prepare('DELETE FROM bots WHERE id = ?').run(id).changes) throw new Error('Bot not found')
+  }
+  private getBot(id: string): BotRecord {
+    const row = this.db.prepare('SELECT * FROM bots WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Bot not found')
+    return this.bot(row)
+  }
+  private bot(row: Row): BotRecord {
+    const workspaceIds = (this.db.prepare('SELECT workspace_id FROM bot_workspaces WHERE bot_id = ? ORDER BY workspace_id').all(String(row.id)) as Row[]).map(item => String(item.workspace_id))
+    const operatorIds = (this.db.prepare('SELECT feishu_open_id FROM bot_operators WHERE bot_id = ? ORDER BY feishu_open_id').all(String(row.id)) as Row[]).map(item => String(item.feishu_open_id))
+    return { id: String(row.id), name: String(row.name), description: String(row.description), appId: String(row.app_id), hasAppSecret: Boolean(row.app_secret_encrypted), prompt: String(row.prompt), permissions: list(row.permissions_json), operatorIds, replyMode: String(row.reply_mode) as BotRecord['replyMode'], defaultWorkspaceId: String(row.default_workspace_id), workspaceIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+  }
+  private setBotOperators(botId: string, ids: string[]): void {
+    const add = this.db.prepare('INSERT OR IGNORE INTO bot_operators (bot_id, feishu_open_id) VALUES (?, ?)')
+    for (const id of [...new Set(ids.map(value => value.trim()).filter(Boolean))]) add.run(botId, id)
+  }
+  private assertWorkspaces(ids: string[]): void {
+    if (!ids.length) throw new Error('At least one Workspace is required')
+    const count = this.db.prepare(`SELECT COUNT(*) AS count FROM workspaces WHERE id IN (${ids.map(() => '?').join(',')})`).get(...ids) as Row
+    if (Number(count.count) !== ids.length) throw new Error('Workspace not found')
+  }
+
+  listScenes(): Array<SceneRecord & { skillPackageIds: string[] }> {
+    return (this.db.prepare('SELECT * FROM scenes ORDER BY priority ASC, name COLLATE NOCASE').all() as Row[]).map(row => this.scene(row))
+  }
+  createScene(input: Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt'> & { skillPackageIds?: string[] }): SceneRecord & { skillPackageIds: string[] } {
+    this.assertBotWorkspace(input.botId, input.workspaceId)
+    this.assertScenePackages(input.workspaceId, input.skillPackageIds ?? [])
+    const id = randomUUID(), timestamp = now()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO scenes (id, bot_id, workspace_id, name, prompt, priority, reply_mode, enabled, matcher_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.replyMode, input.enabled ? 1 : 0, JSON.stringify(input.matcher), timestamp, timestamp)
+      this.setScenePackages(id, input.skillPackageIds ?? [])
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    return this.getScene(id)
+  }
+  updateScene(id: string, input: Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt'> & { skillPackageIds?: string[] }): SceneRecord & { skillPackageIds: string[] } {
+    this.assertBotWorkspace(input.botId, input.workspaceId)
+    this.assertScenePackages(input.workspaceId, input.skillPackageIds ?? [])
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const result = this.db.prepare(`UPDATE scenes SET bot_id = ?, workspace_id = ?, name = ?, prompt = ?, priority = ?, reply_mode = ?, enabled = ?, matcher_json = ?, updated_at = ? WHERE id = ?`)
+        .run(input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.replyMode, input.enabled ? 1 : 0, JSON.stringify(input.matcher), now(), id)
+      if (!result.changes) throw new Error('Scene not found')
+      this.db.prepare('DELETE FROM scene_skill_packages WHERE scene_id = ?').run(id)
+      this.setScenePackages(id, input.skillPackageIds ?? [])
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    return this.getScene(id)
+  }
+  deleteScene(id: string): void { if (!this.db.prepare('DELETE FROM scenes WHERE id = ?').run(id).changes) throw new Error('Scene not found') }
+  private getScene(id: string): SceneRecord & { skillPackageIds: string[] } {
+    const row = this.db.prepare('SELECT * FROM scenes WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Scene not found')
+    return this.scene(row)
+  }
+  private scene(row: Row): SceneRecord & { skillPackageIds: string[] } {
+    const raw = JSON.parse(String(row.matcher_json)) as Partial<SceneRecord['matcher']>
+    const skillPackageIds = (this.db.prepare('SELECT skill_package_id FROM scene_skill_packages WHERE scene_id = ? ORDER BY position').all(String(row.id)) as Row[]).map(item => String(item.skill_package_id))
+    return { id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), replyMode: String(row.reply_mode) as SceneRecord['replyMode'], enabled: Boolean(row.enabled), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+  }
+  private assertBotWorkspace(botId: string, workspaceId: string): void {
+    if (!this.db.prepare('SELECT 1 FROM bot_workspaces WHERE bot_id = ? AND workspace_id = ?').get(botId, workspaceId)) throw new Error('Scene Workspace must be attached to its Bot')
+  }
+  private assertScenePackages(workspaceId: string, ids: string[]): void {
+    if (!ids.length) return
+    const count = this.db.prepare(`SELECT COUNT(*) AS count FROM skill_packages WHERE workspace_id = ? AND id IN (${ids.map(() => '?').join(',')})`).get(workspaceId, ...ids) as Row
+    if (Number(count.count) !== ids.length) throw new Error('Scene and Skill Package must use the same Workspace')
+  }
+  private setScenePackages(sceneId: string, ids: string[]): void {
+    const add = this.db.prepare('INSERT INTO scene_skill_packages (scene_id, skill_package_id, position) VALUES (?, ?, ?)')
+    ids.forEach((id, index) => add.run(sceneId, id, index))
+  }
+
+  listSkillPackages(): SkillPackageRecord[] {
+    return (this.db.prepare('SELECT * FROM skill_packages ORDER BY name COLLATE NOCASE').all() as Row[]).map(this.skillPackage)
+  }
+  createSkillPackage(input: Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'>): SkillPackageRecord {
+    this.assertWorkspaces([input.workspaceId])
+    const id = randomUUID(), timestamp = now()
+    this.db.prepare(`INSERT INTO skill_packages (id, workspace_id, name, description, prompt, skills_json, fallback_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, input.workspaceId, input.name, input.description, input.prompt, JSON.stringify(input.skills), input.fallbackMode, timestamp, timestamp)
+    return this.getSkillPackage(id)
+  }
+  updateSkillPackage(id: string, input: Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'>): SkillPackageRecord {
+    this.assertWorkspaces([input.workspaceId])
+    const incompatible = this.db.prepare(`SELECT COUNT(*) AS count FROM scene_skill_packages ssp JOIN scenes s ON s.id = ssp.scene_id WHERE ssp.skill_package_id = ? AND s.workspace_id <> ?`).get(id, input.workspaceId) as Row
+    if (Number(incompatible.count) > 0) throw new Error('Linked Scenes use a different Workspace')
+    const result = this.db.prepare(`UPDATE skill_packages SET workspace_id = ?, name = ?, description = ?, prompt = ?, skills_json = ?, fallback_mode = ?, updated_at = ? WHERE id = ?`)
+      .run(input.workspaceId, input.name, input.description, input.prompt, JSON.stringify(input.skills), input.fallbackMode, now(), id)
+    if (!result.changes) throw new Error('Skill Package not found')
+    return this.getSkillPackage(id)
+  }
+  deleteSkillPackage(id: string): void { if (!this.db.prepare('DELETE FROM skill_packages WHERE id = ?').run(id).changes) throw new Error('Skill Package not found') }
+  private getSkillPackage(id: string): SkillPackageRecord {
+    const row = this.db.prepare('SELECT * FROM skill_packages WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Skill Package not found')
+    return this.skillPackage(row)
+  }
+  private skillPackage = (row: Row): SkillPackageRecord => ({ id: String(row.id), workspaceId: String(row.workspace_id), name: String(row.name), description: String(row.description), prompt: String(row.prompt), skills: list(row.skills_json), fallbackMode: String(row.fallback_mode) as SkillPackageRecord['fallbackMode'], createdAt: String(row.created_at), updatedAt: String(row.updated_at) })
+
+  stats(): { workspaces: number; bots: number; scenes: number; skillPackages: number } {
+    const count = (table: string) => Number((this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as Row).count)
+    const enabledScenes = Number((this.db.prepare('SELECT COUNT(*) AS count FROM scenes WHERE enabled = 1').get() as Row).count)
+    return { workspaces: count('workspaces'), bots: count('bots'), scenes: enabledScenes, skillPackages: count('skill_packages') }
+  }
+
+  getBotSecret(botId: string): string {
+    const row = this.db.prepare('SELECT app_secret_encrypted FROM bots WHERE id = ?').get(botId) as Row | undefined
+    if (!row) throw new Error('Bot not found')
+    return String(row.app_secret_encrypted)
+  }
+
+  bindGroupScene(botId: string, chatId: string, sceneId: string, actorId: string): void {
+    const scene = this.getScene(sceneId)
+    if (scene.botId !== botId) throw new Error('Scene does not belong to this Bot')
+    const timestamp = now()
+    this.db.prepare(`INSERT INTO group_scene_bindings (bot_id, chat_id, scene_id, bound_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(bot_id, chat_id) DO UPDATE SET scene_id = excluded.scene_id, bound_by = excluded.bound_by, updated_at = excluded.updated_at`)
+      .run(botId, chatId, sceneId, actorId, timestamp, timestamp)
+  }
+
+  resolveRoute(botId: string, message: ChannelInboundMessage): ResolvedRoute {
+    const bot = this.getBot(botId)
+    const binding = this.db.prepare('SELECT scene_id FROM group_scene_bindings WHERE bot_id = ? AND chat_id = ?').get(botId, message.conversation.id) as Row | undefined
+    const candidates = this.listScenes().filter(scene => scene.botId === botId && scene.enabled)
+    const bound = binding ? candidates.find(scene => scene.id === String(binding.scene_id)) ?? null : null
+    const scene = bound ?? candidates.find(candidate => this.sceneMatches(candidate, message)) ?? null
+    const workspace = this.getWorkspace(scene?.workspaceId ?? bot.defaultWorkspaceId)
+    const packages = scene ? this.listSkillPackages().filter(item => scene.skillPackageIds.includes(item.id)) : []
+    const replyMode = scene?.replyMode && scene.replyMode !== 'inherit' ? scene.replyMode : bot.replyMode
+    const topic = replyMode === 'topic' ? (message.conversation.rootId || message.messageId) : ''
+    const conversationKey = scene ? `scene:${bot.id}:${scene.id}:${message.conversation.id}` : topic ? `chat:${bot.id}:${message.conversation.id}:topic:${topic}` : `chat:${bot.id}:${message.conversation.id}`
+    const layers = [this.getPlatformPrompt(), workspace.prompt, bot.prompt, scene?.prompt ?? '', ...packages.map(item => item.prompt)]
+      .map(value => value.trim()).filter(Boolean)
+    return { bot, workspace, scene, skillPackages: packages, replyMode, conversationKey, systemPrompt: layers.join('\n\n') }
+  }
+
+  messageMatchesScene(sceneId: string, message: ChannelInboundMessage): boolean {
+    return this.sceneMatches(this.getScene(sceneId), message)
+  }
+
+  getOrCreateConversation(route: ResolvedRoute, chatId: string, topicId: string): { id: string; threadId: string } {
+    const existing = this.db.prepare('SELECT id, core_thread_id FROM conversation_routes WHERE id = ?').get(route.conversationKey) as Row | undefined
+    if (existing) return { id: String(existing.id), threadId: String(existing.core_thread_id) }
+    const timestamp = now()
+    this.db.prepare(`INSERT INTO conversation_routes (id, bot_id, scene_id, workspace_id, chat_id, topic_id, core_thread_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)`)
+      .run(route.conversationKey, route.bot.id, route.scene?.id ?? null, route.workspace.id, chatId, topicId, timestamp, timestamp)
+    return { id: route.conversationKey, threadId: '' }
+  }
+
+  setConversationThread(id: string, threadId: string): void {
+    this.db.prepare('UPDATE conversation_routes SET core_thread_id = ?, updated_at = ? WHERE id = ?').run(threadId, now(), id)
+  }
+
+  claimInboundEvent(botId: string, eventId: string, messageId: string): boolean {
+    this.db.prepare('DELETE FROM inbound_events WHERE received_at < ?').run(new Date(Date.now() - 8 * 60 * 60_000).toISOString())
+    const result = this.db.prepare('INSERT OR IGNORE INTO inbound_events (bot_id, event_id, message_id, received_at) VALUES (?, ?, ?, ?)').run(botId, eventId, messageId, now())
+    return result.changes > 0
+  }
+
+  createProvisioningJob(request: Record<string, unknown>): ProvisioningJobRecord {
+    const id = randomUUID(), timestamp = now()
+    this.db.prepare(`INSERT INTO provisioning_jobs (id, status, request_json, created_at, updated_at) VALUES (?, 'starting', ?, ?, ?)`)
+      .run(id, JSON.stringify(request), timestamp, timestamp)
+    return this.getProvisioningJob(id)
+  }
+
+  getProvisioningJob(id: string): ProvisioningJobRecord {
+    const row = this.db.prepare('SELECT * FROM provisioning_jobs WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Provisioning job not found')
+    return this.provisioningJob(row)
+  }
+
+  getProvisioningRequest(id: string): Record<string, unknown> {
+    const row = this.db.prepare('SELECT request_json FROM provisioning_jobs WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Provisioning job not found')
+    return JSON.parse(String(row.request_json)) as Record<string, unknown>
+  }
+
+  listProvisioningJobs(): ProvisioningJobRecord[] {
+    return (this.db.prepare('SELECT * FROM provisioning_jobs ORDER BY created_at DESC LIMIT 50').all() as Row[]).map(this.provisioningJob)
+  }
+
+  updateProvisioningJob(id: string, update: Partial<{ status: ProvisioningJobRecord['status']; qrUrl: string; expiresAt: string; error: string; botId: string }>): ProvisioningJobRecord {
+    const current = this.getProvisioningJob(id)
+    this.db.prepare('UPDATE provisioning_jobs SET status = ?, qr_url = ?, expires_at = ?, error = ?, bot_id = ?, updated_at = ? WHERE id = ?')
+      .run(update.status ?? current.status, update.qrUrl ?? current.qrUrl, update.expiresAt ?? current.expiresAt, update.error ?? current.error, (update.botId ?? current.botId) || null, now(), id)
+    return this.getProvisioningJob(id)
+  }
+
+  failInterruptedProvisioningJobs(): void {
+    this.db.prepare(`UPDATE provisioning_jobs SET status = 'failed', qr_url = '', error = '服务重启中断了扫码注册，请重新发起', updated_at = ? WHERE status IN ('starting', 'waiting_scan', 'creating')`).run(now())
+  }
+
+  private provisioningJob = (row: Row): ProvisioningJobRecord => ({
+    id: String(row.id), status: String(row.status) as ProvisioningJobRecord['status'], qrUrl: String(row.qr_url), expiresAt: String(row.expires_at), error: String(row.error), botId: String(row.bot_id ?? ''), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  })
+
+  private sceneMatches(scene: SceneRecord, message: ChannelInboundMessage): boolean {
+    const matcher = scene.matcher
+    const includes = (values: string[], target: string) => values.length === 0 || values.some(value => target.toLocaleLowerCase().includes(value.toLocaleLowerCase()))
+    if (matcher.chatIds.length && !matcher.chatIds.includes(message.conversation.id)) return false
+    if (matcher.messageTypes.length && !matcher.messageTypes.includes(message.content?.type ?? '')) return false
+    if (!includes(matcher.textIncludes, message.text)) return false
+    if (!includes(matcher.cardTitleIncludes, message.content?.title ?? '')) return false
+    return true
+  }
+}

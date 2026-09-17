@@ -1,0 +1,159 @@
+import { createHash } from 'node:crypto'
+import path from 'node:path'
+import { FeishuProvider, feishuMarkdownCards, feishuSelectionCard, feishuTextCard, type FeishuCard, type FeishuCardAction } from '@codycodeagent/cody-web-core/feishu'
+import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
+import type { SecretVault } from './crypto.js'
+import type { HubStore } from './db.js'
+import type { CodyBotRuntime, RuntimeAttachment } from './runtime.js'
+import type { ResolvedRoute } from './types.js'
+
+type ManagedProvider = { provider: FeishuProvider; fingerprint: string }
+
+export class FeishuBotManager {
+  private readonly providers = new Map<string, ManagedProvider>()
+  private readonly conversationQueues = new Map<string, Promise<void>>()
+  private reloadTail = Promise.resolve()
+
+  constructor(
+    private readonly store: HubStore,
+    private readonly vault: SecretVault,
+    private readonly runtime: CodyBotRuntime,
+    private readonly attachmentRoot: string,
+  ) {}
+
+  reload(): Promise<void> {
+    this.reloadTail = this.reloadTail.then(() => this.reloadNow()).catch(error => console.error('[feishu] reload failed:', error))
+    return this.reloadTail
+  }
+
+  stop(): void {
+    for (const managed of this.providers.values()) managed.provider.stop()
+    this.providers.clear()
+  }
+
+  private async reloadNow(): Promise<void> {
+    const configured = new Map(this.store.listBots().filter(bot => bot.appId && bot.hasAppSecret).map(bot => [bot.id, bot]))
+    for (const [botId, managed] of this.providers) {
+      const bot = configured.get(botId)
+      const fingerprint = bot ? `${bot.appId}:${bot.updatedAt}` : ''
+      if (!bot || fingerprint !== managed.fingerprint) { managed.provider.stop(); this.providers.delete(botId) }
+    }
+    for (const [botId, bot] of configured) {
+      if (this.providers.has(botId)) continue
+      const encrypted = this.store.getBotSecret(botId)
+      const provider = new FeishuProvider({ accountId: botId, appId: bot.appId, appSecret: this.vault.decrypt(encrypted), privateConversationMode: 'chat' })
+      this.providers.set(botId, { provider, fingerprint: `${bot.appId}:${bot.updatedAt}` })
+      try {
+        await provider.identity()
+        await provider.start({
+          onMessage: message => this.acceptMessage(botId, provider, message),
+          onAction: action => this.onAction(botId, provider, action),
+          onState: (state, error) => console[state === 'failed' ? 'error' : 'info'](`[feishu:${bot.name}] ${state}${error ? `: ${error.message}` : ''}`),
+        })
+      } catch (error) {
+        this.providers.delete(botId)
+        provider.stop()
+        console.error(`[feishu:${bot.name}] start failed:`, error)
+      }
+    }
+  }
+
+  private async acceptMessage(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
+    if (!this.store.claimInboundEvent(botId, message.eventId, message.messageId)) return
+    const anchor = [botId, message.conversation.id, message.conversation.rootId ?? 'chat'].join(':')
+    const previous = this.conversationQueues.get(anchor) ?? Promise.resolve()
+    const current = previous.catch(() => undefined).then(() => this.onMessage(botId, provider, message))
+    this.conversationQueues.set(anchor, current)
+    const cleanup = () => { if (this.conversationQueues.get(anchor) === current) this.conversationQueues.delete(anchor) }
+    void current.then(cleanup, cleanup)
+    return current
+  }
+
+  private async onMessage(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
+    const route = this.store.resolveRoute(botId, message)
+    // Cards and alerts are normally authored by apps. Accept them only when
+    // their content independently matches a Scene; a group binding alone must
+    // not turn every bot message into an agent turn or create reply loops.
+    if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !route.scene || !this.store.messageMatchesScene(route.scene.id, message))) return
+    if (!route.scene && message.conversation.scope !== 'private' && !message.addressedToAgent) return
+    if (!route.scene) await this.sendScenePicker(botId, provider, message)
+    try {
+      const attachments = await this.downloadAttachments(botId, provider, message)
+      const text = await this.runtime.execute(route, message, attachments)
+      const cards = feishuMarkdownCards(text, { note: this.responseNote(route) })
+      for (let index = 0; index < cards.length; index += 1) {
+        await this.replyCard(provider, message.messageId, cards[index]!, route.replyMode === 'topic', `${message.eventId}:answer:${index}`)
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      await this.replyCard(provider, message.messageId, feishuTextCard('CodyBotHub 运行失败', detail, { color: 'red' }), route.replyMode === 'topic', `${message.eventId}:error`).catch(sendError => console.error('[feishu] failed to send error card:', sendError))
+    }
+  }
+
+  private async downloadAttachments(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<RuntimeAttachment[]> {
+    if (!message.attachments.length) return []
+    const messageKey = createHash('sha256').update(message.messageId).digest('hex').slice(0, 24)
+    const directory = path.join(this.attachmentRoot, botId, messageKey)
+    return Promise.all(message.attachments.map(async attachment => {
+      const downloaded = await provider.downloadAttachment(message.messageId, attachment, directory)
+      return { ...attachment, ...downloaded }
+    }))
+  }
+
+  private responseNote(route: ResolvedRoute): string {
+    const permissions = new Set(route.bot.permissions)
+    const sandbox = permissions.has('sandbox:danger-full-access')
+      ? 'YOLO'
+      : permissions.has('filesystem:read-only') ? '只读' : '工作区写入'
+    const network = permissions.has('network:deny') ? '禁用网络' : '允许网络'
+    return [
+      `工作区：${route.workspace.name}`,
+      `场景：${route.scene?.name ?? '默认路由'}`,
+      `技能包：${route.skillPackages.map(item => item.name).join('、') || '无'}`,
+      `权限：${sandbox} · ${network}`,
+    ].join('  |  ')
+  }
+
+  private async sendScenePicker(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
+    const scenes = this.store.listScenes().filter(scene => scene.botId === botId && scene.enabled)
+    if (!scenes.length || message.conversation.scope === 'private') return
+    const card = feishuSelectionCard('选择群场景', '这条消息已经在默认工作区中处理。选择场景后，后续消息会固定使用该场景的工作区、Prompt 和技能包。', scenes.map(scene => ({ text: scene.name, value: { action: 'bind_scene', botId, chatId: message.conversation.id, sceneId: scene.id } })), '只有 Bot 管理员或平台中配置的操作人可以保存绑定。')
+    await this.replyCard(provider, message.messageId, card, false, `${message.eventId}:scene-picker`)
+  }
+
+  private async onAction(botId: string, provider: FeishuProvider, action: FeishuCardAction): Promise<Record<string, unknown>> {
+    if (action.value.action !== 'bind_scene' || action.value.botId !== botId) return { toast: { type: 'warning', content: '这个操作已失效' } }
+    const bot = this.store.listBots().find(item => item.id === botId)
+    if (!bot) return { toast: { type: 'error', content: 'Bot 不存在' } }
+    let allowed = bot.operatorIds.includes(action.actorId)
+    if (!bot.operatorIds.length) {
+      try { allowed = (await provider.applicationAdministrators()).administratorIds.includes(action.actorId) }
+      catch { allowed = false }
+    }
+    if (!allowed) return { toast: { type: 'error', content: '你没有绑定群场景的权限' } }
+    const chatId = String(action.value.chatId ?? ''), sceneId = String(action.value.sceneId ?? '')
+    if (!chatId || !sceneId) return { toast: { type: 'error', content: '场景参数不完整' } }
+    this.store.bindGroupScene(botId, chatId, sceneId, action.actorId)
+    const scene = this.store.listScenes().find(item => item.id === sceneId)
+    if (action.remoteMessageId) await this.retryDelivery(provider, () => provider.updateCard(action.remoteMessageId, feishuTextCard('群场景已绑定', `后续消息将使用场景：**${scene?.name ?? sceneId}**`, { color: 'green' })))
+    return { toast: { type: 'success', content: '场景已绑定' } }
+  }
+
+  private replyCard(provider: FeishuProvider, messageId: string, card: FeishuCard, replyInThread: boolean, uuid: string): Promise<string> {
+    return this.retryDelivery(provider, () => provider.replyCard(messageId, card, replyInThread, uuid))
+  }
+
+  private async retryDelivery<T>(provider: FeishuProvider, operation: () => Promise<T>): Promise<T> {
+    const delays = [0, 250, 1_000]
+    let lastError: unknown
+    for (const delay of delays) {
+      if (delay) await new Promise(resolve => setTimeout(resolve, delay))
+      try { return await operation() }
+      catch (error) {
+        lastError = error
+        if (!provider.classifyError(error).retryable) throw error
+      }
+    }
+    throw lastError
+  }
+}
