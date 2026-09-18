@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { BookOpen, CheckCircle2, Code2, Download, LibraryBig, RefreshCw, Search, ShieldAlert } from 'lucide-vue-next'
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { api } from '../api'
 import type { SkillCatalogItem, SkillSource, Workspace, WorkspaceResources } from '../types'
 
@@ -26,6 +26,7 @@ const load = async () => {
     resources.value = workspaceResources
   } catch (value) { error.value = value instanceof Error ? value.message : '加载失败' } finally { loading.value = false }
 }
+const loadAfterFilterChange = async () => { await nextTick(); await load() }
 onMounted(() => { void load() })
 const toggleAll = () => { selected.value = selected.value.length === selectable.value.length ? [] : selectable.value.map(selectionKey) }
 const selectConflicts = () => { selected.value = conflicts.value.map(selectionKey) }
@@ -61,7 +62,7 @@ const syncSource = async (source: SkillSource) => {
     <div class="skill-summary">
       <div><strong>{{ items.length }}</strong><span>当前结果</span></div><div><strong>{{ items.filter(item => item.status === 'installed').length }}</strong><span>已安装</span></div><div><strong>{{ items.filter(item => item.status === 'update_available').length }}</strong><span>有更新</span></div><div><strong>{{ items.filter(item => item.status === 'local').length }}</strong><span>本地 Skill</span></div>
     </div>
-    <div class="filter-bar skill-filter"><select v-model="workspaceId" @change="load"><option value="">全部工作区</option><option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">{{ workspace.name }}</option></select><select v-model="sourceId" @change="load"><option value="">全部来源</option><option v-for="source in sources" :key="source.id" :value="source.id">{{ source.name }}</option></select><select v-model="status" @change="load"><option value="">全部状态</option><option v-for="(label, value) in statusLabel" :key="value" :value="value">{{ label }}</option></select><div class="filter-search"><Search :size="16" /><input v-model="query" placeholder="搜索名称、描述、来源、路径…" @keyup.enter="load" /></div><button class="button" @click="load">查询</button></div>
+    <div class="filter-bar skill-filter"><select v-model="workspaceId" @change="loadAfterFilterChange"><option value="">全部工作区</option><option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">{{ workspace.name }}</option></select><select v-model="sourceId" @change="loadAfterFilterChange"><option value="">全部来源</option><option v-for="source in sources" :key="source.id" :value="source.id">{{ source.name }}</option></select><select v-model="status" @change="loadAfterFilterChange"><option value="">全部状态</option><option v-for="(label, value) in statusLabel" :key="value" :value="value">{{ label }}</option></select><div class="filter-search"><Search :size="16" /><input v-model="query" placeholder="搜索名称、描述、来源、路径…" @keyup.enter="load" /></div><button class="button" @click="load">查询</button></div>
     <div v-if="sources.length" class="source-toolbar"><span>远程同步：</span><button v-for="source in sources" :key="source.id" class="ghost-button compact" :disabled="working" @click="syncSource(source)"><RefreshCw :size="13" />{{ source.name }}</button></div>
     <div v-if="error" class="error-banner" role="alert">{{ error }}</div><div v-if="notice" class="notice" role="status">{{ notice }}</div>
     <section class="panel">
