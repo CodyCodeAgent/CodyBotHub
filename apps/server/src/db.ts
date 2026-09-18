@@ -36,6 +36,7 @@ export class HubStore {
         login_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
         display_name TEXT NOT NULL,
         password_hash TEXT NOT NULL,
+        is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
         enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
         last_login_at TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
@@ -204,13 +205,18 @@ export class HubStore {
     `)
     const sessionColumns = this.db.prepare('PRAGMA table_info(auth_sessions)').all() as Row[]
     if (!sessionColumns.some(column => String(column.name) === 'account_id')) this.db.exec("ALTER TABLE auth_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+    const accountColumns = this.db.prepare('PRAGMA table_info(admin_accounts)').all() as Row[]
+    if (!accountColumns.some(column => String(column.name) === 'is_primary')) this.db.exec('ALTER TABLE admin_accounts ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1))')
     const legacy = this.db.prepare('SELECT password_hash, created_at, updated_at FROM admin_credentials WHERE id = 1').get() as Row | undefined
     if (legacy && !(this.db.prepare('SELECT 1 FROM admin_accounts LIMIT 1').get())) {
-      this.db.prepare('INSERT INTO admin_accounts (id, login_name, display_name, password_hash, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)')
+      this.db.prepare('INSERT INTO admin_accounts (id, login_name, display_name, password_hash, is_primary, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1, ?, ?)')
         .run('legacy-admin', 'admin', '管理员', String(legacy.password_hash), String(legacy.created_at), String(legacy.updated_at))
     }
     const firstAccount = this.db.prepare('SELECT id FROM admin_accounts ORDER BY created_at LIMIT 1').get() as Row | undefined
-    if (firstAccount) this.db.prepare("UPDATE auth_sessions SET account_id = ? WHERE account_id = ''").run(String(firstAccount.id))
+    if (firstAccount) {
+      if (!this.db.prepare('SELECT 1 FROM admin_accounts WHERE is_primary = 1 LIMIT 1').get()) this.db.prepare('UPDATE admin_accounts SET is_primary = 1 WHERE id = ?').run(String(firstAccount.id))
+      this.db.prepare("UPDATE auth_sessions SET account_id = ? WHERE account_id = ''").run(String(firstAccount.id))
+    }
   }
 
   hasAdmin(): boolean {
@@ -230,8 +236,9 @@ export class HubStore {
   }
   createAdminAccount(input: { loginName: string; displayName: string; passwordHash: string }): AdminAccountRecord {
     const id = randomUUID(), timestamp = now()
-    this.db.prepare('INSERT INTO admin_accounts (id, login_name, display_name, password_hash, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)')
-      .run(id, input.loginName, input.displayName, input.passwordHash, timestamp, timestamp)
+    const primary = this.db.prepare('SELECT 1 FROM admin_accounts LIMIT 1').get() ? 0 : 1
+    this.db.prepare('INSERT INTO admin_accounts (id, login_name, display_name, password_hash, is_primary, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)')
+      .run(id, input.loginName, input.displayName, input.passwordHash, primary, timestamp, timestamp)
     return this.getAdminAccount(id)
   }
   updateAdminAccount(id: string, input: { loginName: string; displayName: string; passwordHash?: string }): AdminAccountRecord {
@@ -243,13 +250,14 @@ export class HubStore {
     return this.getAdminAccount(id)
   }
   deleteAdminAccount(id: string): void {
+    if (this.getAdminAccount(id).primary) throw new Error('Cannot delete the primary administrator account')
     if (this.listAdminAccounts().filter(item => item.enabled).length <= 1) throw new Error('Cannot delete the last administrator account')
     this.db.prepare('DELETE FROM auth_sessions WHERE account_id = ?').run(id)
     if (!this.db.prepare('DELETE FROM admin_accounts WHERE id = ?').run(id).changes) throw new Error('Account not found')
   }
   touchAdminLogin(id: string): void { this.db.prepare('UPDATE admin_accounts SET last_login_at = ? WHERE id = ?').run(now(), id) }
   private adminAccount = (row: Row): AdminAccountRecord => ({
-    id: String(row.id), loginName: String(row.login_name), displayName: String(row.display_name), enabled: Boolean(row.enabled),
+    id: String(row.id), loginName: String(row.login_name), displayName: String(row.display_name), primary: Boolean(row.is_primary), enabled: Boolean(row.enabled),
     lastLoginAt: String(row.last_login_at), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   })
 

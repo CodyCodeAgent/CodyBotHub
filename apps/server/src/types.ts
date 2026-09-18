@@ -104,6 +104,7 @@ export interface AdminAccountRecord {
   id: string
   loginName: string
   displayName: string
+  primary: boolean
   enabled: boolean
   lastLoginAt: string
   createdAt: string
