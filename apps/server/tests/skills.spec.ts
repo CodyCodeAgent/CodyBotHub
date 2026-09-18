@@ -17,7 +17,8 @@ describe('SkillSyncService', () => {
     const sourceRepository = temporary('codybothub-skill-source-')
     mkdirSync(path.join(sourceRepository, 'skills', 'demo-skill'), { recursive: true })
     writeFileSync(path.join(sourceRepository, 'skills', 'demo-skill', 'SKILL.md'), '---\nname: demo-skill\ndescription: First version\n---\n# Demo\n')
-    git(sourceRepository, 'init', '-b', 'main')
+    git(sourceRepository, 'init')
+    git(sourceRepository, 'checkout', '-b', 'main')
     git(sourceRepository, 'add', '.')
     git(sourceRepository, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'initial')
 
