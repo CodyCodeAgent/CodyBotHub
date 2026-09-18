@@ -1,4 +1,4 @@
-import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, Workspace } from './types'
+import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -65,6 +65,7 @@ export const api = {
     for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value)
     return request<SkillCatalogItem[]>(`/skill-catalog${params.size ? `?${params.toString()}` : ''}`)
   },
+  workspaceResources: (workspaceId: string, query = '') => request<WorkspaceResources>(`/workspace-resources?workspaceId=${encodeURIComponent(workspaceId)}${query ? `&query=${encodeURIComponent(query)}` : ''}`),
   installSkills: (value: { sourceId: string; workspaceId: string; skillKeys?: string[]; all?: boolean; force?: boolean }) => request<{ installed: number; skipped: number; errors: string[] }>('/skill-catalog/install', { method: 'POST', body: JSON.stringify(value) }),
   feishuMessageTypes: () => request<MessageTypeOption[]>('/feishu/message-types'),
   saveWorkspace: (value: Partial<Workspace> & { name: string; path: string }) => request<Workspace>(value.id ? `/workspaces/${value.id}` : '/workspaces', { method: value.id ? 'PUT' : 'POST', body: JSON.stringify(value) }),

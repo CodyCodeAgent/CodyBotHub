@@ -157,6 +157,10 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (method === 'GET' && url.pathname === '/api/skill-catalog') {
           return sendJson(response, 200, await skills.catalog({ workspaceId: url.searchParams.get('workspaceId') ?? '', sourceId: url.searchParams.get('sourceId') ?? '', status: url.searchParams.get('status') ?? '', query: url.searchParams.get('query') ?? '' }))
         }
+        if (method === 'GET' && url.pathname === '/api/workspace-resources') {
+          const workspace = store.getWorkspace(url.searchParams.get('workspaceId') ?? '')
+          return sendJson(response, 200, await runtime.workspaceResources(workspace.path, url.searchParams.get('query') ?? ''))
+        }
         if (method === 'POST' && url.pathname === '/api/skill-catalog/install') {
           const body = await readJson(request)
           const result = await skills.install({ sourceId: required(body, 'sourceId'), workspaceId: required(body, 'workspaceId'), skillKeys: stringList(body.skillKeys), all: bool(body.all), force: bool(body.force) })

@@ -98,6 +98,29 @@ export interface SkillPackageRecord {
   updatedAt: string
 }
 
+export interface InvestigationSkillRecord {
+  name: string
+  description: string
+  path: string
+}
+
+export interface InvestigationToolRecord {
+  kind: string
+  title: string
+  summary: string
+  status: string
+}
+
+export interface InvestigationTraceRecord {
+  mode: 'package_only' | 'package_first' | 'mixed' | 'workspace'
+  primarySkills: InvestigationSkillRecord[]
+  candidateSkills: InvestigationSkillRecord[]
+  knowledgeResources: Array<{ title: string; path: string }>
+  knowledgeRoots: string[]
+  codeRoot: string
+  tools: InvestigationToolRecord[]
+}
+
 export interface MessageLogRecord {
   id: string
   eventId: string
@@ -109,6 +132,7 @@ export interface MessageLogRecord {
   senderId: string
   messageType: string
   inboundContent: string
+  inboundRaw: unknown
   responseContent: string
   status: 'processing' | 'completed' | 'failed'
   error: string
@@ -117,6 +141,7 @@ export interface MessageLogRecord {
   sceneId: string
   sceneName: string
   skillPackages: Array<{ id: string; name: string }>
+  investigation: InvestigationTraceRecord
   model: string
   reasoningEffort: string
   modelSource: ModelConfigSource

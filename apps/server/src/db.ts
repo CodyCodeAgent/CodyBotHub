@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 
 type Row = Record<string, unknown>
@@ -212,6 +212,7 @@ export class HubStore {
         sender_id TEXT NOT NULL DEFAULT '',
         message_type TEXT NOT NULL,
         inbound_content TEXT NOT NULL,
+        inbound_raw_json TEXT NOT NULL DEFAULT 'null',
         response_content TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL CHECK (status IN ('processing', 'completed', 'failed')),
         error TEXT NOT NULL DEFAULT '',
@@ -220,6 +221,7 @@ export class HubStore {
         scene_id TEXT NOT NULL DEFAULT '',
         scene_name TEXT NOT NULL DEFAULT '',
         skill_packages_json TEXT NOT NULL DEFAULT '[]',
+        investigation_json TEXT NOT NULL DEFAULT '{}',
         model TEXT NOT NULL DEFAULT '',
         reasoning_effort TEXT NOT NULL DEFAULT '',
         model_source TEXT NOT NULL DEFAULT 'codex',
@@ -298,6 +300,8 @@ export class HubStore {
     if (!messageLogColumns.some(column => String(column.name) === 'model_source')) this.db.exec("ALTER TABLE message_logs ADD COLUMN model_source TEXT NOT NULL DEFAULT 'codex'")
     if (!messageLogColumns.some(column => String(column.name) === 'reasoning_effort_source')) this.db.exec("ALTER TABLE message_logs ADD COLUMN reasoning_effort_source TEXT NOT NULL DEFAULT 'codex'")
     if (!messageLogColumns.some(column => String(column.name) === 'model_fallback')) this.db.exec('ALTER TABLE message_logs ADD COLUMN model_fallback INTEGER NOT NULL DEFAULT 0 CHECK (model_fallback IN (0, 1))')
+    if (!messageLogColumns.some(column => String(column.name) === 'inbound_raw_json')) this.db.exec("ALTER TABLE message_logs ADD COLUMN inbound_raw_json TEXT NOT NULL DEFAULT 'null'")
+    if (!messageLogColumns.some(column => String(column.name) === 'investigation_json')) this.db.exec("ALTER TABLE message_logs ADD COLUMN investigation_json TEXT NOT NULL DEFAULT '{}'")
     const sessionColumns = this.db.prepare('PRAGMA table_info(auth_sessions)').all() as Row[]
     if (!sessionColumns.some(column => String(column.name) === 'account_id')) this.db.exec("ALTER TABLE auth_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
     const accountColumns = this.db.prepare('PRAGMA table_info(admin_accounts)').all() as Row[]
@@ -674,14 +678,14 @@ export class HubStore {
     const startedAt = now()
     this.db.prepare(`INSERT INTO message_logs (
       id, event_id, message_id, bot_id, bot_name, chat_id, topic_id, sender_id,
-      message_type, inbound_content, status, workspace_id, workspace_name,
-      scene_id, scene_name, skill_packages_json, model, reasoning_effort, model_source,
+      message_type, inbound_content, inbound_raw_json, status, workspace_id, workspace_name,
+      scene_id, scene_name, skill_packages_json, investigation_json, model, reasoning_effort, model_source,
       reasoning_effort_source, model_fallback, received_at, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?)`)
       .run(
         id, message.eventId, message.messageId, botId, route.bot.name,
         message.conversation.id, route.topicId, message.sender.id,
-        message.content?.type ?? 'unknown', message.text.slice(0, 200_000),
+        message.content?.type ?? 'unknown', message.text.slice(0, 200_000), JSON.stringify(message.content?.raw ?? null).slice(0, 500_000),
         route.workspace.id, route.workspace.name, route.scene?.id ?? '', route.scene?.name ?? '',
         JSON.stringify(route.skillPackages.map(item => ({ id: item.id, name: item.name }))),
         route.modelConfig.model, route.modelConfig.reasoningEffort, route.modelConfig.modelSource, route.modelConfig.reasoningEffortSource,
@@ -718,6 +722,11 @@ export class HubStore {
     return this.getMessageLog(id)
   }
 
+  setMessageLogInvestigation(id: string, trace: InvestigationTraceRecord): MessageLogRecord {
+    this.db.prepare('UPDATE message_logs SET investigation_json = ? WHERE id = ?').run(JSON.stringify(trace).slice(0, 500_000), id)
+    return this.getMessageLog(id)
+  }
+
   listMessageLogs(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}): { items: MessageLogRecord[]; total: number } {
     const filters: string[] = []
     const params: Array<string | number> = []
@@ -746,10 +755,21 @@ export class HubStore {
   private messageLog = (row: Row): MessageLogRecord => ({
     id: String(row.id), eventId: String(row.event_id), messageId: String(row.message_id),
     botId: String(row.bot_id), botName: String(row.bot_name), chatId: String(row.chat_id), topicId: String(row.topic_id), senderId: String(row.sender_id),
-    messageType: String(row.message_type), inboundContent: String(row.inbound_content), responseContent: String(row.response_content),
+    messageType: String(row.message_type), inboundContent: String(row.inbound_content),
+    inboundRaw: (() => { try { return JSON.parse(String(row.inbound_raw_json)) as unknown } catch { return null } })(),
+    responseContent: String(row.response_content),
     status: String(row.status) as MessageLogRecord['status'], error: String(row.error),
     workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), sceneId: String(row.scene_id), sceneName: String(row.scene_name),
     skillPackages: (() => { try { return JSON.parse(String(row.skill_packages_json)) as Array<{ id: string; name: string }> } catch { return [] } })(),
+    investigation: (() => {
+      try {
+        const value = JSON.parse(String(row.investigation_json)) as Partial<InvestigationTraceRecord>
+        return {
+          mode: value.mode ?? 'workspace', primarySkills: value.primarySkills ?? [], candidateSkills: value.candidateSkills ?? [],
+          knowledgeResources: value.knowledgeResources ?? [], knowledgeRoots: value.knowledgeRoots ?? [], codeRoot: value.codeRoot ?? '', tools: value.tools ?? [],
+        }
+      } catch { return { mode: 'workspace', primarySkills: [], candidateSkills: [], knowledgeResources: [], knowledgeRoots: [], codeRoot: '', tools: [] } }
+    })(),
     model: String(row.model), reasoningEffort: String(row.reasoning_effort), modelSource: String(row.model_source) as ModelConfigSource,
     reasoningEffortSource: String(row.reasoning_effort_source) as ModelConfigSource, modelFallback: Boolean(row.model_fallback),
     receivedAt: String(row.received_at), startedAt: String(row.started_at), completedAt: String(row.completed_at),

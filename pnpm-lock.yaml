@@ -11,8 +11,8 @@ importers:
   apps/server:
     dependencies:
       '@codycodeagent/cody-web-core':
-        specifier: github:CodyCodeAgent/CodyWebCore#v0.38.11
-        version: git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#76612dffce020b9d80e3744c0275c3e26aa05821(vue@3.5.42(typescript@6.0.3))
+        specifier: github:CodyCodeAgent/CodyWebCore#v0.38.12
+        version: git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#1de75221699e3d22dc759bf4bed1f1a9b8a3ca5e(vue@3.5.42(typescript@6.0.3))
       '@larksuiteoapi/node-sdk':
         specifier: ^1.73.2
         version: 1.74.0
@@ -91,6 +91,12 @@ packages:
 
   '@chevrotain/types@11.1.2':
     resolution: {integrity: sha512-U+HFai5+zmJCkK86QsaJtoITlboZHBqrVketcO2ROv865xfCMSFpELQoz1GkX5GzME8pTa+3kbKrZHQtI0gdbw==}
+
+  '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#1de75221699e3d22dc759bf4bed1f1a9b8a3ca5e':
+    resolution: {commit: 1de75221699e3d22dc759bf4bed1f1a9b8a3ca5e, repo: git@github.com:CodyCodeAgent/CodyWebCore.git, type: git}
+    version: 0.38.12
+    peerDependencies:
+      vue: ^3.5.0
 
   '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#76612dffce020b9d80e3744c0275c3e26aa05821':
     resolution: {commit: 76612dffce020b9d80e3744c0275c3e26aa05821, repo: git@github.com:CodyCodeAgent/CodyWebCore.git, type: git}
@@ -1479,6 +1485,22 @@ snapshots:
   '@braintree/sanitize-url@7.1.2': {}
 
   '@chevrotain/types@11.1.2': {}
+
+  '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#1de75221699e3d22dc759bf4bed1f1a9b8a3ca5e(vue@3.5.42(typescript@6.0.3))':
+    dependencies:
+      '@larksuiteoapi/node-sdk': 1.74.0
+      dompurify: 3.4.15
+      highlight.js: 11.12.0
+      markdown-it: 14.3.2
+      markdown-it-footnote: 4.0.0
+      markdown-it-task-lists: 2.1.1
+      mermaid: 11.17.2
+      vue: 3.5.42(typescript@6.0.3)
+    transitivePeerDependencies:
+      - bufferutil
+      - debug
+      - supports-color
+      - utf-8-validate
 
   '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#76612dffce020b9d80e3744c0275c3e26aa05821(vue@3.5.42(typescript@6.0.3))':
     dependencies:

@@ -268,12 +268,13 @@ describe('HubStore invariants', () => {
     const message = {
       provider: 'feishu' as const, accountId: bot.id, eventId: 'event-review', messageId: 'message-review',
       conversation: { id: 'oc_review', scope: 'group' as const }, sender: { id: 'ou_reviewer', type: 'user' as const },
-      content: { type: 'text' }, text: 'alarm database latency', attachments: [], addressedToAgent: true,
+      content: { type: 'text', raw: { text: 'alarm database latency', ticket: 'T-1' } }, text: 'alarm database latency', attachments: [], addressedToAgent: true,
       mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
     }
     const route = store.resolveRoute(bot.id, message)
     const log = store.createMessageLog(bot.id, route, message)
-    expect(log).toMatchObject({ status: 'processing', sceneId: scene.id, sceneName: 'Alert', inboundContent: 'alarm database latency', skillPackages: [{ id: skillPackage.id, name: 'Triage' }], modelSource: 'codex' })
+    expect(log).toMatchObject({ status: 'processing', sceneId: scene.id, sceneName: 'Alert', inboundContent: 'alarm database latency', inboundRaw: { text: 'alarm database latency', ticket: 'T-1' }, skillPackages: [{ id: skillPackage.id, name: 'Triage' }], modelSource: 'codex' })
+    expect(store.setMessageLogInvestigation(log.id, { mode: 'package_first', primarySkills: [{ name: 'triage', description: '告警处理', path: '/skills/triage/SKILL.md' }], candidateSkills: [{ name: 'rds', description: '数据库查询', path: '/skills/rds/SKILL.md' }], knowledgeResources: [{ title: '表结构', path: '/knowledge/schema.md' }], knowledgeRoots: ['/knowledge'], codeRoot: '/workspace', tools: [{ kind: 'command', title: 'Command execution', summary: 'rg IssueBudget', status: 'completed' }] })).toMatchObject({ investigation: { mode: 'package_first', primarySkills: [{ name: 'triage' }], candidateSkills: [{ name: 'rds' }], tools: [{ summary: 'rg IssueBudget' }] } })
     expect(store.setMessageLogModel(log.id, { model: 'gpt-test', reasoningEffort: 'high', modelSource: 'platform', reasoningEffortSource: 'scene', fallback: true })).toMatchObject({ model: 'gpt-test', reasoningEffort: 'high', modelSource: 'platform', reasoningEffortSource: 'scene', modelFallback: true })
     const completed = store.finishMessageLog(log.id, { responseContent: 'database recovered' })
     expect(completed).toMatchObject({ status: 'completed', responseContent: 'database recovered' })

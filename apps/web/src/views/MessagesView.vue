@@ -39,6 +39,8 @@ const formatDuration = (value: number | null) => value === null ? '处理中' : 
 const excerpt = (value: string) => value.replace(/\s+/gu, ' ').trim().slice(0, 120) || '（空内容）'
 const statusLabel = (value: MessageLog['status']) => value === 'completed' ? '已完成' : value === 'failed' ? '失败' : '处理中'
 const sourceLabel = (value: MessageLog['modelSource']) => ({ scene: '场景', bot: 'Bot', platform: '平台', codex: 'Codex 默认' }[value])
+const modeLabel = (value: MessageLog['investigation']['mode']) => ({ package_only: '仅技能包', package_first: '技能包优先', mixed: '混合检索', workspace: '工作区自主选择' }[value])
+const prettyJson = (value: unknown) => { try { return JSON.stringify(value, null, 2) } catch { return String(value) } }
 </script>
 
 <template>
@@ -60,10 +62,14 @@ const sourceLabel = (value: MessageLog['modelSource']) => ({ scene: '场景', bo
     <div v-if="selected" class="dialog-backdrop" @mousedown.self="selected = null"><section class="dialog large"><header class="dialog-header"><div><h2>消息处理详情</h2><p class="mono">log: {{ selected.id }}</p><p>message: {{ selected.messageId }} · {{ formatTime(selected.receivedAt) }}</p></div><button class="icon-button" aria-label="关闭" @click="selected = null"><X :size="19" /></button></header><div class="dialog-body">
       <div class="detail-grid"><div><span>Bot</span><strong>{{ selected.botName }}</strong></div><div><span>消息类型</span><strong>{{ selected.messageType }}</strong></div><div><span>工作区</span><strong>{{ selected.workspaceName }}</strong></div><div><span>场景</span><strong>{{ selected.sceneName || '默认路由' }}</strong></div><div><span>耗时</span><strong>{{ formatDuration(selected.durationMs) }}</strong></div><div><span>状态</span><strong>{{ statusLabel(selected.status) }}</strong></div><div><span>实际模型</span><strong class="mono">{{ selected.model || '—' }}</strong></div><div><span>模型来源</span><strong>{{ sourceLabel(selected.modelSource) }}<template v-if="selected.modelFallback"> · 已回退</template></strong></div><div><span>推理强度</span><strong class="mono">{{ selected.reasoningEffort || '模型默认' }} · {{ sourceLabel(selected.reasoningEffortSource) }}</strong></div></div>
       <div class="field"><span class="field-label">技能包</span><div class="tag-list"><span v-if="!selected.skillPackages.length" class="badge gray">无</span><span v-for="item in selected.skillPackages" :key="item.id" class="badge">{{ item.name }}</span></div></div>
+      <div class="field"><span class="field-label">调查策略</span><div class="tag-list"><span class="badge">{{ modeLabel(selected.investigation.mode) }}</span><span v-for="item in selected.investigation.primarySkills" :key="`primary:${item.path}`" class="badge green" :title="item.path">首选 · {{ item.name }}</span><span v-for="item in selected.investigation.candidateSkills" :key="`candidate:${item.path}`" class="badge gray" :title="`${item.description}\n${item.path}`">候选 · {{ item.name }}</span></div></div>
+      <div v-if="selected.investigation.knowledgeResources.length" class="field"><span class="field-label">知识资源</span><div class="tag-list"><span v-for="item in selected.investigation.knowledgeResources" :key="item.path" class="badge gray" :title="item.path">{{ item.title }}</span></div></div>
+      <div v-if="selected.investigation.tools.length" class="record-content"><h3>实际工具调用</h3><div class="tool-trace"><div v-for="(tool, index) in selected.investigation.tools" :key="`${index}:${tool.kind}:${tool.summary}`" class="tool-trace-item"><span class="badge" :class="tool.status.includes('fail') ? 'red' : tool.status.includes('complete') ? 'green' : 'gray'">{{ tool.status }}</span><strong>{{ tool.title }}</strong><code class="mono">{{ tool.summary || tool.kind }}</code></div></div></div>
       <div class="record-content"><h3>收到的内容</h3><pre>{{ selected.inboundContent }}</pre></div>
+      <details v-if="selected.inboundRaw !== null && selected.inboundRaw !== undefined" class="record-content"><summary>原始结构化内容</summary><pre>{{ prettyJson(selected.inboundRaw) }}</pre></details>
       <div class="record-content"><h3>回复内容</h3><pre>{{ selected.responseContent || '（尚未生成回复）' }}</pre></div>
       <div v-if="selected.error" class="error-banner"><strong>错误</strong><br />{{ selected.error }}</div>
-      <div class="record-meta mono">log: {{ selected.id }}<br />event: {{ selected.eventId }}<br />message: {{ selected.messageId }}<br />chat: {{ selected.chatId }}<br />topic: {{ selected.topicId || '—' }}<br />sender: {{ selected.senderId || '—' }}</div>
+      <div class="record-meta mono">log: {{ selected.id }}<br />event: {{ selected.eventId }}<br />message: {{ selected.messageId }}<br />chat: {{ selected.chatId }}<br />topic: {{ selected.topicId || '—' }}<br />sender: {{ selected.senderId || '—' }}<br />code root: {{ selected.investigation.codeRoot || '—' }}</div>
     </div></section></div>
   </div>
 </template>
