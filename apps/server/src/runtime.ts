@@ -5,7 +5,7 @@ import type { CodexEvent } from '@codycodeagent/cody-web-core/conversation'
 import { createAppServerHost, type AppServerHost } from '@codycodeagent/cody-web-core/runtime'
 import { buildTurnUserInput, CodexSessionManager, type CodexModelOption, type CodexSkillOption, type ExecutionContext, type ExecutionPolicyProvider, type TurnInput, type TurnInputSkill, type TurnOutcome } from '@codycodeagent/cody-web-core/session'
 import type { HubStore } from './db.js'
-import { relevance, WorkspaceResourceIndex, type KnowledgeResource } from './resources.js'
+import { readSkillSearchTags, relevance, WorkspaceResourceIndex, type KnowledgeResource } from './resources.js'
 import type { InvestigationSkillRecord, InvestigationTraceRecord, InvestigationToolRecord, ModelConfigSource, ResolvedModelConfig, ResolvedRoute } from './types.js'
 
 export type RuntimeAttachment = {
@@ -73,15 +73,14 @@ export const resolveRuntimeModel = (requested: ResolvedModelConfig, models: Code
   return { model, reasoningEffort, modelSource, reasoningEffortSource, fallback }
 }
 
-export const rankSkillCandidates = (skills: CodexSkillOption[], query: string): CodexSkillOption[] => {
+export const rankSkillCandidates = (skills: CodexSkillOption[], query: string, options: { tags?: Map<string, string[]>; boosts?: Array<{ keyword: string; weight: number }>; minimumScore?: number } = {}): CodexSkillOption[] => {
   const normalized = query.toLocaleLowerCase()
-  const incident = /告警|故障|异常|对账|排查|根因|日志|error|alarm|incident|reconcil/iu.test(normalized)
   const scored = skills.map(skill => {
-    const searchable = `${skill.name} ${skill.displayName} ${skill.description} ${skill.path}`
+    const searchable = `${skill.name} ${skill.displayName} ${skill.description} ${skill.path} ${(options.tags?.get(skill.path) ?? []).join(' ')}`
+    const searchableNormalized = searchable.toLocaleLowerCase()
     let score = relevance(searchable, normalized)
     if (normalized.includes(skill.name.toLocaleLowerCase())) score += 30
-    if (incident && /rds|sql|database|数据库|argos|log|日志|alert|告警|incident|排查|oncall|knowledge|知识/iu.test(searchable)) score += 8
-    if (/卡片|飞书|feishu|lark/iu.test(normalized) && /feishu|lark|card|im|飞书/iu.test(searchable)) score += 8
+    for (const boost of options.boosts ?? []) if (searchableNormalized.includes(boost.keyword.toLocaleLowerCase())) score += boost.weight
     const sourcePriority = skill.path.includes(`${path.sep}.codex${path.sep}skills${path.sep}`)
       ? 3
       : skill.path.includes(`${path.sep}.agents${path.sep}skills${path.sep}`)
@@ -89,7 +88,9 @@ export const rankSkillCandidates = (skills: CodexSkillOption[], query: string): 
         : 1
     return { skill, score, sourcePriority }
   })
-  const ranked = scored.sort((left, right) => right.score - left.score || right.sourcePriority - left.sourcePriority || left.skill.name.localeCompare(right.skill.name, 'zh-CN'))
+  const ranked = scored
+    .filter(item => item.score >= (options.minimumScore ?? 0))
+    .sort((left, right) => right.score - left.score || right.sourcePriority - left.sourcePriority || left.skill.name.localeCompare(right.skill.name, 'zh-CN'))
   const unique = new Map<string, CodexSkillOption>()
   for (const item of ranked) {
     const key = item.skill.name.trim().toLocaleLowerCase()
@@ -328,11 +329,14 @@ export class CodyBotRuntime {
         ? 'mixed'
         : requested.length ? 'package_first' : 'workspace'
     const query = [message.content?.title, message.text, route.scene?.name, route.scene?.prompt, ...route.skillPackages.flatMap(item => [item.name, item.description, item.prompt])].filter(Boolean).join('\n')
+    const retrieval = route.scene?.retrieval ?? { skillBoosts: [], skillCandidateLimit: 12, knowledgeCandidateLimit: 12, minimumScore: 1 }
+    const retrievalQuery = [query, ...retrieval.skillBoosts.map(item => item.keyword)].filter(Boolean).join('\n')
     const workspaceSkills = catalog.filter(skill => isWithin(codeRoot, skill.path)
       && !primaryPaths.has(skill.path)
       && ![skill.name, skill.displayName, path.basename(path.dirname(skill.path))].filter(Boolean).some(name => primaryNames.has(name.trim().toLocaleLowerCase())))
-    const ranked = rankSkillCandidates(workspaceSkills, query).slice(0, 12)
-    const knowledge = mode === 'package_only' ? [] : await this.resources.listKnowledge(codeRoot, query, 20)
+    const skillTags = new Map(await Promise.all(workspaceSkills.map(async skill => [skill.path, await readSkillSearchTags(skill.path)] as const)))
+    const ranked = rankSkillCandidates(workspaceSkills, retrievalQuery, { tags: skillTags, boosts: retrieval.skillBoosts, minimumScore: retrieval.minimumScore }).slice(0, retrieval.skillCandidateLimit)
+    const knowledge = mode === 'package_only' ? [] : await this.resources.listKnowledge(codeRoot, retrievalQuery, retrieval.knowledgeCandidateLimit, retrieval.minimumScore)
     const knowledgeRoots = mode === 'package_only' ? [] : await this.resources.listRoots(codeRoot)
     const primaryTrace = uniquePrimary.map(skillSnapshot)
     const candidateTrace = mode === 'package_only' ? [] : ranked.map(skillSnapshot)
@@ -345,7 +349,7 @@ export class CodyBotRuntime {
     const attached = [...new Map([...uniquePrimary, ...attachedCatalog].map(item => [item.path, { name: item.name, path: item.path }])).values()]
     const missing = requested.filter(name => !uniquePrimary.some(skill => skill.name === name || skill.displayName === name || path.basename(path.dirname(skill.path)) === name))
     const skillLines = candidateTrace.map(item => `- ${item.name}：${item.description || '未提供描述'}\n  SKILL.md：${item.path}`).join('\n')
-    const knowledgeLines = knowledge.slice(0, 12).map(item => `- ${item.title}：${item.path}${item.description ? `\n  ${item.description}` : ''}`).join('\n')
+    const knowledgeLines = knowledge.map(item => `- ${item.title}：${item.path}${item.description ? `\n  ${item.description}` : ''}`).join('\n')
     const policy = mode === 'package_only'
       ? '本轮为 package_only：只使用首选 Skill，不得读取或启用候选 Skill、知识库或其他工作区能力。'
       : mode === 'package_first'
@@ -356,7 +360,7 @@ export class CodyBotRuntime {
     const instructions = [
       '# 工作区调查与能力发现', policy,
       missing.length ? `以下技能包 Skill 未在当前索引中找到：${missing.join('、')}。请从候选能力中寻找替代项。` : '',
-      mode === 'package_only' ? '' : `## 候选 Skill\n${skillLines || '当前没有识别到额外工作区 Skill。'}`,
+      mode === 'package_only' ? '' : `## 候选 Skill\n以下是关键词召回结果，不代表全部适用。请先按当前任务语义选择必要的少量 Skill，再读取对应 SKILL.md。\n${skillLines || '当前没有达到相关度门槛的额外工作区 Skill。'}`,
       mode === 'package_only' ? '' : `## 知识资源\n知识根目录：${knowledgeRoots.join('、') || '未识别'}\n${knowledgeLines || '当前没有识别到知识文件；仍可在工作区内搜索 README、文档和 Skill references。'}`,
       mode === 'package_only' ? '' : `## 代码\n代码根目录：${codeRoot}\n允许使用 rg 搜索代码、配置和 Git 历史，以确认当前实现。`,
       mode === 'package_only' ? '' : '## 调查要求\n对告警、故障和数据差异任务，应提取关键 ID、时间、地区、服务和链接；交叉验证知识、代码、配置、数据库与日志；建立时间线并主动排除主要反例。没有实际查询证据时只能标记为“初判”。只有样本、规则或配置、运行事实和排除证据相互闭合时才可输出确定根因。遇到权限、工具或数据阻塞时，列出已经执行的查询和具体阻塞。',

@@ -34,13 +34,22 @@ describe('workspace Skill ranking', () => {
     brandColor: '', iconSmall: '', iconLarge: '', defaultPrompt: '', dependencies: [],
   })
 
-  it('promotes database and log capabilities for an unknown alert investigation', () => {
+  it('uses generic lexical relevance and excludes candidates below the configured threshold', () => {
     const ranked = rankSkillCandidates([
       skill('imagegen', '生成图片'),
       skill('rds', '只读查询线上数据库和业务流水'),
       skill('argos-query', '根据 LogID 和时间查询运行日志'),
-    ], '券使用更新时间异常，需要排查实时对账告警根因')
-    expect(ranked.slice(0, 2).map(item => item.name)).toEqual(expect.arrayContaining(['rds', 'argos-query']))
+    ], '查询线上数据库和运行日志', { minimumScore: 1 })
+    expect(ranked.map(item => item.name)).toEqual(expect.arrayContaining(['rds', 'argos-query']))
+    expect(ranked.map(item => item.name)).not.toContain('imagegen')
+  })
+
+  it('applies Scene boosts and Skill-declared tags without domain rules in code', () => {
+    const argos = skill('observability', '通用观测能力')
+    const ranked = rankSkillCandidates([argos, skill('imagegen', '生成图片')], '线上问题', {
+      tags: new Map([[argos.path, ['argos', '日志']]]), boosts: [{ keyword: 'argos', weight: 20 }], minimumScore: 1,
+    })
+    expect(ranked).toEqual([argos])
   })
 
   it('deduplicates skills by name and prefers the installed workspace copy', () => {

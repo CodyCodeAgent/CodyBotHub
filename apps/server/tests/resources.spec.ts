@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { WorkspaceResourceIndex } from '../src/resources.js'
+import { readSkillSearchTags, WorkspaceResourceIndex } from '../src/resources.js'
 
 const temporaryDirectories: string[] = []
 afterEach(() => { for (const directory of temporaryDirectories.splice(0)) rmSync(directory, { recursive: true, force: true }) })
@@ -20,5 +20,14 @@ describe('WorkspaceResourceIndex', () => {
 
     writeFileSync(path.join(workspace, 'knowledge', 'new.md'), '# 新知识\n\n刚刚增加的排查资料。')
     expect((await index.listKnowledge(workspace)).map(item => item.title)).toContain('新知识')
+    expect(await index.listKnowledge(workspace, '完全无关', 20, 1)).toEqual([])
+  })
+
+  it('reads searchable tags, keywords, and triggers from Skill frontmatter', async () => {
+    const workspace = mkdtempSync(path.join(tmpdir(), 'codybothub-skill-tags-'))
+    temporaryDirectories.push(workspace)
+    const filename = path.join(workspace, 'SKILL.md')
+    writeFileSync(filename, `---\nname: alert-triage\ntags: [alert, database]\nkeywords:\n  - Argos\n  - EventBus\ntriggers: reconciliation\n---\n# Alert triage\n`)
+    expect(await readSkillSearchTags(filename)).toEqual(['alert', 'database', 'argos', 'eventbus', 'reconciliation'])
   })
 })

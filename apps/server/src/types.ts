@@ -76,6 +76,12 @@ export interface SceneRecord {
   enabled: boolean
   model: string
   reasoningEffort: string
+  retrieval: {
+    skillBoosts: Array<{ keyword: string; weight: number }>
+    skillCandidateLimit: number
+    knowledgeCandidateLimit: number
+    minimumScore: number
+  }
   matcher: {
     chatIds: string[]
     messageTypes: string[]

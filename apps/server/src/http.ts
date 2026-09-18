@@ -306,8 +306,16 @@ const requestIp = (request: IncomingMessage): string => {
 
 const sceneInput = (body: Json): Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt'> & { skillPackageIds: string[] } => {
   const matcher = (body.matcher && typeof body.matcher === 'object' ? body.matcher : {}) as Json
+  const retrieval = (body.retrieval && typeof body.retrieval === 'object' ? body.retrieval : {}) as Json
+  const skillBoosts = (Array.isArray(retrieval.skillBoosts) ? retrieval.skillBoosts : []).flatMap(item => {
+    if (!item || typeof item !== 'object') return []
+    const value = item as Json
+    const keyword = optional(value, 'keyword').trim()
+    const weight = Math.min(100, Math.max(0, number(value.weight, 0)))
+    return keyword && weight > 0 ? [{ keyword, weight }] : []
+  })
   const supportedMessageTypes = new Set<string>(FEISHU_MESSAGE_TYPES)
-  return { botId: required(body, 'botId'), workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), prompt: optional(body, 'prompt'), priority: number(body.priority, 100), enabled: bool(body.enabled, true), model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), matcher: { chatIds: stringList(matcher.chatIds), messageTypes: stringList(matcher.messageTypes).filter(value => supportedMessageTypes.has(value)), textIncludes: stringList(matcher.textIncludes), cardTitleIncludes: stringList(matcher.cardTitleIncludes) }, skillPackageIds: stringList(body.skillPackageIds) }
+  return { botId: required(body, 'botId'), workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), prompt: optional(body, 'prompt'), priority: number(body.priority, 100), enabled: bool(body.enabled, true), model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), retrieval: { skillBoosts, skillCandidateLimit: number(retrieval.skillCandidateLimit, 12), knowledgeCandidateLimit: number(retrieval.knowledgeCandidateLimit, 12), minimumScore: number(retrieval.minimumScore, 1) }, matcher: { chatIds: stringList(matcher.chatIds), messageTypes: stringList(matcher.messageTypes).filter(value => supportedMessageTypes.has(value)), textIncludes: stringList(matcher.textIncludes), cardTitleIncludes: stringList(matcher.cardTitleIncludes) }, skillPackageIds: stringList(body.skillPackageIds) }
 }
 
 const skillPackageInput = (body: Json): Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => ({

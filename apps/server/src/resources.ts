@@ -16,7 +16,7 @@ const defaultRoots = ['.codex/knowledge', 'knowledge', 'docs']
 const skillRoots = ['.codex/skills', '.agents/skills', 'skills']
 
 export class WorkspaceResourceIndex {
-  async listKnowledge(workspacePath: string, query = '', limit = 200): Promise<KnowledgeResource[]> {
+  async listKnowledge(workspacePath: string, query = '', limit = 200, minimumScore = 0): Promise<KnowledgeResource[]> {
     const workspace = await realpath(workspacePath)
     const roots = await this.knowledgeRoots(workspace)
     const resources: KnowledgeResource[] = []
@@ -50,6 +50,7 @@ export class WorkspaceResourceIndex {
     const normalized = query.trim().toLocaleLowerCase()
     return resources
       .map(resource => ({ resource, score: relevance(`${resource.title} ${resource.description} ${resource.relativePath}`, normalized) }))
+      .filter(item => !normalized || item.score >= minimumScore)
       .sort((left, right) => right.score - left.score || left.resource.relativePath.localeCompare(right.resource.relativePath, 'zh-CN'))
       .slice(0, Math.min(500, Math.max(1, limit)))
       .map(item => item.resource)
@@ -85,6 +86,31 @@ export class WorkspaceResourceIndex {
     }
     return [...new Set(result)]
   }
+}
+
+export const readSkillSearchTags = async (filename: string): Promise<string[]> => {
+  let source = ''
+  try { source = await readFile(filename, 'utf8') } catch { return [] }
+  const frontmatter = source.match(/^---\s*\n([\s\S]*?)\n---/u)?.[1]
+  if (!frontmatter) return []
+  const lines = frontmatter.split('\n')
+  const tags: string[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index]?.match(/^\s*(tags|keywords|triggers)\s*:\s*(.*?)\s*$/iu)
+    if (!match) continue
+    const inline = match[2]?.trim() ?? ''
+    if (inline) {
+      tags.push(...inline.replace(/^\[|\]$/gu, '').split(',').map(value => value.trim().replace(/^['"]|['"]$/gu, '')).filter(Boolean))
+      continue
+    }
+    for (let child = index + 1; child < lines.length; child += 1) {
+      const item = lines[child]?.match(/^\s+-\s+(.+?)\s*$/u)
+      if (!item) break
+      tags.push(item[1]!.trim().replace(/^['"]|['"]$/gu, ''))
+      index = child
+    }
+  }
+  return [...new Set(tags.map(value => value.toLocaleLowerCase()))]
 }
 
 export const relevance = (value: string, query: string): number => {

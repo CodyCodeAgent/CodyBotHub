@@ -87,7 +87,7 @@ describe('HubStore invariants', () => {
     const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id, prompt: 'bot', conversationMode: 'topic' })
     const skillPackage = store.createSkillPackage({ workspaceId: linked.id, name: 'Package', description: '', prompt: 'package', skills: ['report'], fallbackMode: 'package_first' })
     store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Fallback', prompt: 'fallback', priority: 200, enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
-    const selected = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: 'scene', priority: 10, enabled: true, matcher: { chatIds: ['oc_1'], messageTypes: ['interactive'], textIncludes: [], cardTitleIncludes: ['P0'] }, skillPackageIds: [skillPackage.id] })
+    const selected = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: 'scene', priority: 10, enabled: true, retrieval: { skillBoosts: [{ keyword: 'Argos', weight: 20 }], skillCandidateLimit: 8, knowledgeCandidateLimit: 6, minimumScore: 2 }, matcher: { chatIds: ['oc_1'], messageTypes: ['interactive'], textIncludes: [], cardTitleIncludes: ['P0'] }, skillPackageIds: [skillPackage.id] })
     const route = store.resolveRoute(bot.id, {
       provider: 'feishu', accountId: bot.id, eventId: 'event-1', messageId: 'message-1',
       conversation: { id: 'oc_1', scope: 'group' }, sender: { id: 'ou_1', type: 'user' },
@@ -95,6 +95,7 @@ describe('HubStore invariants', () => {
       addressedToAgent: false, mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
     })
     expect(route.scene?.id).toBe(selected.id)
+    expect(route.scene?.retrieval).toEqual({ skillBoosts: [{ keyword: 'Argos', weight: 20 }], skillCandidateLimit: 8, knowledgeCandidateLimit: 6, minimumScore: 2 })
     expect(route.conversationMode).toBe('topic')
     expect(route.replyInTopic).toBe(true)
     expect(route.conversationKey).toBe(`bot:${bot.id}:chat:oc_1:topic:message-1`)

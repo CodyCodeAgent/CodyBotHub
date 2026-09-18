@@ -6,9 +6,10 @@ import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord,
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 
 type Row = Record<string, unknown>
-type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'model' | 'reasoningEffort'> & {
+type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'model' | 'reasoningEffort' | 'retrieval'> & {
   model?: string
   reasoningEffort?: string
+  retrieval?: SceneRecord['retrieval']
   skillPackageIds?: string[]
 }
 const now = () => new Date().toISOString()
@@ -112,6 +113,7 @@ export class HubStore {
         enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
         model TEXT NOT NULL DEFAULT '',
         reasoning_effort TEXT NOT NULL DEFAULT '',
+        retrieval_config_json TEXT NOT NULL DEFAULT '{}',
         matcher_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -295,6 +297,7 @@ export class HubStore {
     const sceneColumns = this.db.prepare('PRAGMA table_info(scenes)').all() as Row[]
     if (!sceneColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE scenes ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if (!sceneColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE scenes ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
+    if (!sceneColumns.some(column => String(column.name) === 'retrieval_config_json')) this.db.exec("ALTER TABLE scenes ADD COLUMN retrieval_config_json TEXT NOT NULL DEFAULT '{}'")
     const messageLogColumns = this.db.prepare('PRAGMA table_info(message_logs)').all() as Row[]
     if (!messageLogColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE message_logs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if (!messageLogColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE message_logs ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
@@ -604,8 +607,8 @@ export class HubStore {
     const id = randomUUID(), timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO scenes (id, bot_id, workspace_id, name, prompt, priority, enabled, model, reasoning_effort, matcher_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, input.model ?? '', input.reasoningEffort ?? '', JSON.stringify(input.matcher), timestamp, timestamp)
+      this.db.prepare(`INSERT INTO scenes (id, bot_id, workspace_id, name, prompt, priority, enabled, model, reasoning_effort, retrieval_config_json, matcher_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, input.model ?? '', input.reasoningEffort ?? '', JSON.stringify(this.normalizeRetrieval(input.retrieval)), JSON.stringify(input.matcher), timestamp, timestamp)
       this.setScenePackages(id, input.skillPackageIds ?? [])
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
@@ -616,8 +619,8 @@ export class HubStore {
     this.assertScenePackages(input.workspaceId, input.skillPackageIds ?? [])
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      const result = this.db.prepare(`UPDATE scenes SET bot_id = ?, workspace_id = ?, name = ?, prompt = ?, priority = ?, enabled = ?, model = ?, reasoning_effort = ?, matcher_json = ?, updated_at = ? WHERE id = ?`)
-        .run(input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, input.model ?? '', input.reasoningEffort ?? '', JSON.stringify(input.matcher), now(), id)
+      const result = this.db.prepare(`UPDATE scenes SET bot_id = ?, workspace_id = ?, name = ?, prompt = ?, priority = ?, enabled = ?, model = ?, reasoning_effort = ?, retrieval_config_json = ?, matcher_json = ?, updated_at = ? WHERE id = ?`)
+        .run(input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, input.model ?? '', input.reasoningEffort ?? '', JSON.stringify(this.normalizeRetrieval(input.retrieval)), JSON.stringify(input.matcher), now(), id)
       if (!result.changes) throw new Error('Scene not found')
       this.db.prepare('DELETE FROM scene_skill_packages WHERE scene_id = ?').run(id)
       this.setScenePackages(id, input.skillPackageIds ?? [])
@@ -633,8 +636,22 @@ export class HubStore {
   }
   private scene(row: Row): SceneRecord & { skillPackageIds: string[] } {
     const raw = JSON.parse(String(row.matcher_json)) as Partial<SceneRecord['matcher']>
+    let retrieval: Partial<SceneRecord['retrieval']> = {}
+    try { retrieval = JSON.parse(String(row.retrieval_config_json)) as Partial<SceneRecord['retrieval']> } catch { /* use defaults */ }
     const skillPackageIds = (this.db.prepare('SELECT skill_package_id FROM scene_skill_packages WHERE scene_id = ? ORDER BY position').all(String(row.id)) as Row[]).map(item => String(item.skill_package_id))
-    return { id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), model: String(row.model), reasoningEffort: String(row.reasoning_effort), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), model: String(row.model), reasoningEffort: String(row.reasoning_effort), retrieval: this.normalizeRetrieval(retrieval), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+  }
+  private normalizeRetrieval(value?: Partial<SceneRecord['retrieval']>): SceneRecord['retrieval'] {
+    const skillBoosts = Array.isArray(value?.skillBoosts) ? value.skillBoosts
+      .map(item => ({ keyword: String(item?.keyword ?? '').trim(), weight: Math.min(100, Math.max(0, Number(item?.weight) || 0)) }))
+      .filter(item => item.keyword && item.weight > 0)
+      .slice(0, 50) : []
+    return {
+      skillBoosts,
+      skillCandidateLimit: Math.min(30, Math.max(1, Math.trunc(Number(value?.skillCandidateLimit) || 12))),
+      knowledgeCandidateLimit: Math.min(30, Math.max(1, Math.trunc(Number(value?.knowledgeCandidateLimit) || 12))),
+      minimumScore: Math.min(100, Math.max(0, Number(value?.minimumScore) || 1)),
+    }
   }
   private assertBotWorkspace(botId: string, workspaceId: string): void {
     if (!this.db.prepare('SELECT 1 FROM bot_workspaces WHERE bot_id = ? AND workspace_id = ?').get(botId, workspaceId)) throw new Error('Scene Workspace must be attached to its Bot')
