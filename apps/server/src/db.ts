@@ -428,9 +428,9 @@ export class HubStore {
     if (input.sceneId) { filters.push('scene_id = ?'); params.push(input.sceneId) }
     if (input.status && ['processing', 'completed', 'failed'].includes(input.status)) { filters.push('status = ?'); params.push(input.status) }
     if (input.query?.trim()) {
-      filters.push('(inbound_content LIKE ? ESCAPE \'\\\' OR response_content LIKE ? ESCAPE \'\\\' OR message_id LIKE ?)')
+      filters.push('(inbound_content LIKE ? ESCAPE \'\\\' OR response_content LIKE ? ESCAPE \'\\\' OR message_id LIKE ? OR id LIKE ?)')
       const escaped = input.query.trim().replace(/[\\%_]/gu, value => `\\${value}`)
-      params.push(`%${escaped}%`, `%${escaped}%`, `%${input.query.trim()}%`)
+      params.push(`%${escaped}%`, `%${escaped}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`)
     }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM message_logs ${where}`).get(...params) as Row).count)

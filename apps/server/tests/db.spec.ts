@@ -128,6 +128,7 @@ describe('HubStore invariants', () => {
     expect(completed).toMatchObject({ status: 'completed', responseContent: 'database recovered' })
     expect(completed.durationMs).toBeTypeOf('number')
     expect(store.listMessageLogs({ query: 'recovered', sceneId: scene.id })).toMatchObject({ total: 1, items: [{ id: log.id }] })
+    expect(store.listMessageLogs({ query: log.id })).toMatchObject({ total: 1, items: [{ messageId: message.messageId }] })
     expect(store.stats().messageLogs).toBe(1)
     store.close()
   })
