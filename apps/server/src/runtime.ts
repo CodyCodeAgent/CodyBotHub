@@ -3,7 +3,7 @@ import path from 'node:path'
 import { channelCommandId, type ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import type { CodexEvent } from '@codycodeagent/cody-web-core/conversation'
 import { createAppServerHost, type AppServerHost } from '@codycodeagent/cody-web-core/runtime'
-import { buildTurnUserInput, CodexSessionManager, type CodexModelOption, type CodexSkillOption, type ExecutionContext, type ExecutionPolicyProvider, type TurnInput, type TurnInputSkill } from '@codycodeagent/cody-web-core/session'
+import { buildTurnUserInput, CodexSessionManager, type CodexModelOption, type CodexSkillOption, type ExecutionContext, type ExecutionPolicyProvider, type TurnInput, type TurnInputSkill, type TurnOutcome } from '@codycodeagent/cody-web-core/session'
 import type { HubStore } from './db.js'
 import type { ModelConfigSource, ResolvedModelConfig, ResolvedRoute } from './types.js'
 
@@ -65,7 +65,12 @@ export class CodyBotRuntime {
   private readonly attached = new Set<string>()
   private readonly attaching = new Map<string, Promise<void>>()
 
-  constructor(private readonly store: HubStore, private readonly runtimeDirectory: string, private readonly codexCommand = 'codex') {}
+  constructor(
+    private readonly store: HubStore,
+    private readonly runtimeDirectory: string,
+    private readonly codexCommand = 'codex',
+    private readonly turnTimeoutMs = 15 * 60 * 1000,
+  ) {}
 
   async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void): Promise<string> {
     const conversation = this.store.getOrCreateConversation(route, message.conversation.id)
@@ -107,12 +112,24 @@ export class CodyBotRuntime {
     try {
       const submission = manager.submit(conversation.id, turn, 'queue', channelCommandId(message))
       turnId = (await submission.started).turnId
-      const outcome = await submission.completed
+      const outcome = await this.waitForCompletion(manager, conversation.id, submission.completed)
       if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || 'Codex Turn failed'))
       return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
     } finally {
       unsubscribe()
     }
+  }
+
+  private waitForCompletion(manager: CodexSessionManager, bindingId: string, completed: Promise<TurnOutcome>): Promise<TurnOutcome> {
+    const timeoutMs = Number.isFinite(this.turnTimeoutMs) && this.turnTimeoutMs > 0 ? this.turnTimeoutMs : 15 * 60 * 1000
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        void manager.interrupt(bindingId).catch(error => console.warn('[runtime] failed to interrupt timed out turn:', error))
+        reject(new Error(`Codex 执行超过 ${Math.ceil(timeoutMs / 60_000)} 分钟，已自动中断`))
+      }, timeoutMs)
+      timer.unref?.()
+      void completed.then(resolve, reject).finally(() => clearTimeout(timer))
+    })
   }
 
   async dispose(): Promise<void> {

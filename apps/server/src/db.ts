@@ -700,6 +700,18 @@ export class HubStore {
     return this.getMessageLog(id)
   }
 
+  failProcessingMessageLogs(error = '服务在任务完成前重启，执行已中断'): number {
+    const pending = this.db.prepare("SELECT id, started_at FROM message_logs WHERE status = 'processing'").all() as Row[]
+    if (!pending.length) return 0
+    const completedAt = now()
+    const update = this.db.prepare("UPDATE message_logs SET status = 'failed', error = ?, completed_at = ?, duration_ms = ? WHERE id = ? AND status = 'processing'")
+    for (const row of pending) {
+      const durationMs = Math.max(0, Date.parse(completedAt) - Date.parse(String(row.started_at)))
+      update.run(error, completedAt, durationMs, String(row.id))
+    }
+    return pending.length
+  }
+
   setMessageLogModel(id: string, update: { model: string; reasoningEffort: string; modelSource: ModelConfigSource; reasoningEffortSource: ModelConfigSource; fallback: boolean }): MessageLogRecord {
     this.db.prepare('UPDATE message_logs SET model = ?, reasoning_effort = ?, model_source = ?, reasoning_effort_source = ?, model_fallback = ? WHERE id = ?')
       .run(update.model, update.reasoningEffort, update.modelSource, update.reasoningEffortSource, update.fallback ? 1 : 0, id)

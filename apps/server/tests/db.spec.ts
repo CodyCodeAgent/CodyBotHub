@@ -280,7 +280,12 @@ describe('HubStore invariants', () => {
     expect(completed.durationMs).toBeTypeOf('number')
     expect(store.listMessageLogs({ query: 'recovered', sceneId: scene.id })).toMatchObject({ total: 1, items: [{ id: log.id }] })
     expect(store.listMessageLogs({ query: log.id })).toMatchObject({ total: 1, items: [{ messageId: message.messageId }] })
-    expect(store.stats().messageLogs).toBe(1)
+    const interruptedMessage = { ...message, eventId: 'event-interrupted', messageId: 'message-interrupted' }
+    const interrupted = store.createMessageLog(bot.id, route, interruptedMessage)
+    expect(store.failProcessingMessageLogs()).toBe(1)
+    expect(store.getMessageLog(interrupted.id)).toMatchObject({ status: 'failed', error: '服务在任务完成前重启，执行已中断' })
+    expect(store.getMessageLog(interrupted.id).completedAt).not.toBe('')
+    expect(store.stats().messageLogs).toBe(2)
     store.close()
   })
 })
