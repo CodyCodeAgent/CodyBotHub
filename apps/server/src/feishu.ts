@@ -123,7 +123,6 @@ export class FeishuBotManager {
       const snapshot = latestProgress
       patchTail = patchTail.then(() => this.retryDelivery(provider, () => provider.updateCard(streamMessageId, feishuStreamingCard({
         state: snapshot.phase === 'answering' ? 'answering' : 'thinking',
-        reasoning: snapshot.reasoning,
         answer: snapshot.answer,
         note,
       })))).catch(error => console.warn('[feishu] streaming card update failed:', provider.classifyError(error).message))
