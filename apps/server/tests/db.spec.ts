@@ -117,6 +117,34 @@ describe('HubStore invariants', () => {
     store.close()
   })
 
+  it('inherits the original Scene for addressed follow-ups in the same topic', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Topic inheritance')
+    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id })
+    const fallback = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Group fallback', prompt: '', priority: 200, replyMode: 'topic', enabled: true, matcher: { chatIds: ['another-chat'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
+    const alert = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: '', priority: 10, replyMode: 'topic', enabled: true, matcher: { chatIds: ['oc_alert'], messageTypes: ['interactive', 'text'], textIncludes: [], cardTitleIncludes: ['Argos-CRITICAL'] } })
+    const initial = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-alert', messageId: 'om_alert',
+      conversation: { id: 'oc_alert', scope: 'group' as const }, sender: { id: 'app-alert', type: 'app' as const },
+      content: { type: 'interactive', title: 'Argos-CRITICAL service error' }, text: 'critical alert', attachments: [], addressedToAgent: false,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const initialRoute = store.resolveRoute(bot.id, initial)
+    expect(initialRoute).toMatchObject({ scene: { id: alert.id }, routeSource: 'matcher' })
+    store.bindTopicScene(bot.id, 'oc_alert', initial.messageId, alert.id)
+    store.bindGroupScene(bot.id, 'oc_alert', fallback.id, 'ou_admin')
+    const followUp = {
+      ...initial, eventId: 'event-follow-up', messageId: 'om_follow_up',
+      conversation: { id: 'oc_alert', scope: 'topic' as const, rootId: initial.messageId },
+      sender: { id: 'ou_user', type: 'user' as const }, content: { type: 'text' }, text: '只是 PPE base 是吧', addressedToAgent: true,
+    }
+    const inherited = store.resolveRoute(bot.id, followUp)
+    expect(inherited).toMatchObject({ scene: { id: alert.id }, routeSource: 'topic_binding', conversationKey: initialRoute.conversationKey })
+    const unrelated = store.resolveRoute(bot.id, { ...followUp, conversation: { ...followUp.conversation, rootId: 'om_other_topic' } })
+    expect(unrelated).toMatchObject({ scene: { id: fallback.id }, routeSource: 'group_binding' })
+    store.close()
+  })
+
   it('lists the persisted relationship between a route and its Codex Thread', () => {
     const store = new HubStore(':memory:')
     const linked = workspace(store, 'Thread mapping')

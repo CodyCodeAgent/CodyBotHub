@@ -29,6 +29,7 @@ export interface ResolvedRoute {
   scene: (SceneRecord & { skillPackageIds: string[] }) | null
   skillPackages: SkillPackageRecord[]
   replyMode: 'reply' | 'topic'
+  routeSource: 'topic_binding' | 'group_binding' | 'matcher' | 'default'
   conversationKey: string
   systemPrompt: string
 }

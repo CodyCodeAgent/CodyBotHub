@@ -137,6 +137,15 @@ export class HubStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (bot_id, chat_id)
       );
+      CREATE TABLE IF NOT EXISTS topic_scene_bindings (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL,
+        scene_id TEXT NOT NULL REFERENCES scenes(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (bot_id, chat_id, topic_id)
+      );
       CREATE TABLE IF NOT EXISTS chat_metadata (
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
         chat_id TEXT NOT NULL,
@@ -202,6 +211,7 @@ export class HubStore {
       );
       CREATE INDEX IF NOT EXISTS idx_scenes_bot ON scenes(bot_id, enabled, priority);
       CREATE INDEX IF NOT EXISTS idx_routes_chat ON conversation_routes(bot_id, chat_id, topic_id);
+      CREATE INDEX IF NOT EXISTS idx_topic_scene ON topic_scene_bindings(scene_id);
       CREATE INDEX IF NOT EXISTS idx_chat_metadata_name ON chat_metadata(bot_id, name);
       DELETE FROM inbound_events WHERE rowid NOT IN (SELECT MIN(rowid) FROM inbound_events GROUP BY bot_id, message_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_message ON inbound_events(bot_id, message_id);
@@ -211,6 +221,13 @@ export class HubStore {
       CREATE INDEX IF NOT EXISTS idx_message_logs_scene ON message_logs(scene_id, received_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_account_id, created_at DESC);
+      INSERT OR IGNORE INTO topic_scene_bindings (bot_id, chat_id, topic_id, scene_id, created_at, updated_at)
+        SELECT ml.bot_id, ml.chat_id, CASE WHEN ml.topic_id <> '' THEN ml.topic_id ELSE ml.message_id END, ml.scene_id, ml.received_at, ml.received_at
+        FROM message_logs ml
+        JOIN scenes s ON s.id = ml.scene_id
+        JOIN bots b ON b.id = ml.bot_id
+        WHERE ml.scene_id <> '' AND (s.reply_mode = 'topic' OR (s.reply_mode = 'inherit' AND b.reply_mode = 'topic'))
+        ORDER BY ml.received_at;
     `)
     const sessionColumns = this.db.prepare('PRAGMA table_info(auth_sessions)').all() as Row[]
     if (!sessionColumns.some(column => String(column.name) === 'account_id')) this.db.exec("ALTER TABLE auth_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
@@ -589,12 +606,28 @@ export class HubStore {
     this.createAuditLog({ action: 'scene.bind_group', targetType: 'scene', targetId: sceneId, summary: `通过飞书将群 ${chatId} 绑定到场景 ${scene.name}`, details: { botId, chatId, feishuActorId: actorId } })
   }
 
+  bindTopicScene(botId: string, chatId: string, topicId: string, sceneId: string): void {
+    if (!topicId) throw new Error('Topic ID is required')
+    const scene = this.getScene(sceneId)
+    if (scene.botId !== botId) throw new Error('Scene does not belong to this Bot')
+    const timestamp = now()
+    this.db.prepare(`INSERT INTO topic_scene_bindings (bot_id, chat_id, topic_id, scene_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(bot_id, chat_id, topic_id) DO UPDATE SET updated_at = excluded.updated_at`)
+      .run(botId, chatId, topicId, sceneId, timestamp, timestamp)
+  }
+
   resolveRoute(botId: string, message: ChannelInboundMessage): ResolvedRoute {
     const bot = this.getBot(botId)
-    const binding = this.db.prepare('SELECT scene_id FROM group_scene_bindings WHERE bot_id = ? AND chat_id = ?').get(botId, message.conversation.id) as Row | undefined
+    const topicBinding = message.conversation.rootId
+      ? this.db.prepare('SELECT scene_id FROM topic_scene_bindings WHERE bot_id = ? AND chat_id = ? AND topic_id = ?').get(botId, message.conversation.id, message.conversation.rootId) as Row | undefined
+      : undefined
+    const groupBinding = this.db.prepare('SELECT scene_id FROM group_scene_bindings WHERE bot_id = ? AND chat_id = ?').get(botId, message.conversation.id) as Row | undefined
     const candidates = this.listScenes().filter(scene => scene.botId === botId && scene.enabled)
-    const bound = binding ? candidates.find(scene => scene.id === String(binding.scene_id)) ?? null : null
-    const scene = bound ?? candidates.find(candidate => this.sceneMatches(candidate, message)) ?? null
+    const topicBound = topicBinding ? candidates.find(scene => scene.id === String(topicBinding.scene_id)) ?? null : null
+    const groupBound = groupBinding ? candidates.find(scene => scene.id === String(groupBinding.scene_id)) ?? null : null
+    const matched = candidates.find(candidate => this.sceneMatches(candidate, message)) ?? null
+    const scene = topicBound ?? groupBound ?? matched
+    const routeSource: ResolvedRoute['routeSource'] = topicBound ? 'topic_binding' : groupBound ? 'group_binding' : matched ? 'matcher' : 'default'
     const workspace = this.getWorkspace(scene?.workspaceId ?? bot.defaultWorkspaceId)
     const packages = scene ? this.listSkillPackages().filter(item => scene.skillPackageIds.includes(item.id)) : []
     const replyMode = scene?.replyMode && scene.replyMode !== 'inherit' ? scene.replyMode : bot.replyMode
@@ -602,7 +635,7 @@ export class HubStore {
     const conversationKey = scene ? `scene:${bot.id}:${scene.id}:${message.conversation.id}` : topic ? `chat:${bot.id}:${message.conversation.id}:topic:${topic}` : `chat:${bot.id}:${message.conversation.id}`
     const layers = [this.getPlatformPrompt(), workspace.prompt, bot.prompt, scene?.prompt ?? '', ...packages.map(item => item.prompt)]
       .map(value => value.trim()).filter(Boolean)
-    return { bot, workspace, scene, skillPackages: packages, replyMode, conversationKey, systemPrompt: layers.join('\n\n') }
+    return { bot, workspace, scene, skillPackages: packages, replyMode, routeSource, conversationKey, systemPrompt: layers.join('\n\n') }
   }
 
   messageMatchesScene(sceneId: string, message: ChannelInboundMessage): boolean {

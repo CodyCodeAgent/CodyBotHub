@@ -92,11 +92,14 @@ export class FeishuBotManager {
 
   private async onMessage(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
     const route = this.store.resolveRoute(botId, message)
+    const independentlyMatches = route.scene ? this.store.messageMatchesScene(route.scene.id, message) : false
     // Cards and alerts are normally authored by apps. Accept them only when
     // their content independently matches a Scene; a group binding alone must
     // not turn every bot message into an agent turn or create reply loops.
-    if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !route.scene || !this.store.messageMatchesScene(route.scene.id, message))) return
+    if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !route.scene || !independentlyMatches)) return
+    if (message.sender.type === 'user' && route.routeSource === 'topic_binding' && !message.addressedToAgent && !independentlyMatches) return
     if (!route.scene && message.conversation.scope !== 'private' && !message.addressedToAgent) return
+    if (route.scene && route.replyMode === 'topic') this.store.bindTopicScene(botId, message.conversation.id, message.conversation.rootId || message.messageId, route.scene.id)
     const log = this.store.createMessageLog(botId, route, message)
     let receiptReactionId = ''
     try { receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo') }
