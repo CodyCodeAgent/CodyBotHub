@@ -6,7 +6,7 @@ import ModelConfigFields from '../components/ModelConfigFields.vue'
 import type { Bot, ModelCatalog, PlatformSettings, ProvisioningJob, Workspace } from '../types'
 const items = ref<Bot[]>([]), workspaces = ref<Workspace[]>([]), open = ref(false), saving = ref(false), error = ref('')
 const catalog = ref<ModelCatalog>({ items: [], defaultModel: '', defaultReasoningEffort: '' })
-const platform = ref<PlatformSettings>({ basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true })
+const platform = ref<PlatformSettings>({ basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true, threadProfileRefreshIntervalSeconds: 5, threadProfileBatchSize: 20 })
 const activeJob = ref<ProvisioningJob | null>(null)
 let pollHandle: ReturnType<typeof setInterval> | null = null
 const form = reactive({ id: '', createMode: 'existing' as 'existing'|'auto', name: '', description: '', appId: '', appSecret: '', prompt: '', operatorIdsText: '', conversationMode: 'chat' as 'chat'|'topic', model: '', reasoningEffort: '', defaultWorkspaceId: '', workspaceIds: [] as string[] })

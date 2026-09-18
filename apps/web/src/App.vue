@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Bot, Boxes, ClipboardList, GitBranch, LayoutDashboard, LibraryBig, LogOut, Menu, MessageSquareText, Puzzle, Settings, Users, Workflow, X } from 'lucide-vue-next'
+import { Bot, Boxes, ClipboardList, GitBranch, LayoutDashboard, LibraryBig, LogOut, Menu, MessageSquareText, Puzzle, Route, Settings, Users, Workflow, X } from 'lucide-vue-next'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from './api'
@@ -22,6 +22,7 @@ const groups = [
   ] },
   { label: '可观测性', items: [
     { to: '/conversation-threads', label: '会话线程', icon: GitBranch },
+    { to: '/thread-routing', label: 'Thread 路由', icon: Route },
     { to: '/messages', label: '消息记录', icon: MessageSquareText },
   ] },
   { label: '系统', items: [

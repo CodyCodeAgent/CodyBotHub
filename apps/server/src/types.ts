@@ -37,6 +37,49 @@ export interface ResolvedRoute {
   topicId: string
   turnInstructions: string
   modelConfig: ResolvedModelConfig
+  threadRouting: ThreadRoutingDecision
+}
+
+export type ThreadRoutingDecisionType = 'fixed' | 'new' | 'reused' | 'experience'
+export interface ThreadRoutingDecision {
+  type: ThreadRoutingDecisionType
+  matchedThreadId: string
+  score: number
+  reason: string
+}
+
+export interface ThreadRoutingRuleRecord {
+  sceneId: string
+  sceneName: string
+  botId: string
+  botName: string
+  workspaceId: string
+  workspaceName: string
+  enabled: boolean
+  reuseThreshold: number
+  experienceThreshold: number
+  timeWindowHours: number
+  maxCandidates: number
+  structuredWeight: number
+  textWeight: number
+  profileCount: number
+  updatedAt: string
+}
+
+export interface ThreadProfileRecord {
+  coreThreadId: string
+  conversationKey: string
+  botId: string
+  workspaceId: string
+  sceneId: string
+  title: string
+  fields: Record<string, string>
+  normalizedText: string
+  experienceSummary: string
+  messageCount: number
+  lastMessageLogId: string
+  lastActiveAt: string
+  updatedAt: string
 }
 
 export type ModelConfigSource = 'scene' | 'bot' | 'platform' | 'codex'
@@ -53,6 +96,8 @@ export interface PlatformSettingsRecord {
   defaultModel: string
   defaultReasoningEffort: string
   modelFallbackEnabled: boolean
+  threadProfileRefreshIntervalSeconds: number
+  threadProfileBatchSize: number
 }
 
 export interface ProvisioningJobRecord {
@@ -154,6 +199,7 @@ export interface MessageLogRecord {
   reasoningEffortSource: ModelConfigSource
   modelFallback: boolean
   coreThreadId: string
+  threadRouting: ThreadRoutingDecision
   receivedAt: string
   startedAt: string
   completedAt: string

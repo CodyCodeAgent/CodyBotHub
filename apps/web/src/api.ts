@@ -1,4 +1,4 @@
-import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, Workspace, WorkspaceResources } from './types'
+import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -44,6 +44,10 @@ export const api = {
     return request<{ items: ConversationThread[]; total: number }>(`/conversation-threads${params.size ? `?${params.toString()}` : ''}`)
   },
   conversationThread: (id: string) => request<ConversationThread>(`/conversation-threads/${encodeURIComponent(id)}`),
+  threadRoutingRules: () => request<ThreadRoutingRule[]>('/thread-routing-rules'),
+  saveThreadRoutingRule: (sceneId: string, value: Pick<ThreadRoutingRule, 'enabled'|'reuseThreshold'|'experienceThreshold'|'timeWindowHours'|'maxCandidates'|'structuredWeight'|'textWeight'>) => request<ThreadRoutingRule>(`/thread-routing-rules/${encodeURIComponent(sceneId)}`, { method: 'PUT', body: JSON.stringify(value) }),
+  threadProfiles: (limit = 100) => request<ThreadProfile[]>(`/thread-routing-profiles?limit=${limit}`),
+  threadRoutingDecisions: (limit = 50) => request<ThreadRoutingDecisionRecord[]>(`/thread-routing-decisions?limit=${limit}`),
   messageLogs: (filters: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}) => {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))

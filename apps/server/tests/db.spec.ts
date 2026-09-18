@@ -170,7 +170,7 @@ describe('HubStore invariants', () => {
 
   it('resolves model and reasoning overrides per field without changing Thread identity', () => {
     const store = new HubStore(':memory:')
-    store.setPlatformSettings({ basePrompt: '', defaultModel: 'platform-model', defaultReasoningEffort: 'medium', modelFallbackEnabled: false })
+    store.setPlatformSettings({ basePrompt: '', defaultModel: 'platform-model', defaultReasoningEffort: 'medium', modelFallbackEnabled: false, threadProfileRefreshIntervalSeconds: 5, threadProfileBatchSize: 20 })
     const linked = workspace(store, 'Model routing')
     const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id, model: 'bot-model' })
     store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Deep analysis', prompt: '', priority: 10, enabled: true, model: '', reasoningEffort: 'high', matcher: { chatIds: [], messageTypes: [], textIncludes: ['deep'], cardTitleIncludes: [] } })
@@ -226,6 +226,37 @@ describe('HubStore invariants', () => {
       items: [{ id: route.conversationKey, botName: 'Thread Bot', conversationMode: 'chat', chatId: 'oc_thread', chatName: '告警排查群', chatMode: 'group', topicId: '', coreThreadId: '01-thread-id' }],
     })
     expect(store.getConversationThread(route.conversationKey)).toMatchObject({ conversationMode: 'chat', coreThreadId: '01-thread-id' })
+    store.close()
+  })
+
+  it('builds Thread profiles asynchronously and reuses a matching Thread inside the same Scene', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Thread intelligence')
+    const bot = store.createBot({ name: 'Thread Bot', defaultWorkspaceId: linked.id, conversationMode: 'topic' })
+    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: '', priority: 10, enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
+    store.setThreadRoutingRule(scene.id, { enabled: true, reuseThreshold: 0.85, experienceThreshold: 0.55, timeWindowHours: 72, maxCandidates: 100, structuredWeight: 0.7, textWeight: 0.3 })
+    const base = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-history', messageId: 'message-history',
+      conversation: { id: 'oc_history', scope: 'topic' as const, rootId: 'root-history' }, sender: { id: 'app-alert', type: 'app' as const },
+      content: { type: 'interactive', title: 'Argos critical EventBus lag' }, text: 'service: life.marketing.budget event: sync_allocation group: budget_consumer partition: 7 lag alarm', attachments: [], addressedToAgent: false,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const historicalRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, base), base)
+    const conversation = store.getOrCreateConversation(historicalRoute, base.conversation.id)
+    store.setConversationThread(conversation.id, 'thread-history')
+    const log = store.createMessageLog(bot.id, historicalRoute, base)
+    store.setMessageLogThread(log.id, 'thread-history')
+    store.finishMessageLog(log.id, { responseContent: '确认 EventBus 消费延迟，重启消费者后恢复。' })
+    expect(store.listThreadProfiles()).toHaveLength(0)
+    expect(store.processThreadProfileJobs()).toEqual({ processed: 1, failed: 0 })
+    expect(store.listThreadProfiles()).toMatchObject([{ coreThreadId: 'thread-history', sceneId: scene.id, messageCount: 1 }])
+
+    const next = { ...base, eventId: 'event-new', messageId: 'message-new', conversation: { id: 'oc_new', scope: 'topic' as const, rootId: 'root-new' }, createdAtIso: new Date().toISOString() }
+    const routed = store.resolveThreadRouting(store.resolveRoute(bot.id, next), next)
+    expect(routed).toMatchObject({ threadRouting: { type: 'reused', matchedThreadId: 'thread-history' } })
+    expect(routed.conversationKey).not.toBe(historicalRoute.conversationKey)
+    expect(store.getConversationThread(routed.conversationKey)).toMatchObject({ coreThreadId: 'thread-history' })
+    expect(routed.threadRouting.score).toBeGreaterThanOrEqual(0.85)
     store.close()
   })
 

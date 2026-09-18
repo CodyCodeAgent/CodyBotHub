@@ -94,15 +94,16 @@ export class FeishuBotManager {
   }
 
   private async onMessage(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
-    const route = this.store.resolveRoute(botId, message)
-    const independentlyMatches = route.scene ? this.store.messageMatchesScene(route.scene.id, message) : false
+    const baseRoute = this.store.resolveRoute(botId, message)
+    const independentlyMatches = baseRoute.scene ? this.store.messageMatchesScene(baseRoute.scene.id, message) : false
     // Cards and alerts are normally authored by apps. Accept them only when
     // their content independently matches a Scene; a group binding alone must
     // not turn every bot message into an agent turn or create reply loops.
-    if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !route.scene || !independentlyMatches)) return
-    if (message.sender.type === 'user' && route.routeSource === 'topic_context' && !message.addressedToAgent && !independentlyMatches) return
-    if (!route.scene && message.conversation.scope !== 'private' && !message.addressedToAgent) return
-    if (route.scene && route.routeSource === 'matcher' && route.topicId) this.store.rememberTopicRoute(botId, message.conversation.id, route.topicId, route.scene.id)
+    if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !baseRoute.scene || !independentlyMatches)) return
+    if (message.sender.type === 'user' && baseRoute.routeSource === 'topic_context' && !message.addressedToAgent && !independentlyMatches) return
+    if (!baseRoute.scene && message.conversation.scope !== 'private' && !message.addressedToAgent) return
+    if (baseRoute.scene && baseRoute.routeSource === 'matcher' && baseRoute.topicId) this.store.rememberTopicRoute(botId, message.conversation.id, baseRoute.topicId, baseRoute.scene.id)
+    const route = this.store.resolveThreadRouting(baseRoute, message)
     const log = this.store.createMessageLog(botId, route, message)
     let receiptReactionId = ''
     try { receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo') }

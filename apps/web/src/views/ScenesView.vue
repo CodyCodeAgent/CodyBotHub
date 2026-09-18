@@ -6,7 +6,7 @@ import ModelConfigFields from '../components/ModelConfigFields.vue'
 import type { Bot, ChatMetadata, ModelCatalog, PlatformSettings, Scene, SkillPackage, Workspace } from '../types'
 const items = ref<Scene[]>([]), bots = ref<Bot[]>([]), workspaces = ref<Workspace[]>([]), packages = ref<SkillPackage[]>([]), messageTypeOptions = ref<MessageTypeOption[]>([]), open = ref(false), saving = ref(false), error = ref('')
 const catalog = ref<ModelCatalog>({ items: [], defaultModel: '', defaultReasoningEffort: '' })
-const platform = ref<PlatformSettings>({ basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true })
+const platform = ref<PlatformSettings>({ basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true, threadProfileRefreshIntervalSeconds: 5, threadProfileBatchSize: 20 })
 const chats = ref<ChatMetadata[]>([]), chatInput = ref<HTMLTextAreaElement | null>(null), chatPickerFocused = ref(false)
 const form = reactive({ id: '', botId: '', workspaceId: '', name: '', prompt: '', priority: 100, enabled: true, model: '', reasoningEffort: '', chatIdsText: '', messageTypes: [] as string[], textIncludesText: '', cardTitleIncludesText: '', skillPackageIds: [] as string[], retrievalBoostsText: '', skillCandidateLimit: 12, knowledgeCandidateLimit: 12, minimumScore: 1 })
 const selectedBot = computed(() => bots.value.find(item => item.id === form.botId))

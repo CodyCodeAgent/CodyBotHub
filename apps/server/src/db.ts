@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
+import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
 type Row = Record<string, unknown>
 type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'model' | 'reasoningEffort' | 'retrieval'> & {
@@ -55,6 +56,8 @@ export class HubStore {
         default_model TEXT NOT NULL DEFAULT '',
         default_reasoning_effort TEXT NOT NULL DEFAULT '',
         model_fallback_enabled INTEGER NOT NULL DEFAULT 1 CHECK (model_fallback_enabled IN (0, 1)),
+        thread_profile_refresh_interval_seconds INTEGER NOT NULL DEFAULT 5,
+        thread_profile_batch_size INTEGER NOT NULL DEFAULT 20,
         updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -179,6 +182,40 @@ export class HubStore {
         updated_at TEXT NOT NULL,
         UNIQUE (bot_id, chat_id, topic_id)
       );
+      CREATE TABLE IF NOT EXISTS thread_routing_rules (
+        scene_id TEXT PRIMARY KEY REFERENCES scenes(id) ON DELETE CASCADE,
+        enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+        reuse_threshold REAL NOT NULL DEFAULT 0.85,
+        experience_threshold REAL NOT NULL DEFAULT 0.55,
+        time_window_hours INTEGER NOT NULL DEFAULT 72,
+        max_candidates INTEGER NOT NULL DEFAULT 100,
+        structured_weight REAL NOT NULL DEFAULT 0.7,
+        text_weight REAL NOT NULL DEFAULT 0.3,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS thread_profiles (
+        core_thread_id TEXT NOT NULL,
+        conversation_key TEXT NOT NULL,
+        bot_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        scene_id TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT '',
+        fields_json TEXT NOT NULL DEFAULT '{}',
+        normalized_text TEXT NOT NULL DEFAULT '',
+        experience_summary TEXT NOT NULL DEFAULT '',
+        message_count INTEGER NOT NULL DEFAULT 0,
+        last_message_log_id TEXT NOT NULL DEFAULT '',
+        last_active_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (core_thread_id, scene_id)
+      );
+      CREATE TABLE IF NOT EXISTS thread_profile_jobs (
+        log_id TEXT PRIMARY KEY REFERENCES message_logs(id) ON DELETE CASCADE,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS scene_picker_prompts (
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
         chat_id TEXT NOT NULL,
@@ -230,6 +267,10 @@ export class HubStore {
         reasoning_effort_source TEXT NOT NULL DEFAULT 'codex',
         model_fallback INTEGER NOT NULL DEFAULT 0 CHECK (model_fallback IN (0, 1)),
         core_thread_id TEXT NOT NULL DEFAULT '',
+        thread_route_type TEXT NOT NULL DEFAULT 'fixed',
+        matched_thread_id TEXT NOT NULL DEFAULT '',
+        thread_match_score REAL NOT NULL DEFAULT 0,
+        thread_match_reason TEXT NOT NULL DEFAULT '',
         received_at TEXT NOT NULL,
         started_at TEXT NOT NULL,
         completed_at TEXT NOT NULL DEFAULT '',
@@ -268,6 +309,8 @@ export class HubStore {
       );
       CREATE INDEX IF NOT EXISTS idx_scenes_bot ON scenes(bot_id, enabled, priority);
       CREATE INDEX IF NOT EXISTS idx_threads_chat ON conversation_threads(bot_id, chat_id, topic_id);
+      CREATE INDEX IF NOT EXISTS idx_thread_profiles_scope ON thread_profiles(bot_id, workspace_id, scene_id, last_active_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_thread_profile_jobs_created ON thread_profile_jobs(created_at);
       CREATE INDEX IF NOT EXISTS idx_topic_context_scene ON topic_route_contexts(scene_id);
       CREATE INDEX IF NOT EXISTS idx_chat_metadata_name ON chat_metadata(bot_id, name);
       DELETE FROM inbound_events WHERE rowid NOT IN (SELECT MIN(rowid) FROM inbound_events GROUP BY bot_id, message_id);
@@ -294,6 +337,8 @@ export class HubStore {
     if (!settingsColumns.some(column => String(column.name) === 'default_model')) this.db.exec("ALTER TABLE platform_settings ADD COLUMN default_model TEXT NOT NULL DEFAULT ''")
     if (!settingsColumns.some(column => String(column.name) === 'default_reasoning_effort')) this.db.exec("ALTER TABLE platform_settings ADD COLUMN default_reasoning_effort TEXT NOT NULL DEFAULT ''")
     if (!settingsColumns.some(column => String(column.name) === 'model_fallback_enabled')) this.db.exec('ALTER TABLE platform_settings ADD COLUMN model_fallback_enabled INTEGER NOT NULL DEFAULT 1 CHECK (model_fallback_enabled IN (0, 1))')
+    if (!settingsColumns.some(column => String(column.name) === 'thread_profile_refresh_interval_seconds')) this.db.exec('ALTER TABLE platform_settings ADD COLUMN thread_profile_refresh_interval_seconds INTEGER NOT NULL DEFAULT 5')
+    if (!settingsColumns.some(column => String(column.name) === 'thread_profile_batch_size')) this.db.exec('ALTER TABLE platform_settings ADD COLUMN thread_profile_batch_size INTEGER NOT NULL DEFAULT 20')
     const sceneColumns = this.db.prepare('PRAGMA table_info(scenes)').all() as Row[]
     if (!sceneColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE scenes ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if (!sceneColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE scenes ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
@@ -314,6 +359,13 @@ export class HubStore {
         ORDER BY r.updated_at DESC LIMIT 1
       ), '') WHERE core_thread_id = ''`)
     }
+    if (!messageLogColumns.some(column => String(column.name) === 'thread_route_type')) this.db.exec("ALTER TABLE message_logs ADD COLUMN thread_route_type TEXT NOT NULL DEFAULT 'fixed'")
+    if (!messageLogColumns.some(column => String(column.name) === 'matched_thread_id')) this.db.exec("ALTER TABLE message_logs ADD COLUMN matched_thread_id TEXT NOT NULL DEFAULT ''")
+    if (!messageLogColumns.some(column => String(column.name) === 'thread_match_score')) this.db.exec('ALTER TABLE message_logs ADD COLUMN thread_match_score REAL NOT NULL DEFAULT 0')
+    if (!messageLogColumns.some(column => String(column.name) === 'thread_match_reason')) this.db.exec("ALTER TABLE message_logs ADD COLUMN thread_match_reason TEXT NOT NULL DEFAULT ''")
+    this.db.prepare(`INSERT OR IGNORE INTO thread_profile_jobs (log_id, created_at, updated_at)
+      SELECT m.id, ?, ? FROM message_logs m LEFT JOIN thread_profiles p ON p.core_thread_id = m.core_thread_id AND p.scene_id = m.scene_id
+      WHERE m.status = 'completed' AND m.core_thread_id <> '' AND (p.core_thread_id IS NULL OR m.received_at > p.last_active_at)`).run(now(), now())
     const sessionColumns = this.db.prepare('PRAGMA table_info(auth_sessions)').all() as Row[]
     if (!sessionColumns.some(column => String(column.name) === 'account_id')) this.db.exec("ALTER TABLE auth_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
     const accountColumns = this.db.prepare('PRAGMA table_info(admin_accounts)').all() as Row[]
@@ -428,7 +480,8 @@ export class HubStore {
     const row = this.db.prepare('SELECT * FROM platform_settings WHERE id = 1').get() as Row | undefined
     return row ? {
       basePrompt: String(row.base_prompt), defaultModel: String(row.default_model), defaultReasoningEffort: String(row.default_reasoning_effort), modelFallbackEnabled: Boolean(row.model_fallback_enabled),
-    } : { basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true }
+      threadProfileRefreshIntervalSeconds: Number(row.thread_profile_refresh_interval_seconds), threadProfileBatchSize: Number(row.thread_profile_batch_size),
+    } : { basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true, threadProfileRefreshIntervalSeconds: 5, threadProfileBatchSize: 20 }
   }
   getPlatformPrompt(): string { return this.getPlatformSettings().basePrompt }
   setPlatformPrompt(value: string): string {
@@ -436,9 +489,11 @@ export class HubStore {
     return value
   }
   setPlatformSettings(input: PlatformSettingsRecord): PlatformSettingsRecord {
-    this.db.prepare(`INSERT INTO platform_settings (id, base_prompt, default_model, default_reasoning_effort, model_fallback_enabled, updated_at) VALUES (1, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET base_prompt = excluded.base_prompt, default_model = excluded.default_model, default_reasoning_effort = excluded.default_reasoning_effort, model_fallback_enabled = excluded.model_fallback_enabled, updated_at = excluded.updated_at`)
-      .run(input.basePrompt, input.defaultModel, input.defaultReasoningEffort, input.modelFallbackEnabled ? 1 : 0, now())
+    const interval = Math.min(3600, Math.max(1, Math.trunc(input.threadProfileRefreshIntervalSeconds || 5)))
+    const batchSize = Math.min(100, Math.max(1, Math.trunc(input.threadProfileBatchSize || 20)))
+    this.db.prepare(`INSERT INTO platform_settings (id, base_prompt, default_model, default_reasoning_effort, model_fallback_enabled, thread_profile_refresh_interval_seconds, thread_profile_batch_size, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET base_prompt = excluded.base_prompt, default_model = excluded.default_model, default_reasoning_effort = excluded.default_reasoning_effort, model_fallback_enabled = excluded.model_fallback_enabled, thread_profile_refresh_interval_seconds = excluded.thread_profile_refresh_interval_seconds, thread_profile_batch_size = excluded.thread_profile_batch_size, updated_at = excluded.updated_at`)
+      .run(input.basePrompt, input.defaultModel, input.defaultReasoningEffort, input.modelFallbackEnabled ? 1 : 0, interval, batchSize, now())
     return this.getPlatformSettings()
   }
 
@@ -708,8 +763,9 @@ export class HubStore {
       id, event_id, message_id, bot_id, bot_name, chat_id, topic_id, sender_id,
       message_type, inbound_content, inbound_raw_json, status, workspace_id, workspace_name,
       scene_id, scene_name, skill_packages_json, investigation_json, model, reasoning_effort, model_source,
-      reasoning_effort_source, model_fallback, core_thread_id, received_at, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?)`)
+      reasoning_effort_source, model_fallback, core_thread_id, thread_route_type, matched_thread_id,
+      thread_match_score, thread_match_reason, received_at, started_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         id, message.eventId, message.messageId, botId, route.bot.name,
         message.conversation.id, route.topicId, message.sender.id,
@@ -717,6 +773,7 @@ export class HubStore {
         route.workspace.id, route.workspace.name, route.scene?.id ?? '', route.scene?.name ?? '',
         JSON.stringify(route.skillPackages.map(item => ({ id: item.id, name: item.name }))),
         route.modelConfig.model, route.modelConfig.reasoningEffort, route.modelConfig.modelSource, route.modelConfig.reasoningEffortSource, coreThreadId,
+        route.threadRouting.type, route.threadRouting.matchedThreadId, route.threadRouting.score, route.threadRouting.reason,
         message.createdAtIso, startedAt,
       )
     return this.getMessageLog(id)
@@ -729,6 +786,8 @@ export class HubStore {
     const error = update.error?.slice(0, 20_000) ?? ''
     this.db.prepare(`UPDATE message_logs SET response_content = ?, status = ?, error = ?, completed_at = ?, duration_ms = ? WHERE id = ?`)
       .run((update.responseContent ?? '').slice(0, 500_000), error ? 'failed' : 'completed', error, completedAt, durationMs, id)
+    if (!error) this.db.prepare(`INSERT INTO thread_profile_jobs (log_id, created_at, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(log_id) DO UPDATE SET error = '', updated_at = excluded.updated_at`).run(id, completedAt, completedAt)
     return this.getMessageLog(id)
   }
 
@@ -806,6 +865,7 @@ export class HubStore {
     model: String(row.model), reasoningEffort: String(row.reasoning_effort), modelSource: String(row.model_source) as ModelConfigSource,
     reasoningEffortSource: String(row.reasoning_effort_source) as ModelConfigSource, modelFallback: Boolean(row.model_fallback),
     coreThreadId: String(row.core_thread_id),
+    threadRouting: { type: String(row.thread_route_type || 'fixed') as ThreadRoutingDecision['type'], matchedThreadId: String(row.matched_thread_id || ''), score: Number(row.thread_match_score || 0), reason: String(row.thread_match_reason || '') },
     receivedAt: String(row.received_at), startedAt: String(row.started_at), completedAt: String(row.completed_at),
     durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
   })
@@ -869,8 +929,153 @@ export class HubStore {
     const layers = [settings.basePrompt, workspace.prompt, bot.prompt, scene?.prompt ?? '', ...packages.map(item => item.prompt)]
       .map(value => value.trim()).filter(Boolean)
     if (skillNames.length) layers.push(`当前场景技能包：${skillNames.join('、')}。${skillPolicy}`)
-    return { bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, topicId, turnInstructions: layers.join('\n\n'), modelConfig: { model, reasoningEffort, modelSource, reasoningEffortSource, fallbackEnabled: settings.modelFallbackEnabled } }
+    return { bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, topicId, turnInstructions: layers.join('\n\n'), modelConfig: { model, reasoningEffort, modelSource, reasoningEffortSource, fallbackEnabled: settings.modelFallbackEnabled }, threadRouting: { type: 'fixed', matchedThreadId: '', score: 0, reason: '当前会话固定映射' } }
   }
+
+  resolveThreadRouting(route: ResolvedRoute, message: ChannelInboundMessage): ResolvedRoute {
+    if (!route.scene) return route
+    const existing = this.db.prepare("SELECT core_thread_id FROM conversation_threads WHERE id = ? AND core_thread_id <> ''").get(route.conversationKey) as Row | undefined
+    if (existing) return { ...route, threadRouting: { type: 'fixed', matchedThreadId: String(existing.core_thread_id), score: 1, reason: '当前群或话题已经绑定 Codex Thread' } }
+    const rule = this.getThreadRoutingRule(route.scene.id)
+    if (!rule.enabled) return { ...route, threadRouting: { type: 'new', matchedThreadId: '', score: 0, reason: '当前场景未启用智能 Thread 路由' } }
+    const cutoff = new Date(Date.now() - rule.timeWindowHours * 60 * 60_000).toISOString()
+    const rows = this.db.prepare(`SELECT * FROM thread_profiles WHERE bot_id = ? AND workspace_id = ? AND scene_id = ? AND last_active_at >= ?
+      ORDER BY last_active_at DESC LIMIT ?`).all(route.bot.id, route.workspace.id, route.scene.id, cutoff, rule.maxCandidates) as Row[]
+    const current = extractThreadFeatures(message.text, message.content?.raw)
+    let best: { row: Row; score: number; reason: string } | null = null
+    for (const row of rows) {
+      let fields: Record<string, string> = {}
+      try { fields = JSON.parse(String(row.fields_json)) as Record<string, string> } catch { /* ignore invalid historical metadata */ }
+      const previous = extractThreadFeatures(String(row.normalized_text))
+      previous.fields = fields
+      const similarity = scoreThreadSimilarity(current, previous, { structuredWeight: rule.structuredWeight, textWeight: rule.textWeight })
+      const ageRatio = Math.min(1, Math.max(0, (Date.now() - Date.parse(String(row.last_active_at))) / (rule.timeWindowHours * 60 * 60_000)))
+      const score = similarity.sameEvent ? similarity.score : similarity.score * (1 - ageRatio * 0.1)
+      const labels: Record<string, string> = { service: '服务', event: 'Event', group: 'Group', partition: 'Partition', task_id: '任务 ID', check_index: 'checkIndex', warn_id: 'warn_id', alarm_rule: '告警规则', title: '标题' }
+      const reason = `${similarity.sameEvent ? '稳定事件特征命中；' : ''}${similarity.matchedFields.map(name => labels[name] ?? name).join('、') || '文本特征'}；文本相似度 ${(similarity.textScore * 100).toFixed(0)}%`
+      if (!best || score > best.score) best = { row, score, reason }
+    }
+    if (!best) return { ...route, threadRouting: { type: 'new', matchedThreadId: '', score: 0, reason: '同场景时间窗口内没有历史 Thread 画像' } }
+    const matchedThreadId = String(best.row.core_thread_id)
+    if (best.score >= rule.reuseThreshold) {
+      const conversation = this.getOrCreateConversation(route, message.conversation.id)
+      this.setConversationThread(conversation.id, matchedThreadId)
+      return { ...route, threadRouting: { type: 'reused', matchedThreadId, score: best.score, reason: best.reason } }
+    }
+    if (best.score >= rule.experienceThreshold) {
+      const experience = String(best.row.experience_summary).slice(0, 8_000)
+      const context = `# 历史相似经验\n以下内容来自同一 Bot、工作区和场景下的历史 Thread，仅作调查线索，必须重新验证当前样本。\n历史 Thread：${matchedThreadId}\n匹配分数：${best.score.toFixed(3)}\n匹配依据：${best.reason}\n\n${experience || '历史 Thread 尚未生成可用结论摘要。'}`
+      return { ...route, turnInstructions: [route.turnInstructions, context].filter(Boolean).join('\n\n'), threadRouting: { type: 'experience', matchedThreadId, score: best.score, reason: best.reason } }
+    }
+    return { ...route, threadRouting: { type: 'new', matchedThreadId, score: best.score, reason: `最高候选低于经验阈值；${best.reason}` } }
+  }
+
+  listThreadRoutingRules(): ThreadRoutingRuleRecord[] {
+    const rows = this.db.prepare(`SELECT s.id AS scene_id, s.name AS scene_name, s.bot_id, b.name AS bot_name, s.workspace_id, w.name AS workspace_name,
+      COALESCE(r.enabled, 0) AS enabled, COALESCE(r.reuse_threshold, 0.85) AS reuse_threshold,
+      COALESCE(r.experience_threshold, 0.55) AS experience_threshold, COALESCE(r.time_window_hours, 72) AS time_window_hours,
+      COALESCE(r.max_candidates, 100) AS max_candidates, COALESCE(r.structured_weight, 0.7) AS structured_weight,
+      COALESCE(r.text_weight, 0.3) AS text_weight, COALESCE(r.updated_at, '') AS updated_at,
+      (SELECT COUNT(*) FROM thread_profiles p WHERE p.bot_id = s.bot_id AND p.workspace_id = s.workspace_id AND p.scene_id = s.id) AS profile_count
+      FROM scenes s JOIN bots b ON b.id = s.bot_id JOIN workspaces w ON w.id = s.workspace_id
+      LEFT JOIN thread_routing_rules r ON r.scene_id = s.id ORDER BY s.priority, s.name COLLATE NOCASE`).all() as Row[]
+    return rows.map(row => this.threadRoutingRule(row))
+  }
+
+  getThreadRoutingRule(sceneId: string): ThreadRoutingRuleRecord {
+    const rule = this.listThreadRoutingRules().find(item => item.sceneId === sceneId)
+    if (!rule) throw new Error('Scene not found')
+    return rule
+  }
+
+  setThreadRoutingRule(sceneId: string, input: Pick<ThreadRoutingRuleRecord, 'enabled' | 'reuseThreshold' | 'experienceThreshold' | 'timeWindowHours' | 'maxCandidates' | 'structuredWeight' | 'textWeight'>): ThreadRoutingRuleRecord {
+    this.getScene(sceneId)
+    const reuseThreshold = Math.min(1, Math.max(0, Number(input.reuseThreshold)))
+    const experienceThreshold = Math.min(reuseThreshold, Math.max(0, Number(input.experienceThreshold)))
+    const timeWindowHours = Math.min(24 * 365, Math.max(1, Math.trunc(Number(input.timeWindowHours) || 72)))
+    const maxCandidates = Math.min(1_000, Math.max(10, Math.trunc(Number(input.maxCandidates) || 100)))
+    const structuredWeight = Math.min(1, Math.max(0, Number(input.structuredWeight)))
+    const textWeight = Math.min(1, Math.max(0, Number(input.textWeight)))
+    if (structuredWeight + textWeight <= 0) throw new Error('At least one Thread routing weight must be positive')
+    const timestamp = now()
+    this.db.prepare(`INSERT INTO thread_routing_rules (scene_id, enabled, reuse_threshold, experience_threshold, time_window_hours, max_candidates, structured_weight, text_weight, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(scene_id) DO UPDATE SET enabled = excluded.enabled, reuse_threshold = excluded.reuse_threshold,
+      experience_threshold = excluded.experience_threshold, time_window_hours = excluded.time_window_hours, max_candidates = excluded.max_candidates,
+      structured_weight = excluded.structured_weight, text_weight = excluded.text_weight, updated_at = excluded.updated_at`)
+      .run(sceneId, input.enabled ? 1 : 0, reuseThreshold, experienceThreshold, timeWindowHours, maxCandidates, structuredWeight, textWeight, timestamp)
+    return this.getThreadRoutingRule(sceneId)
+  }
+
+  processThreadProfileJobs(limit = 20): { processed: number; failed: number } {
+    const jobs = this.db.prepare('SELECT * FROM thread_profile_jobs ORDER BY created_at LIMIT ?').all(Math.min(100, Math.max(1, limit))) as Row[]
+    let processed = 0, failed = 0
+    for (const job of jobs) {
+      const logId = String(job.log_id)
+      try {
+        this.refreshThreadProfile(logId)
+        this.db.prepare('DELETE FROM thread_profile_jobs WHERE log_id = ?').run(logId)
+        processed += 1
+      } catch (error) {
+        failed += 1
+        const attempts = Number(job.attempts) + 1
+        if (attempts >= 5) this.db.prepare('DELETE FROM thread_profile_jobs WHERE log_id = ?').run(logId)
+        else this.db.prepare('UPDATE thread_profile_jobs SET attempts = ?, error = ?, updated_at = ? WHERE log_id = ?').run(attempts, String(error).slice(0, 2_000), now(), logId)
+      }
+    }
+    return { processed, failed }
+  }
+
+  listThreadProfiles(limit = 100): ThreadProfileRecord[] {
+    return (this.db.prepare('SELECT * FROM thread_profiles ORDER BY last_active_at DESC LIMIT ?').all(Math.min(500, Math.max(1, limit))) as Row[]).map(this.threadProfile)
+  }
+
+  listThreadRoutingDecisions(limit = 50): Array<{ logId: string; messageId: string; sceneName: string; type: ThreadRoutingDecision['type']; coreThreadId: string; matchedThreadId: string; score: number; reason: string; receivedAt: string }> {
+    return (this.db.prepare(`SELECT id, message_id, scene_name, thread_route_type, core_thread_id, matched_thread_id, thread_match_score, thread_match_reason, received_at
+      FROM message_logs WHERE scene_id <> '' ORDER BY received_at DESC LIMIT ?`).all(Math.min(200, Math.max(1, limit))) as Row[]).map(row => ({
+      logId: String(row.id), messageId: String(row.message_id), sceneName: String(row.scene_name), type: String(row.thread_route_type) as ThreadRoutingDecision['type'], coreThreadId: String(row.core_thread_id), matchedThreadId: String(row.matched_thread_id), score: Number(row.thread_match_score), reason: String(row.thread_match_reason), receivedAt: String(row.received_at),
+    }))
+  }
+
+  private refreshThreadProfile(logId: string): void {
+    const log = this.db.prepare("SELECT * FROM message_logs WHERE id = ? AND status = 'completed' AND core_thread_id <> ''").get(logId) as Row | undefined
+    if (!log) return
+    const coreThreadId = String(log.core_thread_id)
+    const sceneId = String(log.scene_id)
+    if (!sceneId) return
+    const logs = this.db.prepare(`SELECT * FROM message_logs WHERE core_thread_id = ? AND scene_id = ? AND status = 'completed' ORDER BY received_at DESC LIMIT 50`).all(coreThreadId, sceneId) as Row[]
+    if (!logs.length) return
+    const total = Number((this.db.prepare("SELECT COUNT(*) AS count FROM message_logs WHERE core_thread_id = ? AND scene_id = ? AND status = 'completed'").get(coreThreadId, sceneId) as Row).count)
+    const fieldMap: Record<string, string> = {}
+    const normalized: string[] = []
+    for (const item of [...logs].reverse()) {
+      let raw: unknown = null
+      try { raw = JSON.parse(String(item.inbound_raw_json)) } catch { /* ignore */ }
+      const features = extractThreadFeatures(String(item.inbound_content), raw)
+      Object.assign(fieldMap, features.fields)
+      if (features.normalizedText) normalized.push(features.normalizedText)
+    }
+    const latest = logs[0]!
+    const conversation = this.db.prepare('SELECT id FROM conversation_threads WHERE core_thread_id = ? ORDER BY updated_at DESC LIMIT 1').get(coreThreadId) as Row | undefined
+    if (!conversation) return
+    const title = String(latest.inbound_content).split('\n').map(value => value.trim()).find(Boolean)?.slice(0, 300) ?? ''
+    const summary = String(latest.response_content).trim().slice(0, 8_000)
+    const timestamp = now()
+    this.db.prepare(`INSERT INTO thread_profiles (core_thread_id, conversation_key, bot_id, workspace_id, scene_id, title, fields_json, normalized_text,
+      experience_summary, message_count, last_message_log_id, last_active_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(core_thread_id, scene_id) DO UPDATE SET conversation_key = excluded.conversation_key, bot_id = excluded.bot_id, workspace_id = excluded.workspace_id,
+      scene_id = excluded.scene_id, title = excluded.title, fields_json = excluded.fields_json, normalized_text = excluded.normalized_text,
+      experience_summary = excluded.experience_summary, message_count = excluded.message_count, last_message_log_id = excluded.last_message_log_id,
+      last_active_at = excluded.last_active_at, updated_at = excluded.updated_at`)
+      .run(coreThreadId, String(conversation.id), String(latest.bot_id), String(latest.workspace_id), String(latest.scene_id), title, JSON.stringify(fieldMap), normalized.join('\n').slice(-50_000), summary, total, String(latest.id), String(latest.received_at), timestamp)
+  }
+
+  private threadRoutingRule = (row: Row): ThreadRoutingRuleRecord => ({
+    sceneId: String(row.scene_id), sceneName: String(row.scene_name), botId: String(row.bot_id), botName: String(row.bot_name), workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), enabled: Boolean(row.enabled), reuseThreshold: Number(row.reuse_threshold), experienceThreshold: Number(row.experience_threshold), timeWindowHours: Number(row.time_window_hours), maxCandidates: Number(row.max_candidates), structuredWeight: Number(row.structured_weight), textWeight: Number(row.text_weight), profileCount: Number(row.profile_count), updatedAt: String(row.updated_at),
+  })
+
+  private threadProfile = (row: Row): ThreadProfileRecord => ({
+    coreThreadId: String(row.core_thread_id), conversationKey: String(row.conversation_key), botId: String(row.bot_id), workspaceId: String(row.workspace_id), sceneId: String(row.scene_id), title: String(row.title), fields: (() => { try { return JSON.parse(String(row.fields_json)) as Record<string, string> } catch { return {} } })(), normalizedText: String(row.normalized_text), experienceSummary: String(row.experience_summary), messageCount: Number(row.message_count), lastMessageLogId: String(row.last_message_log_id), lastActiveAt: String(row.last_active_at), updatedAt: String(row.updated_at),
+  })
 
   messageMatchesScene(sceneId: string, message: ChannelInboundMessage): boolean {
     return this.sceneMatches(this.getScene(sceneId), message)

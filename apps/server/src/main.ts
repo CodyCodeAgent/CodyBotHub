@@ -30,12 +30,29 @@ const provisioning = new FeishuProvisioningService(store, vault, () => feishu.re
 const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))
 const server = createHubServer({ store, vault, runtime, webDist, provisioning, skills, onConfigurationChanged: () => feishu.reload() })
 
+let nextThreadProfileRefreshAt = 0
+const refreshThreadProfiles = () => {
+  try {
+    const settings = store.getPlatformSettings()
+    if (Date.now() < nextThreadProfileRefreshAt) return
+    nextThreadProfileRefreshAt = Date.now() + settings.threadProfileRefreshIntervalSeconds * 1_000
+    const result = store.processThreadProfileJobs(settings.threadProfileBatchSize)
+    if (result.processed || result.failed) console.info(`[thread-profiles] processed=${result.processed} failed=${result.failed}`)
+  } catch (error) {
+    console.error('[thread-profiles] worker failed:', error)
+  }
+}
+const threadProfileTimer = setInterval(refreshThreadProfiles, 1_000)
+threadProfileTimer.unref()
+setImmediate(refreshThreadProfiles)
+
 server.listen(port, host, () => {
   console.log(`CodyBotHub listening on http://${host}:${port}`)
   void feishu.reload()
 })
 
 const shutdown = () => {
+  clearInterval(threadProfileTimer)
   feishu.stop()
   server.close(() => { void runtime.dispose().finally(() => { store.close(); process.exit(0) }) })
 }

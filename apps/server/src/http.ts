@@ -185,6 +185,26 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         }
         const conversationThreadId = matchId(url.pathname, '/api/conversation-threads/')
         if (conversationThreadId && method === 'GET') return sendJson(response, 200, store.getConversationThread(conversationThreadId))
+        if (method === 'GET' && url.pathname === '/api/thread-routing-rules') return sendJson(response, 200, store.listThreadRoutingRules())
+        const threadRoutingSceneId = matchId(url.pathname, '/api/thread-routing-rules/')
+        if (threadRoutingSceneId && method === 'PUT') {
+          const body = await readJson(request)
+          const result = store.setThreadRoutingRule(threadRoutingSceneId, {
+            enabled: bool(body.enabled), reuseThreshold: number(body.reuseThreshold, 0.85), experienceThreshold: number(body.experienceThreshold, 0.55),
+            timeWindowHours: number(body.timeWindowHours, 72), maxCandidates: number(body.maxCandidates, 100),
+            structuredWeight: number(body.structuredWeight, 0.7), textWeight: number(body.textWeight, 0.3),
+          })
+          audit('thread_routing.update', 'scene', threadRoutingSceneId, `更新场景 ${result.sceneName} 的 Thread 路由规则`, { ...result })
+          return sendJson(response, 200, result)
+        }
+        if (method === 'GET' && url.pathname === '/api/thread-routing-profiles') {
+          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 100
+          return sendJson(response, 200, store.listThreadProfiles(number(limit, 100)))
+        }
+        if (method === 'GET' && url.pathname === '/api/thread-routing-decisions') {
+          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
+          return sendJson(response, 200, store.listThreadRoutingDecisions(number(limit, 50)))
+        }
         if (method === 'GET' && url.pathname === '/api/message-logs') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
           const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0
@@ -202,10 +222,10 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (method === 'GET' && url.pathname === '/api/settings') return sendJson(response, 200, store.getPlatformSettings())
         if (method === 'PUT' && url.pathname === '/api/settings') {
           const body = await readJson(request)
-          const input = { basePrompt: optional(body, 'basePrompt'), defaultModel: optional(body, 'defaultModel'), defaultReasoningEffort: optional(body, 'defaultReasoningEffort'), modelFallbackEnabled: bool(body.modelFallbackEnabled, true) }
+          const input = { basePrompt: optional(body, 'basePrompt'), defaultModel: optional(body, 'defaultModel'), defaultReasoningEffort: optional(body, 'defaultReasoningEffort'), modelFallbackEnabled: bool(body.modelFallbackEnabled, true), threadProfileRefreshIntervalSeconds: number(body.threadProfileRefreshIntervalSeconds, 5), threadProfileBatchSize: number(body.threadProfileBatchSize, 20) }
           await runtime.validateModelSelection(input.defaultModel, input.defaultReasoningEffort)
           const result = store.setPlatformSettings(input)
-          audit('settings.update', 'settings', 'platform', '更新平台设置', { defaultModel: result.defaultModel, defaultReasoningEffort: result.defaultReasoningEffort, modelFallbackEnabled: result.modelFallbackEnabled })
+          audit('settings.update', 'settings', 'platform', '更新平台设置', { defaultModel: result.defaultModel, defaultReasoningEffort: result.defaultReasoningEffort, modelFallbackEnabled: result.modelFallbackEnabled, threadProfileRefreshIntervalSeconds: result.threadProfileRefreshIntervalSeconds, threadProfileBatchSize: result.threadProfileBatchSize })
           return sendJson(response, 200, result)
         }
         if (method === 'GET' && url.pathname === '/api/provisioning') return sendJson(response, 200, provisioning.list())

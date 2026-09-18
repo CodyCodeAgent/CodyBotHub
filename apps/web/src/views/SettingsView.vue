@@ -8,6 +8,7 @@ import type { ModelCatalog, SkillSource, ThemePreference, Workspace } from '../t
 
 const basePrompt = ref(''), theme = ref<ThemePreference>('system'), saving = ref(false), saved = ref(false), error = ref('')
 const defaultModel = ref(''), defaultReasoningEffort = ref(''), modelFallbackEnabled = ref(true)
+const threadProfileRefreshIntervalSeconds = ref(5), threadProfileBatchSize = ref(20)
 const catalog = ref<ModelCatalog>({ items: [], defaultModel: '', defaultReasoningEffort: '' })
 const sources = ref<SkillSource[]>([]), workspaces = ref<Workspace[]>([]), dialogOpen = ref(false), syncingId = ref('')
 const form = reactive({ id: '', name: '', repositoryUrl: '', branch: 'main', workspaceId: '', skillRoots: 'skills\n.codex/skills\n.agents/skills', knowledgeRoots: '', autoInstall: false })
@@ -15,12 +16,12 @@ const form = reactive({ id: '', name: '', repositoryUrl: '', branch: 'main', wor
 const showError = (value: unknown) => { error.value = value instanceof Error ? value.message : '操作失败' }
 const load = async () => {
   const [settings, preferences, sourceItems, workspaceItems, models] = await Promise.all([api.settings(), api.preferences(), api.skillSources(), api.workspaces(), api.models()])
-  basePrompt.value = settings.basePrompt; defaultModel.value = settings.defaultModel; defaultReasoningEffort.value = settings.defaultReasoningEffort; modelFallbackEnabled.value = settings.modelFallbackEnabled; theme.value = preferences.theme; sources.value = sourceItems; workspaces.value = workspaceItems; catalog.value = models
+  basePrompt.value = settings.basePrompt; defaultModel.value = settings.defaultModel; defaultReasoningEffort.value = settings.defaultReasoningEffort; modelFallbackEnabled.value = settings.modelFallbackEnabled; threadProfileRefreshIntervalSeconds.value = settings.threadProfileRefreshIntervalSeconds; threadProfileBatchSize.value = settings.threadProfileBatchSize; theme.value = preferences.theme; sources.value = sourceItems; workspaces.value = workspaceItems; catalog.value = models
 }
 onMounted(() => { void load().catch(showError) })
 const save = async () => {
   saving.value = true; saved.value = false; error.value = ''
-  try { await Promise.all([api.saveSettings({ basePrompt: basePrompt.value, defaultModel: defaultModel.value, defaultReasoningEffort: defaultReasoningEffort.value, modelFallbackEnabled: modelFallbackEnabled.value }), api.savePreferences(theme.value)]); announceTheme(theme.value); saved.value = true; setTimeout(() => { saved.value = false }, 1800) }
+  try { await Promise.all([api.saveSettings({ basePrompt: basePrompt.value, defaultModel: defaultModel.value, defaultReasoningEffort: defaultReasoningEffort.value, modelFallbackEnabled: modelFallbackEnabled.value, threadProfileRefreshIntervalSeconds: threadProfileRefreshIntervalSeconds.value, threadProfileBatchSize: threadProfileBatchSize.value }), api.savePreferences(theme.value)]); announceTheme(theme.value); saved.value = true; setTimeout(() => { saved.value = false }, 1800) }
   catch (value) { showError(value) } finally { saving.value = false }
 }
 const openSource = (source?: SkillSource) => {
@@ -59,6 +60,7 @@ const remove = async (source: SkillSource) => {
           </div><small>偏好绑定当前登录账号，并在这台设备上立即生效。</small></div>
           <ModelConfigFields :catalog="catalog" :model="defaultModel" :reasoning-effort="defaultReasoningEffort" inherit-label="使用 Codex 账号默认模型" :inherited-model="catalog.defaultModel" @update:model="defaultModel = $event" @update:reasoning-effort="defaultReasoningEffort = $event" />
           <label class="check-card"><input v-model="modelFallbackEnabled" type="checkbox" /><span><strong>模型不可用时自动回退</strong><small>配置的模型或推理强度不可用时，改用当前 Codex 账号默认值，并在消息记录中标记。</small></span></label>
+          <div class="field"><label>Thread 画像异步更新</label><div class="field-grid"><div class="field"><label for="profile-interval">更新间隔（秒）</label><input id="profile-interval" v-model.number="threadProfileRefreshIntervalSeconds" type="number" min="1" max="3600" /><small>后台任务按此间隔读取已完成消息。</small></div><div class="field"><label for="profile-batch">每批处理数量</label><input id="profile-batch" v-model.number="threadProfileBatchSize" type="number" min="1" max="100" /><small>控制单次画像更新的消息数量。</small></div></div><small>消息处理不等待画像更新；新消息只查询已经生成的画像索引。修改后立即生效，无需重启服务。</small></div>
           <div class="field"><label for="base-prompt">平台基础 Prompt</label><textarea id="base-prompt" v-model="basePrompt" rows="12" placeholder="定义平台级安全边界、统一行为和输出规范…" /><small>最终顺序：平台基础 → 工作区 → Bot → 场景 → 技能包。</small></div>
           <div v-if="error" class="error-banner" role="alert">{{ error }}</div><div v-if="saved" class="notice" role="status">设置已保存。</div>
         </div><footer class="dialog-actions"><button class="button" :disabled="saving"><Save :size="16" />{{ saving ? '保存中…' : '保存设置' }}</button></footer>
