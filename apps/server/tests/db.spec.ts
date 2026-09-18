@@ -117,6 +117,27 @@ describe('HubStore invariants', () => {
     store.close()
   })
 
+  it('lists the persisted relationship between a route and its Codex Thread', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Thread mapping')
+    const bot = store.createBot({ name: 'Thread Bot', defaultWorkspaceId: linked.id })
+    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert triage', prompt: '', priority: 10, replyMode: 'inherit', enabled: true, matcher: { chatIds: ['oc_thread'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
+    const route = store.resolveRoute(bot.id, {
+      provider: 'feishu', accountId: bot.id, eventId: 'event-thread', messageId: 'message-thread',
+      conversation: { id: 'oc_thread', scope: 'group' }, sender: { id: 'ou_1', type: 'user' },
+      content: { type: 'text' }, text: 'check thread mapping', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    })
+    const conversation = store.getOrCreateConversation(route, 'oc_thread', '')
+    store.setConversationThread(conversation.id, '01-thread-id')
+    expect(store.listConversationRoutes({ sceneId: scene.id, query: '01-thread-id' })).toMatchObject({
+      total: 1,
+      items: [{ id: route.conversationKey, botName: 'Thread Bot', sceneName: 'Alert triage', workspaceName: 'Thread mapping', chatId: 'oc_thread', topicId: '', coreThreadId: '01-thread-id' }],
+    })
+    expect(store.getConversationRoute(route.conversationKey)).toMatchObject({ sceneId: scene.id, coreThreadId: '01-thread-id' })
+    store.close()
+  })
+
   it('persists provisioning progress and fails interrupted scans on restart', () => {
     const store = new HubStore(':memory:')
     const job = store.createProvisioningJob({ name: 'Bot' })

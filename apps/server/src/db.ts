@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ConversationRouteRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 
 type Row = Record<string, unknown>
@@ -600,9 +600,42 @@ export class HubStore {
     return this.sceneMatches(this.getScene(sceneId), message)
   }
 
+  listConversationRoutes(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; query?: string } = {}): { items: ConversationRouteRecord[]; total: number } {
+    const filters: string[] = [], params: Array<string | number> = []
+    if (input.botId) { filters.push('r.bot_id = ?'); params.push(input.botId) }
+    if (input.sceneId) { filters.push('r.scene_id = ?'); params.push(input.sceneId) }
+    if (input.query?.trim()) {
+      const value = `%${input.query.trim()}%`
+      filters.push('(r.id LIKE ? OR r.chat_id LIKE ? OR r.topic_id LIKE ? OR r.core_thread_id LIKE ? OR b.name LIKE ? OR COALESCE(s.name, \'\') LIKE ? OR w.name LIKE ?)')
+      params.push(value, value, value, value, value, value, value)
+    }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
+    const from = `FROM conversation_routes r JOIN bots b ON b.id = r.bot_id JOIN workspaces w ON w.id = r.workspace_id LEFT JOIN scenes s ON s.id = r.scene_id`
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count ${from} ${where}`).get(...params) as Row).count)
+    const limit = Math.min(200, Math.max(1, Math.trunc(input.limit ?? 50))), offset = Math.max(0, Math.trunc(input.offset ?? 0))
+    const rows = this.db.prepare(`SELECT r.*, b.name AS bot_name, w.name AS workspace_name, COALESCE(s.name, '') AS scene_name ${from} ${where} ORDER BY r.updated_at DESC, r.id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
+    return { items: rows.map(this.conversationRoute), total }
+  }
+
+  getConversationRoute(id: string): ConversationRouteRecord {
+    const row = this.db.prepare(`SELECT r.*, b.name AS bot_name, w.name AS workspace_name, COALESCE(s.name, '') AS scene_name
+      FROM conversation_routes r JOIN bots b ON b.id = r.bot_id JOIN workspaces w ON w.id = r.workspace_id LEFT JOIN scenes s ON s.id = r.scene_id WHERE r.id = ?`).get(id) as Row | undefined
+    if (!row) throw new Error('Conversation route not found')
+    return this.conversationRoute(row)
+  }
+
+  private conversationRoute = (row: Row): ConversationRouteRecord => ({
+    id: String(row.id), botId: String(row.bot_id), botName: String(row.bot_name), sceneId: String(row.scene_id ?? ''), sceneName: String(row.scene_name),
+    workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), chatId: String(row.chat_id), topicId: String(row.topic_id),
+    coreThreadId: String(row.core_thread_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  })
+
   getOrCreateConversation(route: ResolvedRoute, chatId: string, topicId: string): { id: string; threadId: string } {
     const existing = this.db.prepare('SELECT id, core_thread_id FROM conversation_routes WHERE id = ?').get(route.conversationKey) as Row | undefined
-    if (existing) return { id: String(existing.id), threadId: String(existing.core_thread_id) }
+    if (existing) {
+      this.db.prepare('UPDATE conversation_routes SET updated_at = ? WHERE id = ?').run(now(), route.conversationKey)
+      return { id: String(existing.id), threadId: String(existing.core_thread_id) }
+    }
     const timestamp = now()
     this.db.prepare(`INSERT INTO conversation_routes (id, bot_id, scene_id, workspace_id, chat_id, topic_id, core_thread_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)`)
       .run(route.conversationKey, route.bot.id, route.scene?.id ?? null, route.workspace.id, chatId, topicId, timestamp, timestamp)

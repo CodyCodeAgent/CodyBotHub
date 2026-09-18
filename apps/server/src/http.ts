@@ -116,6 +116,19 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         }
 
         if (method === 'GET' && url.pathname === '/api/dashboard') return sendJson(response, 200, store.stats())
+        if (method === 'GET' && url.pathname === '/api/conversation-routes') {
+          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
+          const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0
+          return sendJson(response, 200, store.listConversationRoutes({
+            limit: number(limit, 50),
+            offset: number(offset, 0),
+            botId: url.searchParams.get('botId') ?? '',
+            sceneId: url.searchParams.get('sceneId') ?? '',
+            query: url.searchParams.get('query') ?? '',
+          }))
+        }
+        const conversationRouteId = matchId(url.pathname, '/api/conversation-routes/')
+        if (conversationRouteId && method === 'GET') return sendJson(response, 200, store.getConversationRoute(conversationRouteId))
         if (method === 'GET' && url.pathname === '/api/message-logs') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
           const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0

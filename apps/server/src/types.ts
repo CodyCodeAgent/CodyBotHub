@@ -124,3 +124,18 @@ export interface AuditLogRecord {
   ipAddress: string
   createdAt: string
 }
+
+export interface ConversationRouteRecord {
+  id: string
+  botId: string
+  botName: string
+  sceneId: string
+  sceneName: string
+  workspaceId: string
+  workspaceName: string
+  chatId: string
+  topicId: string
+  coreThreadId: string
+  createdAt: string
+  updatedAt: string
+}

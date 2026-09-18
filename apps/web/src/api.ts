@@ -1,4 +1,4 @@
-import type { AdminAccount, AuditLog, Bot, MessageLog, ProvisioningJob, Scene, SkillPackage, Workspace } from './types'
+import type { AdminAccount, AuditLog, Bot, ConversationRoute, MessageLog, ProvisioningJob, Scene, SkillPackage, Workspace } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -31,6 +31,12 @@ export const api = {
   },
   auditLog: (id: string) => request<AuditLog>(`/audit-logs/${encodeURIComponent(id)}`),
   dashboard: () => request<{ workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number }>('/dashboard'),
+  conversationRoutes: (filters: { limit?: number; offset?: number; botId?: string; sceneId?: string; query?: string } = {}) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+    return request<{ items: ConversationRoute[]; total: number }>(`/conversation-routes${params.size ? `?${params.toString()}` : ''}`)
+  },
+  conversationRoute: (id: string) => request<ConversationRoute>(`/conversation-routes/${encodeURIComponent(id)}`),
   messageLogs: (filters: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}) => {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
