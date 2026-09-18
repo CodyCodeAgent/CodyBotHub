@@ -1,4 +1,4 @@
-import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ProvisioningJob, Scene, SkillPackage, Workspace } from './types'
+import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, Workspace } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -21,6 +21,8 @@ export const api = {
   setup: (loginName: string, displayName: string, password: string) => request<AuthStatus>('/auth/setup', { method: 'POST', body: JSON.stringify({ loginName, displayName, password }) }),
   login: (loginName: string, password: string) => request<AuthStatus>('/auth/login', { method: 'POST', body: JSON.stringify({ loginName, password }) }),
   logout: () => request('/auth/logout', { method: 'POST' }),
+  preferences: () => request<{ theme: ThemePreference }>('/preferences'),
+  savePreferences: (theme: ThemePreference) => request<{ theme: ThemePreference }>('/preferences', { method: 'PUT', body: JSON.stringify({ theme }) }),
   accounts: () => request<AdminAccount[]>('/accounts'),
   saveAccount: (value: { id?: string; loginName: string; displayName: string; password?: string }) => request<AdminAccount>(value.id ? `/accounts/${value.id}` : '/accounts', { method: value.id ? 'PUT' : 'POST', body: JSON.stringify(value) }),
   deleteAccount: (id: string) => request<void>(`/accounts/${id}`, { method: 'DELETE' }),
@@ -53,6 +55,16 @@ export const api = {
   workspaces: () => request<Workspace[]>('/workspaces'),
   directories: (path?: string) => request<DirectoryListing>(`/filesystem/directories${path ? `?path=${encodeURIComponent(path)}` : ''}`),
   skills: (workspaceId: string) => request<SkillOption[]>(`/skills?workspaceId=${encodeURIComponent(workspaceId)}`),
+  skillSources: () => request<SkillSource[]>('/skill-sources'),
+  saveSkillSource: (value: Partial<SkillSource> & { name: string; repositoryUrl: string; branch: string; workspaceId: string; skillRoots: string[]; knowledgeRoots: string[]; autoInstall: boolean }) => request<SkillSource>(value.id ? `/skill-sources/${value.id}` : '/skill-sources', { method: value.id ? 'PUT' : 'POST', body: JSON.stringify(value) }),
+  deleteSkillSource: (id: string) => request<void>(`/skill-sources/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  syncSkillSource: (id: string) => request<{ source: SkillSource; installed: number; skipped: number }>(`/skill-sources/${encodeURIComponent(id)}/sync`, { method: 'POST' }),
+  skillCatalog: (filters: { workspaceId?: string; sourceId?: string; status?: string; query?: string } = {}) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value)
+    return request<SkillCatalogItem[]>(`/skill-catalog${params.size ? `?${params.toString()}` : ''}`)
+  },
+  installSkills: (value: { sourceId: string; workspaceId: string; skillKeys?: string[]; all?: boolean; force?: boolean }) => request<{ installed: number; skipped: number; errors: string[] }>('/skill-catalog/install', { method: 'POST', body: JSON.stringify(value) }),
   feishuMessageTypes: () => request<MessageTypeOption[]>('/feishu/message-types'),
   saveWorkspace: (value: Partial<Workspace> & { name: string; path: string }) => request<Workspace>(value.id ? `/workspaces/${value.id}` : '/workspaces', { method: value.id ? 'PUT' : 'POST', body: JSON.stringify(value) }),
   deleteWorkspace: (id: string) => request<void>(`/workspaces/${id}`, { method: 'DELETE' }),

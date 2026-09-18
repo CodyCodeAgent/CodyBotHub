@@ -10,6 +10,7 @@ import type { SceneRecord, SkillPackageRecord } from './types.js'
 import type { FeishuProvisioningService, ProvisioningRequest } from './provisioning.js'
 import { listBrowsableDirectories } from './directories.js'
 import type { CodyBotRuntime } from './runtime.js'
+import type { SkillSyncService } from './skills.js'
 
 type Json = Record<string, unknown>
 
@@ -55,9 +56,10 @@ export interface HubServerOptions {
   webDist?: string
   onConfigurationChanged?: () => void | Promise<void>
   provisioning: FeishuProvisioningService
+  skills: SkillSyncService
 }
 
-export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, provisioning }: HubServerOptions) => {
+export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, provisioning, skills }: HubServerOptions) => {
   const auth = new AuthService(store)
 
   return createServer(async (request, response) => {
@@ -82,6 +84,15 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (!auth.isAuthenticated(request)) throw new HttpError(401, 'Authentication required')
         const actor = auth.currentAccount(request)!
         const audit = (action: string, targetType: string, targetId: string, summary: string, details: Record<string, unknown> = {}) => store.createAuditLog({ actor, action, targetType, targetId, summary, details, ipAddress: requestIp(request) })
+
+        if (method === 'GET' && url.pathname === '/api/preferences') return sendJson(response, 200, { theme: actor.theme })
+        if (method === 'PUT' && url.pathname === '/api/preferences') {
+          const body = await readJson(request), theme = optional(body, 'theme')
+          if (!['system', 'light', 'dark'].includes(theme)) throw new HttpError(400, 'theme must be system, light, or dark')
+          const account = store.setAdminTheme(actor.id, theme as 'system' | 'light' | 'dark')
+          audit('preferences.update', 'account', actor.id, `切换界面主题：${theme}`)
+          return sendJson(response, 200, { theme: account.theme })
+        }
 
         if (method === 'GET' && url.pathname === '/api/accounts') return sendJson(response, 200, store.listAdminAccounts())
         if (method === 'POST' && url.pathname === '/api/accounts') {
@@ -113,6 +124,43 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           const workspace = store.listWorkspaces().find(item => item.id === url.searchParams.get('workspaceId'))
           if (!workspace) throw new HttpError(404, 'Workspace not found')
           return sendJson(response, 200, (await runtime.listSkills(workspace.path)).filter(skill => skill.enabled))
+        }
+
+        if (method === 'GET' && url.pathname === '/api/skill-sources') return sendJson(response, 200, store.listSkillSources())
+        if (method === 'POST' && url.pathname === '/api/skill-sources') {
+          const body = await readJson(request), result = store.createSkillSource(skillSourceInput(body))
+          audit('skill_source.create', 'skill_source', result.id, `创建技能源 ${result.name}`, { workspaceId: result.workspaceId, repositoryUrl: result.repositoryUrl })
+          return sendJson(response, 201, result)
+        }
+        const skillSourceMatch = url.pathname.match(/^\/api\/skill-sources\/([^/]+)(?:\/(sync))?$/u)
+        if (skillSourceMatch) {
+          const sourceId = decodeURIComponent(skillSourceMatch[1]!), action = skillSourceMatch[2]
+          if (method === 'POST' && action === 'sync') {
+            const result = await skills.sync(sourceId)
+            audit('skill_source.sync', 'skill_source', sourceId, `同步技能源 ${result.source.name}`, { commit: result.source.lastCommit, installed: result.installed, skipped: result.skipped })
+            return sendJson(response, 200, result)
+          }
+          if (!action && method === 'PUT') {
+            const result = store.updateSkillSource(sourceId, skillSourceInput(await readJson(request)))
+            audit('skill_source.update', 'skill_source', sourceId, `更新技能源 ${result.name}`)
+            return sendJson(response, 200, result)
+          }
+          if (!action && method === 'DELETE') {
+            const item = store.getSkillSource(sourceId)
+            store.deleteSkillSource(sourceId)
+            await skills.removeSource(sourceId)
+            audit('skill_source.delete', 'skill_source', sourceId, `删除技能源 ${item.name}`)
+            response.statusCode = 204; return response.end()
+          }
+        }
+        if (method === 'GET' && url.pathname === '/api/skill-catalog') {
+          return sendJson(response, 200, await skills.catalog({ workspaceId: url.searchParams.get('workspaceId') ?? '', sourceId: url.searchParams.get('sourceId') ?? '', status: url.searchParams.get('status') ?? '', query: url.searchParams.get('query') ?? '' }))
+        }
+        if (method === 'POST' && url.pathname === '/api/skill-catalog/install') {
+          const body = await readJson(request)
+          const result = await skills.install({ sourceId: required(body, 'sourceId'), workspaceId: required(body, 'workspaceId'), skillKeys: stringList(body.skillKeys), all: bool(body.all), force: bool(body.force) })
+          audit('skill.install', 'skill_source', String(body.sourceId), `安装或更新 Skill：${result.installed} 个`, { installed: result.installed, skipped: result.skipped, errors: result.errors })
+          return sendJson(response, 200, result)
         }
 
         if (method === 'GET' && url.pathname === '/api/dashboard') return sendJson(response, 200, store.stats())
@@ -253,6 +301,11 @@ const sceneInput = (body: Json): Omit<SceneRecord, 'id' | 'createdAt' | 'updated
 
 const skillPackageInput = (body: Json): Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => ({
   workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), skills: stringList(body.skills), fallbackMode: ['mixed', 'package_only'].includes(String(body.fallbackMode)) ? String(body.fallbackMode) as 'mixed' | 'package_only' : 'package_first',
+})
+
+const skillSourceInput = (body: Json) => ({
+  name: required(body, 'name'), repositoryUrl: required(body, 'repositoryUrl'), branch: optional(body, 'branch') || 'main', workspaceId: required(body, 'workspaceId'),
+  skillRoots: stringList(body.skillRoots).length ? stringList(body.skillRoots) : ['skills', '.codex/skills', '.agents/skills'], knowledgeRoots: stringList(body.knowledgeRoots), autoInstall: bool(body.autoInstall),
 })
 
 const messageStatus = (error: unknown): number => {

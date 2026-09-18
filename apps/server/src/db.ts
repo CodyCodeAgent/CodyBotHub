@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 
 type Row = Record<string, unknown>
@@ -38,6 +38,7 @@ export class HubStore {
         password_hash TEXT NOT NULL,
         is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1)),
         enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        theme TEXT NOT NULL DEFAULT 'system' CHECK (theme IN ('system', 'light', 'dark')),
         last_login_at TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -213,6 +214,36 @@ export class HubStore {
         duration_ms INTEGER,
         UNIQUE (bot_id, message_id)
       );
+      CREATE TABLE IF NOT EXISTS skill_sources (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        repository_url TEXT NOT NULL,
+        branch TEXT NOT NULL DEFAULT 'main',
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        skill_roots_json TEXT NOT NULL DEFAULT '[]',
+        knowledge_roots_json TEXT NOT NULL DEFAULT '[]',
+        auto_install INTEGER NOT NULL DEFAULT 0 CHECK (auto_install IN (0, 1)),
+        last_synced_at TEXT NOT NULL DEFAULT '',
+        last_commit TEXT NOT NULL DEFAULT '',
+        last_error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, name)
+      );
+      CREATE TABLE IF NOT EXISTS skill_installations (
+        source_id TEXT NOT NULL REFERENCES skill_sources(id) ON DELETE CASCADE,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        skill_key TEXT NOT NULL,
+        target_name TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        target_path TEXT NOT NULL,
+        installed_commit TEXT NOT NULL DEFAULT '',
+        source_checksum TEXT NOT NULL DEFAULT '',
+        installed_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source_id, workspace_id, skill_key),
+        UNIQUE (workspace_id, target_path)
+      );
       CREATE INDEX IF NOT EXISTS idx_scenes_bot ON scenes(bot_id, enabled, priority);
       CREATE INDEX IF NOT EXISTS idx_threads_chat ON conversation_threads(bot_id, chat_id, topic_id);
       CREATE INDEX IF NOT EXISTS idx_topic_context_scene ON topic_route_contexts(scene_id);
@@ -225,6 +256,8 @@ export class HubStore {
       CREATE INDEX IF NOT EXISTS idx_message_logs_scene ON message_logs(scene_id, received_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_account_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_skill_sources_workspace ON skill_sources(workspace_id, name);
+      CREATE INDEX IF NOT EXISTS idx_skill_installations_workspace ON skill_installations(workspace_id, target_name);
       DROP TABLE IF EXISTS conversation_routes;
       DROP TABLE IF EXISTS topic_scene_bindings;
     `)
@@ -237,6 +270,7 @@ export class HubStore {
     if (!sessionColumns.some(column => String(column.name) === 'account_id')) this.db.exec("ALTER TABLE auth_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
     const accountColumns = this.db.prepare('PRAGMA table_info(admin_accounts)').all() as Row[]
     if (!accountColumns.some(column => String(column.name) === 'is_primary')) this.db.exec('ALTER TABLE admin_accounts ADD COLUMN is_primary INTEGER NOT NULL DEFAULT 0 CHECK (is_primary IN (0, 1))')
+    if (!accountColumns.some(column => String(column.name) === 'theme')) this.db.exec("ALTER TABLE admin_accounts ADD COLUMN theme TEXT NOT NULL DEFAULT 'system' CHECK (theme IN ('system', 'light', 'dark'))")
     const legacy = this.db.prepare('SELECT password_hash, created_at, updated_at FROM admin_credentials WHERE id = 1').get() as Row | undefined
     if (legacy && !(this.db.prepare('SELECT 1 FROM admin_accounts LIMIT 1').get())) {
       this.db.prepare('INSERT INTO admin_accounts (id, login_name, display_name, password_hash, is_primary, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, 1, ?, ?)')
@@ -286,9 +320,14 @@ export class HubStore {
     if (!this.db.prepare('DELETE FROM admin_accounts WHERE id = ?').run(id).changes) throw new Error('Account not found')
   }
   touchAdminLogin(id: string): void { this.db.prepare('UPDATE admin_accounts SET last_login_at = ? WHERE id = ?').run(now(), id) }
+  setAdminTheme(id: string, theme: AdminAccountRecord['theme']): AdminAccountRecord {
+    if (!['system', 'light', 'dark'].includes(theme)) throw new Error('Theme must be system, light, or dark')
+    if (!this.db.prepare('UPDATE admin_accounts SET theme = ?, updated_at = ? WHERE id = ?').run(theme, now(), id).changes) throw new Error('Account not found')
+    return this.getAdminAccount(id)
+  }
   private adminAccount = (row: Row): AdminAccountRecord => ({
     id: String(row.id), loginName: String(row.login_name), displayName: String(row.display_name), primary: Boolean(row.is_primary), enabled: Boolean(row.enabled),
-    lastLoginAt: String(row.last_login_at), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+    theme: (String(row.theme || 'system') as AdminAccountRecord['theme']), lastLoginAt: String(row.last_login_at), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   })
 
   createSession(tokenHash: string, accountId: string, expiresAt: string): void {
@@ -370,7 +409,7 @@ export class HubStore {
     if (Number(used.count) > 0) throw new Error('Workspace is still used by a Bot, Scene, or Skill Package')
     if (!this.db.prepare('DELETE FROM workspaces WHERE id = ?').run(id).changes) throw new Error('Workspace not found')
   }
-  private getWorkspace(id: string): WorkspaceRecord {
+  getWorkspace(id: string): WorkspaceRecord {
     const row = this.db.prepare('SELECT * FROM workspaces WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new Error('Workspace not found')
     return this.workspace(row)
@@ -378,6 +417,67 @@ export class HubStore {
   private workspace = (row: Row): WorkspaceRecord => ({
     id: String(row.id), name: String(row.name), path: String(row.path), prompt: String(row.prompt),
     createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  })
+
+  listSkillSources(): SkillSourceRecord[] {
+    return (this.db.prepare(`SELECT s.*, w.name AS workspace_name FROM skill_sources s JOIN workspaces w ON w.id = s.workspace_id ORDER BY s.name COLLATE NOCASE`).all() as Row[]).map(this.skillSource)
+  }
+  getSkillSource(id: string): SkillSourceRecord {
+    const row = this.db.prepare(`SELECT s.*, w.name AS workspace_name FROM skill_sources s JOIN workspaces w ON w.id = s.workspace_id WHERE s.id = ?`).get(id) as Row | undefined
+    if (!row) throw new Error('Skill source not found')
+    return this.skillSource(row)
+  }
+  createSkillSource(input: { name: string; repositoryUrl: string; branch: string; workspaceId: string; skillRoots: string[]; knowledgeRoots: string[]; autoInstall: boolean }): SkillSourceRecord {
+    this.getWorkspace(input.workspaceId)
+    const id = randomUUID(), timestamp = now()
+    this.db.prepare(`INSERT INTO skill_sources (id, name, repository_url, branch, workspace_id, skill_roots_json, knowledge_roots_json, auto_install, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.repositoryUrl, input.branch, input.workspaceId, JSON.stringify(input.skillRoots), JSON.stringify(input.knowledgeRoots), input.autoInstall ? 1 : 0, timestamp, timestamp)
+    return this.getSkillSource(id)
+  }
+  updateSkillSource(id: string, input: { name: string; repositoryUrl: string; branch: string; workspaceId: string; skillRoots: string[]; knowledgeRoots: string[]; autoInstall: boolean }): SkillSourceRecord {
+    this.getWorkspace(input.workspaceId)
+    const current = this.getSkillSource(id)
+    const identityChanged = current.repositoryUrl !== input.repositoryUrl || current.branch !== input.branch || current.workspaceId !== input.workspaceId || JSON.stringify(current.skillRoots) !== JSON.stringify(input.skillRoots)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      if (identityChanged) this.db.prepare('DELETE FROM skill_installations WHERE source_id = ?').run(id)
+      const result = this.db.prepare(`UPDATE skill_sources SET name = ?, repository_url = ?, branch = ?, workspace_id = ?, skill_roots_json = ?, knowledge_roots_json = ?, auto_install = ?, last_synced_at = ?, last_commit = ?, updated_at = ? WHERE id = ?`)
+        .run(input.name, input.repositoryUrl, input.branch, input.workspaceId, JSON.stringify(input.skillRoots), JSON.stringify(input.knowledgeRoots), input.autoInstall ? 1 : 0, identityChanged ? '' : current.lastSyncedAt, identityChanged ? '' : current.lastCommit, now(), id)
+      if (!result.changes) throw new Error('Skill source not found')
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    return this.getSkillSource(id)
+  }
+  deleteSkillSource(id: string): void {
+    if (!this.db.prepare('DELETE FROM skill_sources WHERE id = ?').run(id).changes) throw new Error('Skill source not found')
+  }
+  updateSkillSourceSync(id: string, input: { lastSyncedAt?: string; lastCommit?: string; lastError?: string }): SkillSourceRecord {
+    const current = this.getSkillSource(id)
+    this.db.prepare('UPDATE skill_sources SET last_synced_at = ?, last_commit = ?, last_error = ?, updated_at = ? WHERE id = ?')
+      .run(input.lastSyncedAt ?? current.lastSyncedAt, input.lastCommit ?? current.lastCommit, input.lastError ?? current.lastError, now(), id)
+    return this.getSkillSource(id)
+  }
+  listSkillInstallations(input: { sourceId?: string; workspaceId?: string } = {}): SkillInstallationRecord[] {
+    const filters: string[] = [], params: string[] = []
+    if (input.sourceId) { filters.push('source_id = ?'); params.push(input.sourceId) }
+    if (input.workspaceId) { filters.push('workspace_id = ?'); params.push(input.workspaceId) }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
+    return (this.db.prepare(`SELECT * FROM skill_installations ${where} ORDER BY target_name COLLATE NOCASE`).all(...params) as Row[]).map(this.skillInstallation)
+  }
+  upsertSkillInstallation(input: Omit<SkillInstallationRecord, 'installedAt' | 'updatedAt'>): SkillInstallationRecord {
+    const timestamp = now()
+    this.db.prepare(`INSERT INTO skill_installations (source_id, workspace_id, skill_key, target_name, source_path, target_path, installed_commit, source_checksum, installed_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_id, workspace_id, skill_key) DO UPDATE SET target_name = excluded.target_name, source_path = excluded.source_path, target_path = excluded.target_path, installed_commit = excluded.installed_commit, source_checksum = excluded.source_checksum, updated_at = excluded.updated_at`)
+      .run(input.sourceId, input.workspaceId, input.skillKey, input.targetName, input.sourcePath, input.targetPath, input.installedCommit, input.sourceChecksum, timestamp, timestamp)
+    return this.listSkillInstallations({ sourceId: input.sourceId, workspaceId: input.workspaceId }).find(item => item.skillKey === input.skillKey)!
+  }
+  private skillSource = (row: Row): SkillSourceRecord => ({
+    id: String(row.id), name: String(row.name), repositoryUrl: String(row.repository_url), branch: String(row.branch), workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name),
+    skillRoots: list(row.skill_roots_json), knowledgeRoots: list(row.knowledge_roots_json), autoInstall: Boolean(row.auto_install), lastSyncedAt: String(row.last_synced_at), lastCommit: String(row.last_commit), lastError: String(row.last_error), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  })
+  private skillInstallation = (row: Row): SkillInstallationRecord => ({
+    sourceId: String(row.source_id), workspaceId: String(row.workspace_id), skillKey: String(row.skill_key), targetName: String(row.target_name), sourcePath: String(row.source_path), targetPath: String(row.target_path), installedCommit: String(row.installed_commit), sourceChecksum: String(row.source_checksum), installedAt: String(row.installed_at), updatedAt: String(row.updated_at),
   })
 
   listBots(): BotRecord[] {

@@ -11,6 +11,7 @@ import MessagesView from './views/MessagesView.vue'
 import AccountsView from './views/AccountsView.vue'
 import AuditLogsView from './views/AuditLogsView.vue'
 import ConversationThreadsView from './views/ConversationThreadsView.vue'
+import SkillsView from './views/SkillsView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -22,6 +23,7 @@ export const router = createRouter({
     { path: '/scenes', name: 'scenes', component: ScenesView },
     { path: '/conversation-threads', name: 'conversation-threads', component: ConversationThreadsView },
     { path: '/packages', name: 'packages', component: PackagesView },
+    { path: '/skills', name: 'skills', component: SkillsView },
     { path: '/messages', name: 'messages', component: MessagesView },
     { path: '/accounts', name: 'accounts', component: AccountsView },
     { path: '/audit-logs', name: 'audit-logs', component: AuditLogsView },

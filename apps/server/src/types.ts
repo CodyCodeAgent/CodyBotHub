@@ -108,9 +108,55 @@ export interface AdminAccountRecord {
   displayName: string
   primary: boolean
   enabled: boolean
+  theme: 'system' | 'light' | 'dark'
   lastLoginAt: string
   createdAt: string
   updatedAt: string
+}
+
+export interface SkillSourceRecord {
+  id: string
+  name: string
+  repositoryUrl: string
+  branch: string
+  workspaceId: string
+  workspaceName: string
+  skillRoots: string[]
+  knowledgeRoots: string[]
+  autoInstall: boolean
+  lastSyncedAt: string
+  lastCommit: string
+  lastError: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SkillInstallationRecord {
+  sourceId: string
+  workspaceId: string
+  skillKey: string
+  targetName: string
+  sourcePath: string
+  targetPath: string
+  installedCommit: string
+  sourceChecksum: string
+  installedAt: string
+  updatedAt: string
+}
+
+export interface SkillCatalogItem {
+  key: string
+  name: string
+  description: string
+  sourceId: string
+  sourceName: string
+  workspaceId: string
+  workspaceName: string
+  sourcePath: string
+  targetPath: string
+  status: 'available' | 'installed' | 'update_available' | 'conflict' | 'local'
+  checksum: string
+  installedCommit: string
 }
 
 export interface AuditLogRecord {

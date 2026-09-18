@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { Bot, Boxes, ClipboardList, GitBranch, LayoutDashboard, LogOut, Menu, MessageSquareText, Puzzle, Settings, Users, Workflow, X } from 'lucide-vue-next'
-import { computed, ref } from 'vue'
+import { Bot, Boxes, ClipboardList, GitBranch, LayoutDashboard, LibraryBig, LogOut, Menu, MessageSquareText, Puzzle, Settings, Users, Workflow, X } from 'lucide-vue-next'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from './api'
+import { applyTheme } from './theme'
 
 const route = useRoute()
 const router = useRouter()
@@ -15,12 +16,14 @@ const items = [
   { to: '/scenes', label: '场景路由', icon: Workflow },
   { to: '/conversation-threads', label: '会话线程', icon: GitBranch },
   { to: '/packages', label: '技能包', icon: Puzzle },
+  { to: '/skills', label: 'Skill 中心', icon: LibraryBig },
   { to: '/messages', label: '消息记录', icon: MessageSquareText },
   { to: '/accounts', label: '账号管理', icon: Users },
   { to: '/audit-logs', label: '操作记录', icon: ClipboardList },
   { to: '/settings', label: '平台设置', icon: Settings },
 ]
 const logout = async () => { await api.logout(); await router.push('/auth') }
+onMounted(async () => { const status = await api.authStatus().catch(() => null); applyTheme(status?.account?.theme ?? 'system') })
 </script>
 
 <template>

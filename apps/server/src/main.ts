@@ -7,6 +7,7 @@ import { createHubServer } from './http.js'
 import { CodyBotRuntime } from './runtime.js'
 import { FeishuBotManager } from './feishu.js'
 import { FeishuProvisioningService } from './provisioning.js'
+import { SkillSyncService } from './skills.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = path.resolve(here, '../../..')
@@ -24,7 +25,8 @@ const codexCommand = process.env.CODY_BOT_HUB_CODEX_COMMAND ?? process.env.CODEX
 const runtime = new CodyBotRuntime(store, runtimeDirectory, codexCommand)
 const feishu = new FeishuBotManager(store, vault, runtime, path.join(dataDir, 'attachments'))
 const provisioning = new FeishuProvisioningService(store, vault, () => feishu.reload())
-const server = createHubServer({ store, vault, runtime, webDist, provisioning, onConfigurationChanged: () => feishu.reload() })
+const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))
+const server = createHubServer({ store, vault, runtime, webDist, provisioning, skills, onConfigurationChanged: () => feishu.reload() })
 
 server.listen(port, host, () => {
   console.log(`CodyBotHub listening on http://${host}:${port}`)
