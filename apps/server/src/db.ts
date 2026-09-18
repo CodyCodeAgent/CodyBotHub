@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
@@ -191,6 +191,24 @@ export class HubStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS thread_channels (
+        id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        core_thread_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS conversation_bindings (
+        conversation_key TEXT PRIMARY KEY,
+        thread_channel_id TEXT NOT NULL REFERENCES thread_channels(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        conversation_mode TEXT NOT NULL CHECK (conversation_mode IN ('chat', 'topic')),
+        chat_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (bot_id, chat_id, topic_id)
+      );
       CREATE TABLE IF NOT EXISTS thread_routing_rules (
         scene_id TEXT PRIMARY KEY REFERENCES scenes(id) ON DELETE CASCADE,
         enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
@@ -205,6 +223,7 @@ export class HubStore {
       CREATE TABLE IF NOT EXISTS thread_profiles (
         core_thread_id TEXT NOT NULL,
         conversation_key TEXT NOT NULL,
+        thread_channel_id TEXT NOT NULL DEFAULT '',
         bot_id TEXT NOT NULL,
         workspace_id TEXT NOT NULL,
         scene_id TEXT NOT NULL,
@@ -280,10 +299,29 @@ export class HubStore {
         matched_thread_id TEXT NOT NULL DEFAULT '',
         thread_match_score REAL NOT NULL DEFAULT 0,
         thread_match_reason TEXT NOT NULL DEFAULT '',
+        thread_channel_id TEXT NOT NULL DEFAULT '',
         received_at TEXT NOT NULL,
         started_at TEXT NOT NULL,
         completed_at TEXT NOT NULL DEFAULT '',
         duration_ms INTEGER,
+        UNIQUE (bot_id, message_id)
+      );
+      CREATE TABLE IF NOT EXISTS thread_jobs (
+        id TEXT PRIMARY KEY,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        thread_channel_id TEXT NOT NULL REFERENCES thread_channels(id) ON DELETE CASCADE,
+        event_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        message_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'completed', 'failed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        log_id TEXT NOT NULL DEFAULT '',
+        receipt_reaction_id TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        started_at TEXT NOT NULL DEFAULT '',
+        completed_at TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL,
         UNIQUE (bot_id, message_id)
       );
       CREATE TABLE IF NOT EXISTS skill_sources (
@@ -319,6 +357,9 @@ export class HubStore {
       CREATE INDEX IF NOT EXISTS idx_scenes_bot ON scenes(bot_id, enabled, priority);
       CREATE INDEX IF NOT EXISTS idx_threads_chat ON conversation_threads(bot_id, chat_id, topic_id);
       CREATE INDEX IF NOT EXISTS idx_thread_aliases_target ON thread_conversation_aliases(target_key);
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_channels_core ON thread_channels(core_thread_id) WHERE core_thread_id <> '';
+      CREATE INDEX IF NOT EXISTS idx_conversation_bindings_channel ON conversation_bindings(thread_channel_id);
+      CREATE INDEX IF NOT EXISTS idx_thread_jobs_channel ON thread_jobs(thread_channel_id, status, created_at);
       CREATE INDEX IF NOT EXISTS idx_thread_profiles_scope ON thread_profiles(bot_id, workspace_id, scene_id, last_active_at DESC);
       CREATE INDEX IF NOT EXISTS idx_thread_profile_jobs_created ON thread_profile_jobs(created_at);
       CREATE INDEX IF NOT EXISTS idx_topic_context_scene ON topic_route_contexts(scene_id);
@@ -373,6 +414,11 @@ export class HubStore {
     if (!messageLogColumns.some(column => String(column.name) === 'matched_thread_id')) this.db.exec("ALTER TABLE message_logs ADD COLUMN matched_thread_id TEXT NOT NULL DEFAULT ''")
     if (!messageLogColumns.some(column => String(column.name) === 'thread_match_score')) this.db.exec('ALTER TABLE message_logs ADD COLUMN thread_match_score REAL NOT NULL DEFAULT 0')
     if (!messageLogColumns.some(column => String(column.name) === 'thread_match_reason')) this.db.exec("ALTER TABLE message_logs ADD COLUMN thread_match_reason TEXT NOT NULL DEFAULT ''")
+    if (!messageLogColumns.some(column => String(column.name) === 'thread_channel_id')) this.db.exec("ALTER TABLE message_logs ADD COLUMN thread_channel_id TEXT NOT NULL DEFAULT ''")
+    const threadProfileColumns = this.db.prepare('PRAGMA table_info(thread_profiles)').all() as Row[]
+    if (!threadProfileColumns.some(column => String(column.name) === 'thread_channel_id')) this.db.exec("ALTER TABLE thread_profiles ADD COLUMN thread_channel_id TEXT NOT NULL DEFAULT ''")
+    const threadJobColumns = this.db.prepare('PRAGMA table_info(thread_jobs)').all() as Row[]
+    if (!threadJobColumns.some(column => String(column.name) === 'receipt_reaction_id')) this.db.exec("ALTER TABLE thread_jobs ADD COLUMN receipt_reaction_id TEXT NOT NULL DEFAULT ''")
     this.db.prepare(`WITH canonical AS (
       SELECT p.core_thread_id, p.conversation_key FROM thread_profiles p
       WHERE p.last_active_at = (SELECT MAX(p2.last_active_at) FROM thread_profiles p2 WHERE p2.core_thread_id = p.core_thread_id)
@@ -381,6 +427,20 @@ export class HubStore {
       SELECT c.id, canonical.conversation_key, c.bot_id, c.chat_id, c.topic_id, ?, ?
       FROM conversation_threads c JOIN canonical ON canonical.core_thread_id = c.core_thread_id
       WHERE c.id <> canonical.conversation_key`).run(now(), now())
+    this.db.exec(`INSERT OR IGNORE INTO thread_channels (id, bot_id, core_thread_id, created_at, updated_at)
+      SELECT 'channel:thread:' || core_thread_id, MIN(bot_id), core_thread_id, MIN(created_at), MAX(updated_at)
+      FROM conversation_threads WHERE core_thread_id <> '' GROUP BY core_thread_id;
+      INSERT OR IGNORE INTO thread_channels (id, bot_id, core_thread_id, created_at, updated_at)
+      SELECT 'channel:conversation:' || id, bot_id, '', created_at, updated_at FROM conversation_threads WHERE core_thread_id = '';
+      INSERT OR IGNORE INTO conversation_bindings (conversation_key, thread_channel_id, bot_id, conversation_mode, chat_id, topic_id, created_at, updated_at)
+      SELECT id, CASE WHEN core_thread_id <> '' THEN 'channel:thread:' || core_thread_id ELSE 'channel:conversation:' || id END,
+        bot_id, conversation_mode, chat_id, topic_id, created_at, updated_at FROM conversation_threads;
+      UPDATE thread_profiles SET thread_channel_id = 'channel:thread:' || core_thread_id WHERE thread_channel_id = '' AND core_thread_id <> '';
+      UPDATE message_logs SET thread_channel_id = COALESCE((
+        SELECT cb.thread_channel_id FROM conversation_bindings cb
+        WHERE cb.bot_id = message_logs.bot_id AND cb.chat_id = message_logs.chat_id AND cb.topic_id = message_logs.topic_id LIMIT 1
+      ), CASE WHEN core_thread_id <> '' THEN 'channel:thread:' || core_thread_id ELSE '' END) WHERE thread_channel_id = '';
+    `)
     this.db.prepare(`INSERT OR IGNORE INTO thread_profile_jobs (log_id, created_at, updated_at)
       SELECT m.id, ?, ? FROM message_logs m LEFT JOIN thread_profiles p ON p.core_thread_id = m.core_thread_id AND p.scene_id = m.scene_id
       WHERE m.status = 'completed' AND m.core_thread_id <> '' AND (p.core_thread_id IS NULL OR m.received_at > p.last_active_at)`).run(now(), now())
@@ -775,15 +835,15 @@ export class HubStore {
   createMessageLog(botId: string, route: ResolvedRoute, message: ChannelInboundMessage): MessageLogRecord {
     const id = randomUUID()
     const startedAt = now()
-    const conversation = this.db.prepare('SELECT core_thread_id FROM conversation_threads WHERE id = ?').get(route.conversationKey) as Row | undefined
-    const coreThreadId = String(conversation?.core_thread_id ?? '')
+    const channel = this.db.prepare('SELECT core_thread_id FROM thread_channels WHERE id = ?').get(route.threadChannelId) as Row | undefined
+    const coreThreadId = String(channel?.core_thread_id ?? '')
     this.db.prepare(`INSERT INTO message_logs (
       id, event_id, message_id, bot_id, bot_name, chat_id, topic_id, sender_id,
       message_type, inbound_content, inbound_raw_json, status, workspace_id, workspace_name,
       scene_id, scene_name, skill_packages_json, investigation_json, model, reasoning_effort, model_source,
       reasoning_effort_source, model_fallback, core_thread_id, thread_route_type, matched_thread_id,
-      thread_match_score, thread_match_reason, received_at, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
+      thread_match_score, thread_match_reason, thread_channel_id, received_at, started_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         id, message.eventId, message.messageId, botId, route.bot.name,
         message.conversation.id, route.topicId, message.sender.id,
@@ -792,7 +852,7 @@ export class HubStore {
         JSON.stringify(route.skillPackages.map(item => ({ id: item.id, name: item.name }))),
         route.modelConfig.model, route.modelConfig.reasoningEffort, route.modelConfig.modelSource, route.modelConfig.reasoningEffortSource, coreThreadId,
         route.threadRouting.type, route.threadRouting.matchedThreadId, route.threadRouting.score, route.threadRouting.reason,
-        message.createdAtIso, startedAt,
+        route.threadChannelId, message.createdAtIso, startedAt,
       )
     return this.getMessageLog(id)
   }
@@ -810,7 +870,9 @@ export class HubStore {
   }
 
   failProcessingMessageLogs(error = '服务在任务完成前重启，执行已中断'): number {
-    const pending = this.db.prepare("SELECT id, started_at FROM message_logs WHERE status = 'processing'").all() as Row[]
+    const pending = this.db.prepare(`SELECT m.id, m.started_at FROM message_logs m WHERE m.status = 'processing' AND NOT EXISTS (
+      SELECT 1 FROM thread_jobs tj WHERE tj.log_id = m.id AND tj.status IN ('queued', 'processing')
+    )`).all() as Row[]
     if (!pending.length) return 0
     const completedAt = now()
     const update = this.db.prepare("UPDATE message_logs SET status = 'failed', error = ?, completed_at = ?, duration_ms = ? WHERE id = ? AND status = 'processing'")
@@ -837,6 +899,76 @@ export class HubStore {
     return this.getMessageLog(id)
   }
 
+  getThreadChannel(id: string): { id: string; threadId: string } {
+    const row = this.db.prepare('SELECT id, core_thread_id FROM thread_channels WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Thread Channel not found')
+    return { id: String(row.id), threadId: String(row.core_thread_id) }
+  }
+
+  setThreadChannelCoreThread(id: string, coreThreadId: string): void {
+    const result = this.db.prepare('UPDATE thread_channels SET core_thread_id = ?, updated_at = ? WHERE id = ?').run(coreThreadId, now(), id)
+    if (!result.changes) throw new Error('Thread Channel not found')
+  }
+
+  enqueueThreadJob(botId: string, threadChannelId: string, message: ChannelInboundMessage, logId: string, receiptReactionId = ''): ThreadJobRecord {
+    const id = randomUUID(), timestamp = now()
+    this.db.prepare(`INSERT INTO thread_jobs (id, bot_id, thread_channel_id, event_id, message_id, message_json, status, log_id, receipt_reaction_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`)
+      .run(id, botId, threadChannelId, message.eventId, message.messageId, JSON.stringify(message).slice(0, 1_000_000), logId, receiptReactionId, timestamp, timestamp)
+    return this.getThreadJob(id)
+  }
+
+  recoverThreadJobs(): number {
+    const timestamp = now()
+    return Number(this.db.prepare(`UPDATE thread_jobs SET status = 'failed', error = '服务重启时任务仍在执行，已停止以避免重复执行', completed_at = ?, updated_at = ? WHERE status = 'processing'`)
+      .run(timestamp, timestamp).changes)
+  }
+
+  listQueuedThreadJobs(limit = 200): Array<{ job: ThreadJobRecord; message: ChannelInboundMessage }> {
+    const rows = this.db.prepare("SELECT * FROM thread_jobs WHERE status = 'queued' ORDER BY created_at LIMIT ?").all(Math.min(1_000, Math.max(1, limit))) as Row[]
+    return rows.flatMap(row => {
+      try { return [{ job: this.threadJob(row), message: JSON.parse(String(row.message_json)) as ChannelInboundMessage }] }
+      catch { this.finishThreadJob(String(row.id), 'failed', '队列中的消息数据损坏'); return [] }
+    })
+  }
+
+  startThreadJob(id: string): boolean {
+    const timestamp = now()
+    return this.db.prepare("UPDATE thread_jobs SET status = 'processing', attempts = attempts + 1, started_at = ?, error = '', updated_at = ? WHERE id = ? AND status = 'queued'")
+      .run(timestamp, timestamp, id).changes > 0
+  }
+
+  finishThreadJob(id: string, status: 'completed' | 'failed', error = ''): void {
+    const timestamp = now()
+    this.db.prepare('UPDATE thread_jobs SET status = ?, error = ?, completed_at = ?, updated_at = ? WHERE id = ?')
+      .run(status, error.slice(0, 20_000), timestamp, timestamp, id)
+  }
+
+  getThreadJob(id: string): ThreadJobRecord {
+    const row = this.db.prepare('SELECT * FROM thread_jobs WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Thread Job not found')
+    return this.threadJob(row)
+  }
+
+  listThreadJobs(limit = 100): ThreadJobRecord[] {
+    return (this.db.prepare('SELECT * FROM thread_jobs ORDER BY created_at DESC LIMIT ?').all(Math.min(500, Math.max(1, limit))) as Row[]).map(this.threadJob)
+  }
+
+  private threadJob = (row: Row): ThreadJobRecord => ({
+    id: String(row.id), botId: String(row.bot_id), threadChannelId: String(row.thread_channel_id), eventId: String(row.event_id), messageId: String(row.message_id),
+    status: String(row.status) as ThreadJobRecord['status'], attempts: Number(row.attempts), logId: String(row.log_id), receiptReactionId: String(row.receipt_reaction_id), error: String(row.error),
+    createdAt: String(row.created_at), startedAt: String(row.started_at), completedAt: String(row.completed_at), updatedAt: String(row.updated_at),
+  })
+
+  listThreadChannels(limit = 200): ThreadChannelRecord[] {
+    const rows = this.db.prepare(`SELECT tc.*, b.name AS bot_name,
+      (SELECT COUNT(*) FROM conversation_bindings cb WHERE cb.thread_channel_id = tc.id) AS binding_count,
+      (SELECT COUNT(*) FROM thread_jobs tj WHERE tj.thread_channel_id = tc.id AND tj.status = 'queued') AS queued_jobs,
+      (SELECT COUNT(*) FROM thread_jobs tj WHERE tj.thread_channel_id = tc.id AND tj.status = 'processing') AS processing_jobs
+      FROM thread_channels tc JOIN bots b ON b.id = tc.bot_id ORDER BY tc.updated_at DESC LIMIT ?`).all(Math.min(500, Math.max(1, limit))) as Row[]
+    return rows.map(row => ({ id: String(row.id), botId: String(row.bot_id), botName: String(row.bot_name), coreThreadId: String(row.core_thread_id), bindingCount: Number(row.binding_count), queuedJobs: Number(row.queued_jobs), processingJobs: Number(row.processing_jobs), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }))
+  }
+
   listMessageLogs(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}): { items: MessageLogRecord[]; total: number } {
     const filters: string[] = []
     const params: Array<string | number> = []
@@ -844,9 +976,9 @@ export class HubStore {
     if (input.sceneId) { filters.push('scene_id = ?'); params.push(input.sceneId) }
     if (input.status && ['processing', 'completed', 'failed'].includes(input.status)) { filters.push('status = ?'); params.push(input.status) }
     if (input.query?.trim()) {
-      filters.push('(inbound_content LIKE ? ESCAPE \'\\\' OR response_content LIKE ? ESCAPE \'\\\' OR message_id LIKE ? OR id LIKE ? OR core_thread_id LIKE ?)')
+      filters.push('(inbound_content LIKE ? ESCAPE \'\\\' OR response_content LIKE ? ESCAPE \'\\\' OR message_id LIKE ? OR id LIKE ? OR core_thread_id LIKE ? OR thread_channel_id LIKE ?)')
       const escaped = input.query.trim().replace(/[\\%_]/gu, value => `\\${value}`)
-      params.push(`%${escaped}%`, `%${escaped}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`)
+      params.push(`%${escaped}%`, `%${escaped}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`)
     }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM message_logs ${where}`).get(...params) as Row).count)
@@ -882,7 +1014,7 @@ export class HubStore {
     })(),
     model: String(row.model), reasoningEffort: String(row.reasoning_effort), modelSource: String(row.model_source) as ModelConfigSource,
     reasoningEffortSource: String(row.reasoning_effort_source) as ModelConfigSource, modelFallback: Boolean(row.model_fallback),
-    coreThreadId: String(row.core_thread_id),
+    coreThreadId: String(row.core_thread_id), threadChannelId: String(row.thread_channel_id || ''),
     threadRouting: { type: String(row.thread_route_type || 'fixed') as ThreadRoutingDecision['type'], matchedThreadId: String(row.matched_thread_id || ''), score: Number(row.thread_match_score || 0), reason: String(row.thread_match_reason || '') },
     receivedAt: String(row.received_at), startedAt: String(row.started_at), completedAt: String(row.completed_at),
     durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
@@ -947,18 +1079,27 @@ export class HubStore {
     const layers = [settings.basePrompt, workspace.prompt, bot.prompt, scene?.prompt ?? '', ...packages.map(item => item.prompt)]
       .map(value => value.trim()).filter(Boolean)
     if (skillNames.length) layers.push(`当前场景技能包：${skillNames.join('、')}。${skillPolicy}`)
-    return { bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, topicId, turnInstructions: layers.join('\n\n'), modelConfig: { model, reasoningEffort, modelSource, reasoningEffortSource, fallbackEnabled: settings.modelFallbackEnabled }, threadRouting: { type: 'fixed', matchedThreadId: '', score: 0, reason: '当前会话固定映射' } }
+    return { bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, threadChannelId: '', topicId, turnInstructions: layers.join('\n\n'), modelConfig: { model, reasoningEffort, modelSource, reasoningEffortSource, fallbackEnabled: settings.modelFallbackEnabled }, threadRouting: { type: 'fixed', matchedThreadId: '', score: 0, reason: '当前会话固定映射' } }
   }
 
   resolveThreadRouting(route: ResolvedRoute, message: ChannelInboundMessage): ResolvedRoute {
-    const alias = this.db.prepare(`SELECT a.target_key, c.core_thread_id FROM thread_conversation_aliases a
-      JOIN conversation_threads c ON c.id = a.target_key WHERE a.source_key = ? AND c.core_thread_id <> ''`).get(route.conversationKey) as Row | undefined
-    if (alias) return { ...route, conversationKey: String(alias.target_key), threadRouting: { type: 'fixed', matchedThreadId: String(alias.core_thread_id), score: 1, reason: '当前群或话题已通过会话别名绑定历史 Codex Thread' } }
-    if (!route.scene) return route
-    const existing = this.db.prepare("SELECT core_thread_id FROM conversation_threads WHERE id = ? AND core_thread_id <> ''").get(route.conversationKey) as Row | undefined
-    if (existing) return { ...route, threadRouting: { type: 'fixed', matchedThreadId: String(existing.core_thread_id), score: 1, reason: '当前群或话题已经绑定 Codex Thread' } }
+    const existing = this.db.prepare(`SELECT cb.thread_channel_id, tc.core_thread_id FROM conversation_bindings cb
+      JOIN thread_channels tc ON tc.id = cb.thread_channel_id WHERE cb.conversation_key = ?`).get(route.conversationKey) as Row | undefined
+    if (existing) {
+      const timestamp = now()
+      this.db.prepare('UPDATE conversation_bindings SET updated_at = ? WHERE conversation_key = ?').run(timestamp, route.conversationKey)
+      this.db.prepare('UPDATE thread_channels SET updated_at = ? WHERE id = ?').run(timestamp, String(existing.thread_channel_id))
+      return { ...route, threadChannelId: String(existing.thread_channel_id), threadRouting: { type: 'fixed', matchedThreadId: String(existing.core_thread_id), score: 1, reason: '当前群或话题已经绑定 Thread Channel' } }
+    }
+    if (!route.scene) {
+      const channel = this.bindConversationToChannel(route, message)
+      return { ...route, threadChannelId: channel.id, threadRouting: { type: 'new', matchedThreadId: channel.coreThreadId, score: 0, reason: '默认路由创建新的 Thread Channel' } }
+    }
     const rule = this.getThreadRoutingRule(route.scene.id)
-    if (!rule.enabled) return { ...route, threadRouting: { type: 'new', matchedThreadId: '', score: 0, reason: '当前场景未启用智能 Thread 路由' } }
+    if (!rule.enabled) {
+      const channel = this.bindConversationToChannel(route, message)
+      return { ...route, threadChannelId: channel.id, threadRouting: { type: 'new', matchedThreadId: channel.coreThreadId, score: 0, reason: '当前场景未启用智能 Thread 路由' } }
+    }
     const cutoff = new Date(Date.now() - rule.timeWindowHours * 60 * 60_000).toISOString()
     const rows = this.db.prepare(`SELECT * FROM thread_profiles WHERE bot_id = ? AND workspace_id = ? AND scene_id = ? AND last_active_at >= ?
       ORDER BY last_active_at DESC LIMIT ?`).all(route.bot.id, route.workspace.id, route.scene.id, cutoff, rule.maxCandidates) as Row[]
@@ -976,22 +1117,49 @@ export class HubStore {
       const reason = `${similarity.sameEvent ? '稳定事件特征命中；' : ''}${similarity.matchedFields.map(name => labels[name] ?? name).join('、') || '文本特征'}；文本相似度 ${(similarity.textScore * 100).toFixed(0)}%`
       if (!best || score > best.score) best = { row, score, reason }
     }
-    if (!best) return { ...route, threadRouting: { type: 'new', matchedThreadId: '', score: 0, reason: '同场景时间窗口内没有历史 Thread 画像' } }
+    if (!best) {
+      const channel = this.bindConversationToChannel(route, message)
+      return { ...route, threadChannelId: channel.id, threadRouting: { type: 'new', matchedThreadId: '', score: 0, reason: '同场景时间窗口内没有历史 Thread 画像' } }
+    }
     const matchedThreadId = String(best.row.core_thread_id)
     if (best.score >= rule.reuseThreshold) {
-      const targetKey = String(best.row.conversation_key)
-      const timestamp = now()
-      this.db.prepare(`INSERT INTO thread_conversation_aliases (source_key, target_key, bot_id, chat_id, topic_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_key) DO UPDATE SET target_key = excluded.target_key, updated_at = excluded.updated_at`)
-        .run(route.conversationKey, targetKey, route.bot.id, message.conversation.id, route.topicId, timestamp, timestamp)
-      return { ...route, conversationKey: targetKey, threadRouting: { type: 'reused', matchedThreadId, score: best.score, reason: best.reason } }
+      const channel = this.bindConversationToChannel(route, message, String(best.row.thread_channel_id))
+      return { ...route, threadChannelId: channel.id, threadRouting: { type: 'reused', matchedThreadId, score: best.score, reason: best.reason } }
     }
     if (best.score >= rule.experienceThreshold) {
+      const channel = this.bindConversationToChannel(route, message)
       const experience = String(best.row.experience_summary).slice(0, 8_000)
       const context = `# 历史相似经验\n以下内容来自同一 Bot、工作区和场景下的历史 Thread，仅作调查线索，必须重新验证当前样本。\n历史 Thread：${matchedThreadId}\n匹配分数：${best.score.toFixed(3)}\n匹配依据：${best.reason}\n\n${experience || '历史 Thread 尚未生成可用结论摘要。'}`
-      return { ...route, turnInstructions: [route.turnInstructions, context].filter(Boolean).join('\n\n'), threadRouting: { type: 'experience', matchedThreadId, score: best.score, reason: best.reason } }
+      return { ...route, threadChannelId: channel.id, turnInstructions: [route.turnInstructions, context].filter(Boolean).join('\n\n'), threadRouting: { type: 'experience', matchedThreadId, score: best.score, reason: best.reason } }
     }
-    return { ...route, threadRouting: { type: 'new', matchedThreadId, score: best.score, reason: `最高候选低于经验阈值；${best.reason}` } }
+    const channel = this.bindConversationToChannel(route, message)
+    return { ...route, threadChannelId: channel.id, threadRouting: { type: 'new', matchedThreadId, score: best.score, reason: `最高候选低于经验阈值；${best.reason}` } }
+  }
+
+  private bindConversationToChannel(route: ResolvedRoute, message: ChannelInboundMessage, preferredChannelId = ''): { id: string; coreThreadId: string } {
+    const current = this.db.prepare(`SELECT tc.id, tc.core_thread_id FROM conversation_bindings cb JOIN thread_channels tc ON tc.id = cb.thread_channel_id
+      WHERE cb.conversation_key = ?`).get(route.conversationKey) as Row | undefined
+    if (current) return { id: String(current.id), coreThreadId: String(current.core_thread_id) }
+    const timestamp = now()
+    const createdChannelId = preferredChannelId || randomUUID()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      if (preferredChannelId) {
+        const target = this.db.prepare('SELECT id FROM thread_channels WHERE id = ? AND bot_id = ?').get(preferredChannelId, route.bot.id)
+        if (!target) throw new Error('Thread Channel not found')
+      } else {
+        this.db.prepare(`INSERT INTO thread_channels (id, bot_id, core_thread_id, created_at, updated_at) VALUES (?, ?, '', ?, ?)`)
+          .run(createdChannelId, route.bot.id, timestamp, timestamp)
+      }
+      this.db.prepare(`INSERT OR IGNORE INTO conversation_bindings (conversation_key, thread_channel_id, bot_id, conversation_mode, chat_id, topic_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(route.conversationKey, createdChannelId, route.bot.id, route.conversationMode, message.conversation.id, route.topicId, timestamp, timestamp)
+      const bound = this.db.prepare(`SELECT tc.id, tc.core_thread_id FROM conversation_bindings cb JOIN thread_channels tc ON tc.id = cb.thread_channel_id
+        WHERE cb.conversation_key = ?`).get(route.conversationKey) as Row
+      if (!preferredChannelId && String(bound.id) !== createdChannelId) this.db.prepare("DELETE FROM thread_channels WHERE id = ? AND core_thread_id = ''").run(createdChannelId)
+      this.db.prepare('UPDATE thread_channels SET updated_at = ? WHERE id = ?').run(timestamp, String(bound.id))
+      this.db.exec('COMMIT')
+      return { id: String(bound.id), coreThreadId: String(bound.core_thread_id) }
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
 
   listThreadRoutingRules(): ThreadRoutingRuleRecord[] {
@@ -1053,10 +1221,10 @@ export class HubStore {
     return (this.db.prepare('SELECT * FROM thread_profiles ORDER BY last_active_at DESC LIMIT ?').all(Math.min(500, Math.max(1, limit))) as Row[]).map(this.threadProfile)
   }
 
-  listThreadRoutingDecisions(limit = 50): Array<{ logId: string; messageId: string; sceneName: string; type: ThreadRoutingDecision['type']; coreThreadId: string; matchedThreadId: string; score: number; reason: string; receivedAt: string }> {
-    return (this.db.prepare(`SELECT id, message_id, scene_name, thread_route_type, core_thread_id, matched_thread_id, thread_match_score, thread_match_reason, received_at
+  listThreadRoutingDecisions(limit = 50): Array<{ logId: string; messageId: string; sceneName: string; type: ThreadRoutingDecision['type']; threadChannelId: string; coreThreadId: string; matchedThreadId: string; score: number; reason: string; receivedAt: string }> {
+    return (this.db.prepare(`SELECT id, message_id, scene_name, thread_route_type, thread_channel_id, core_thread_id, matched_thread_id, thread_match_score, thread_match_reason, received_at
       FROM message_logs WHERE scene_id <> '' ORDER BY received_at DESC LIMIT ?`).all(Math.min(200, Math.max(1, limit))) as Row[]).map(row => ({
-      logId: String(row.id), messageId: String(row.message_id), sceneName: String(row.scene_name), type: String(row.thread_route_type) as ThreadRoutingDecision['type'], coreThreadId: String(row.core_thread_id), matchedThreadId: String(row.matched_thread_id), score: Number(row.thread_match_score), reason: String(row.thread_match_reason), receivedAt: String(row.received_at),
+      logId: String(row.id), messageId: String(row.message_id), sceneName: String(row.scene_name), type: String(row.thread_route_type) as ThreadRoutingDecision['type'], threadChannelId: String(row.thread_channel_id), coreThreadId: String(row.core_thread_id), matchedThreadId: String(row.matched_thread_id), score: Number(row.thread_match_score), reason: String(row.thread_match_reason), receivedAt: String(row.received_at),
     }))
   }
 
@@ -1079,19 +1247,18 @@ export class HubStore {
       if (features.normalizedText) normalized.push(features.normalizedText)
     }
     const latest = logs[0]!
-    const conversation = this.db.prepare(`SELECT c.id FROM conversation_threads c LEFT JOIN thread_conversation_aliases a ON a.source_key = c.id
-      WHERE c.core_thread_id = ? AND a.source_key IS NULL ORDER BY c.updated_at DESC LIMIT 1`).get(coreThreadId) as Row | undefined
-    if (!conversation) return
+    const threadChannelId = String(latest.thread_channel_id || '')
+    if (!threadChannelId) return
     const title = String(latest.inbound_content).split('\n').map(value => value.trim()).find(Boolean)?.slice(0, 300) ?? ''
     const summary = String(latest.response_content).trim().slice(0, 8_000)
     const timestamp = now()
-    this.db.prepare(`INSERT INTO thread_profiles (core_thread_id, conversation_key, bot_id, workspace_id, scene_id, title, fields_json, normalized_text,
-      experience_summary, message_count, last_message_log_id, last_active_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(core_thread_id, scene_id) DO UPDATE SET conversation_key = excluded.conversation_key, bot_id = excluded.bot_id, workspace_id = excluded.workspace_id,
+    this.db.prepare(`INSERT INTO thread_profiles (core_thread_id, conversation_key, thread_channel_id, bot_id, workspace_id, scene_id, title, fields_json, normalized_text,
+      experience_summary, message_count, last_message_log_id, last_active_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(core_thread_id, scene_id) DO UPDATE SET conversation_key = excluded.conversation_key, thread_channel_id = excluded.thread_channel_id, bot_id = excluded.bot_id, workspace_id = excluded.workspace_id,
       scene_id = excluded.scene_id, title = excluded.title, fields_json = excluded.fields_json, normalized_text = excluded.normalized_text,
       experience_summary = excluded.experience_summary, message_count = excluded.message_count, last_message_log_id = excluded.last_message_log_id,
       last_active_at = excluded.last_active_at, updated_at = excluded.updated_at`)
-      .run(coreThreadId, String(conversation.id), String(latest.bot_id), String(latest.workspace_id), String(latest.scene_id), title, JSON.stringify(fieldMap), normalized.join('\n').slice(-50_000), summary, total, String(latest.id), String(latest.received_at), timestamp)
+      .run(coreThreadId, threadChannelId, threadChannelId, String(latest.bot_id), String(latest.workspace_id), String(latest.scene_id), title, JSON.stringify(fieldMap), normalized.join('\n').slice(-50_000), summary, total, String(latest.id), String(latest.received_at), timestamp)
   }
 
   private threadRoutingRule = (row: Row): ThreadRoutingRuleRecord => ({
@@ -1099,7 +1266,7 @@ export class HubStore {
   })
 
   private threadProfile = (row: Row): ThreadProfileRecord => ({
-    coreThreadId: String(row.core_thread_id), conversationKey: String(row.conversation_key), botId: String(row.bot_id), workspaceId: String(row.workspace_id), sceneId: String(row.scene_id), title: String(row.title), fields: (() => { try { return JSON.parse(String(row.fields_json)) as Record<string, string> } catch { return {} } })(), normalizedText: String(row.normalized_text), experienceSummary: String(row.experience_summary), messageCount: Number(row.message_count), lastMessageLogId: String(row.last_message_log_id), lastActiveAt: String(row.last_active_at), updatedAt: String(row.updated_at),
+    coreThreadId: String(row.core_thread_id), threadChannelId: String(row.thread_channel_id || row.conversation_key), botId: String(row.bot_id), workspaceId: String(row.workspace_id), sceneId: String(row.scene_id), title: String(row.title), fields: (() => { try { return JSON.parse(String(row.fields_json)) as Record<string, string> } catch { return {} } })(), normalizedText: String(row.normalized_text), experienceSummary: String(row.experience_summary), messageCount: Number(row.message_count), lastMessageLogId: String(row.last_message_log_id), lastActiveAt: String(row.last_active_at), updatedAt: String(row.updated_at),
   })
 
   messageMatchesScene(sceneId: string, message: ChannelInboundMessage): boolean {
@@ -1129,7 +1296,7 @@ export class HubStore {
   }
 
   listChatIdsForMetadataSync(botId: string): string[] {
-    const rows = this.db.prepare(`SELECT chat_id FROM conversation_threads WHERE bot_id = ? UNION SELECT chat_id FROM group_scene_bindings WHERE bot_id = ?`).all(botId, botId) as Row[]
+    const rows = this.db.prepare(`SELECT chat_id FROM conversation_bindings WHERE bot_id = ? UNION SELECT chat_id FROM group_scene_bindings WHERE bot_id = ?`).all(botId, botId) as Row[]
     const ids = new Set(rows.map(row => String(row.chat_id)).filter(Boolean))
     for (const scene of this.listScenes().filter(item => item.botId === botId)) for (const chatId of scene.matcher.chatIds) ids.add(chatId)
     return [...ids]
@@ -1137,48 +1304,38 @@ export class HubStore {
 
   listConversationThreads(input: { limit?: number; offset?: number; botId?: string; query?: string } = {}): { items: ConversationThreadRecord[]; total: number } {
     const filters: string[] = [], params: Array<string | number> = []
-    if (input.botId) { filters.push('r.bot_id = ?'); params.push(input.botId) }
+    if (input.botId) { filters.push('cb.bot_id = ?'); params.push(input.botId) }
     if (input.query?.trim()) {
       const value = `%${input.query.trim()}%`
-      filters.push('(r.id LIKE ? OR r.chat_id LIKE ? OR COALESCE(cm.name, \'\') LIKE ? OR r.topic_id LIKE ? OR r.core_thread_id LIKE ? OR b.name LIKE ?)')
-      params.push(value, value, value, value, value, value)
+      filters.push('(cb.conversation_key LIKE ? OR cb.chat_id LIKE ? OR COALESCE(cm.name, \'\') LIKE ? OR cb.topic_id LIKE ? OR tc.core_thread_id LIKE ? OR tc.id LIKE ? OR b.name LIKE ?)')
+      params.push(value, value, value, value, value, value, value)
     }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
-    const from = `FROM conversation_threads r JOIN bots b ON b.id = r.bot_id LEFT JOIN chat_metadata cm ON cm.bot_id = r.bot_id AND cm.chat_id = r.chat_id`
+    const from = `FROM conversation_bindings cb JOIN thread_channels tc ON tc.id = cb.thread_channel_id JOIN bots b ON b.id = cb.bot_id LEFT JOIN chat_metadata cm ON cm.bot_id = cb.bot_id AND cm.chat_id = cb.chat_id`
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS count ${from} ${where}`).get(...params) as Row).count)
     const limit = Math.min(200, Math.max(1, Math.trunc(input.limit ?? 50))), offset = Math.max(0, Math.trunc(input.offset ?? 0))
-    const rows = this.db.prepare(`SELECT r.*, b.name AS bot_name, COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode ${from} ${where} ORDER BY r.updated_at DESC, r.id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
+    const rows = this.db.prepare(`SELECT cb.conversation_key AS id, cb.thread_channel_id, cb.bot_id, cb.conversation_mode, cb.chat_id, cb.topic_id,
+      cb.created_at, MAX(cb.updated_at, tc.updated_at) AS updated_at, tc.core_thread_id, b.name AS bot_name,
+      COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode ${from} ${where}
+      ORDER BY updated_at DESC, cb.conversation_key DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
     return { items: rows.map(this.conversationThread), total }
   }
 
   getConversationThread(id: string): ConversationThreadRecord {
-    const row = this.db.prepare(`SELECT r.*, b.name AS bot_name, COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode
-      FROM conversation_threads r JOIN bots b ON b.id = r.bot_id LEFT JOIN chat_metadata cm ON cm.bot_id = r.bot_id AND cm.chat_id = r.chat_id WHERE r.id = ?`).get(id) as Row | undefined
+    const row = this.db.prepare(`SELECT cb.conversation_key AS id, cb.thread_channel_id, cb.bot_id, cb.conversation_mode, cb.chat_id, cb.topic_id,
+      cb.created_at, MAX(cb.updated_at, tc.updated_at) AS updated_at, tc.core_thread_id, b.name AS bot_name,
+      COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode
+      FROM conversation_bindings cb JOIN thread_channels tc ON tc.id = cb.thread_channel_id JOIN bots b ON b.id = cb.bot_id
+      LEFT JOIN chat_metadata cm ON cm.bot_id = cb.bot_id AND cm.chat_id = cb.chat_id WHERE cb.conversation_key = ?`).get(id) as Row | undefined
     if (!row) throw new Error('Conversation thread not found')
     return this.conversationThread(row)
   }
 
   private conversationThread = (row: Row): ConversationThreadRecord => ({
-    id: String(row.id), botId: String(row.bot_id), botName: String(row.bot_name), conversationMode: String(row.conversation_mode) as ConversationThreadRecord['conversationMode'],
+    id: String(row.id), threadChannelId: String(row.thread_channel_id), botId: String(row.bot_id), botName: String(row.bot_name), conversationMode: String(row.conversation_mode) as ConversationThreadRecord['conversationMode'],
     chatId: String(row.chat_id), chatName: String(row.chat_name), chatMode: String(row.chat_mode) as ConversationThreadRecord['chatMode'], topicId: String(row.topic_id),
     coreThreadId: String(row.core_thread_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   })
-
-  getOrCreateConversation(route: ResolvedRoute, chatId: string): { id: string; threadId: string } {
-    const existing = this.db.prepare('SELECT id, core_thread_id FROM conversation_threads WHERE id = ?').get(route.conversationKey) as Row | undefined
-    if (existing) {
-      this.db.prepare('UPDATE conversation_threads SET updated_at = ? WHERE id = ?').run(now(), route.conversationKey)
-      return { id: String(existing.id), threadId: String(existing.core_thread_id) }
-    }
-    const timestamp = now()
-    this.db.prepare(`INSERT INTO conversation_threads (id, bot_id, conversation_mode, chat_id, topic_id, core_thread_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, '', ?, ?)`)
-      .run(route.conversationKey, route.bot.id, route.conversationMode, chatId, route.topicId, timestamp, timestamp)
-    return { id: route.conversationKey, threadId: '' }
-  }
-
-  setConversationThread(id: string, threadId: string): void {
-    this.db.prepare('UPDATE conversation_threads SET core_thread_id = ?, updated_at = ? WHERE id = ?').run(threadId, now(), id)
-  }
 
   claimInboundEvent(botId: string, eventId: string, messageId: string): boolean {
     this.db.prepare('DELETE FROM inbound_events WHERE received_at < ?').run(new Date(Date.now() - 8 * 60 * 60_000).toISOString())

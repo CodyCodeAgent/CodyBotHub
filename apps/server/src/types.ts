@@ -34,6 +34,7 @@ export interface ResolvedRoute {
   replyInTopic: boolean
   routeSource: 'topic_context' | 'group_binding' | 'matcher' | 'default'
   conversationKey: string
+  threadChannelId: string
   topicId: string
   turnInstructions: string
   modelConfig: ResolvedModelConfig
@@ -68,7 +69,7 @@ export interface ThreadRoutingRuleRecord {
 
 export interface ThreadProfileRecord {
   coreThreadId: string
-  conversationKey: string
+  threadChannelId: string
   botId: string
   workspaceId: string
   sceneId: string
@@ -199,6 +200,7 @@ export interface MessageLogRecord {
   reasoningEffortSource: ModelConfigSource
   modelFallback: boolean
   coreThreadId: string
+  threadChannelId: string
   threadRouting: ThreadRoutingDecision
   receivedAt: string
   startedAt: string
@@ -287,6 +289,7 @@ export interface ChatMetadataRecord {
 
 export interface ConversationThreadRecord {
   id: string
+  threadChannelId: string
   botId: string
   botName: string
   conversationMode: 'chat' | 'topic'
@@ -296,5 +299,34 @@ export interface ConversationThreadRecord {
   topicId: string
   coreThreadId: string
   createdAt: string
+  updatedAt: string
+}
+
+export interface ThreadChannelRecord {
+  id: string
+  botId: string
+  botName: string
+  coreThreadId: string
+  bindingCount: number
+  queuedJobs: number
+  processingJobs: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ThreadJobRecord {
+  id: string
+  botId: string
+  threadChannelId: string
+  eventId: string
+  messageId: string
+  status: 'queued' | 'processing' | 'completed' | 'failed'
+  attempts: number
+  logId: string
+  receiptReactionId: string
+  error: string
+  createdAt: string
+  startedAt: string
+  completedAt: string
   updatedAt: string
 }

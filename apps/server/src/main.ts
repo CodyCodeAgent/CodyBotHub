@@ -17,6 +17,8 @@ const host = process.env.CODY_BOT_HUB_HOST ?? '127.0.0.1'
 const port = Number(process.env.CODY_BOT_HUB_PORT ?? 4310)
 
 const store = new HubStore(path.join(dataDir, 'cody-bot-hub.sqlite'))
+const interruptedThreadJobs = store.recoverThreadJobs()
+if (interruptedThreadJobs) console.warn(`[startup] marked ${interruptedThreadJobs} in-flight Thread job(s) as failed; queued jobs will resume`)
 const interruptedMessages = store.failProcessingMessageLogs()
 if (interruptedMessages) console.warn(`[startup] marked ${interruptedMessages} interrupted message(s) as failed`)
 const vault = await SecretVault.open(dataDir)

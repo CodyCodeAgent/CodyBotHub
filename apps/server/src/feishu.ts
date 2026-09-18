@@ -11,7 +11,8 @@ type ManagedProvider = { provider: FeishuProvider; fingerprint: string }
 
 export class FeishuBotManager {
   private readonly providers = new Map<string, ManagedProvider>()
-  private readonly conversationQueues = new Map<string, Promise<void>>()
+  private readonly channelQueues = new Map<string, Promise<void>>()
+  private readonly scheduledJobs = new Set<string>()
   private reloadTail = Promise.resolve()
 
   constructor(
@@ -57,6 +58,7 @@ export class FeishuBotManager {
         console.error(`[feishu:${bot.name}] start failed:`, error)
       }
     }
+    this.resumeQueuedJobs()
   }
 
   private async acceptMessage(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
@@ -66,14 +68,61 @@ export class FeishuBotManager {
       mode: message.conversation.scope === 'topic' ? 'topic' : message.conversation.scope === 'private' ? 'p2p' : 'group',
     })
     if (!this.store.claimInboundEvent(botId, message.eventId, message.messageId)) return
-    const bot = this.store.listBots().find(item => item.id === botId)
-    if (!bot) return
-    const topicId = bot.conversationMode === 'topic' && message.conversation.scope !== 'private' ? (message.conversation.rootId || message.messageId) : 'chat'
-    const anchor = [botId, message.conversation.id, topicId].join(':')
-    const previous = this.conversationQueues.get(anchor) ?? Promise.resolve()
-    const current = previous.catch(() => undefined).then(() => this.onMessage(botId, provider, message))
-    this.conversationQueues.set(anchor, current)
-    const cleanup = () => { if (this.conversationQueues.get(anchor) === current) this.conversationQueues.delete(anchor) }
+    const route = this.prepareRoute(botId, provider, message)
+    if (!route) return
+    let receiptReactionId = ''
+    try { receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo') }
+    catch (error) { console.warn('[feishu] failed to add receipt reaction:', provider.classifyError(error).message) }
+    const log = this.store.createMessageLog(botId, route, message)
+    const job = this.store.enqueueThreadJob(botId, route.threadChannelId, message, log.id, receiptReactionId)
+    return this.scheduleJob(job.id, log.id, botId, provider, route, message, receiptReactionId)
+  }
+
+  private prepareRoute(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): ResolvedRoute | null {
+    const baseRoute = this.store.resolveRoute(botId, message)
+    const independentlyMatches = baseRoute.scene ? this.store.messageMatchesScene(baseRoute.scene.id, message) : false
+    if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !baseRoute.scene || !independentlyMatches)) return null
+    if (message.sender.type === 'user' && baseRoute.routeSource === 'topic_context' && !message.addressedToAgent && !independentlyMatches) return null
+    if (!baseRoute.scene && message.conversation.scope !== 'private' && !message.addressedToAgent) return null
+    if (baseRoute.scene && baseRoute.routeSource === 'matcher' && baseRoute.topicId) this.store.rememberTopicRoute(botId, message.conversation.id, baseRoute.topicId, baseRoute.scene.id)
+    return this.store.resolveThreadRouting(baseRoute, message)
+  }
+
+  private resumeQueuedJobs(): void {
+    for (const { job, message } of this.store.listQueuedThreadJobs()) {
+      const provider = this.providers.get(job.botId)?.provider
+      if (!provider || this.scheduledJobs.has(job.id)) continue
+      try {
+        const route = this.store.resolveThreadRouting(this.store.resolveRoute(job.botId, message), message)
+        void this.scheduleJob(job.id, job.logId, job.botId, provider, route, message, job.receiptReactionId)
+      } catch (error) {
+        console.error(`[feishu] failed to restore Thread job ${job.id}:`, error)
+      }
+    }
+  }
+
+  private scheduleJob(jobId: string, logId: string, botId: string, provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage, receiptReactionId: string): Promise<void> {
+    if (this.scheduledJobs.has(jobId)) return Promise.resolve()
+    this.scheduledJobs.add(jobId)
+    const channelId = route.threadChannelId
+    const previous = this.channelQueues.get(channelId) ?? Promise.resolve()
+    const current = previous.catch(() => undefined).then(async () => {
+      if (!this.store.startThreadJob(jobId)) return
+      try {
+        const result = await this.onMessage(botId, provider, route, message, logId, receiptReactionId)
+        this.store.finishThreadJob(jobId, result.ok ? 'completed' : 'failed', result.error)
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        this.store.finishThreadJob(jobId, 'failed', detail)
+        try { this.store.finishMessageLog(logId, { error: detail }) } catch { /* log may already be terminal */ }
+        await this.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
+      }
+    })
+    this.channelQueues.set(channelId, current)
+    const cleanup = () => {
+      this.scheduledJobs.delete(jobId)
+      if (this.channelQueues.get(channelId) === current) this.channelQueues.delete(channelId)
+    }
     void current.then(cleanup, cleanup)
     return current
   }
@@ -93,21 +142,13 @@ export class FeishuBotManager {
     }
   }
 
-  private async onMessage(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
-    const baseRoute = this.store.resolveRoute(botId, message)
-    const independentlyMatches = baseRoute.scene ? this.store.messageMatchesScene(baseRoute.scene.id, message) : false
-    // Cards and alerts are normally authored by apps. Accept them only when
-    // their content independently matches a Scene; a group binding alone must
-    // not turn every bot message into an agent turn or create reply loops.
-    if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !baseRoute.scene || !independentlyMatches)) return
-    if (message.sender.type === 'user' && baseRoute.routeSource === 'topic_context' && !message.addressedToAgent && !independentlyMatches) return
-    if (!baseRoute.scene && message.conversation.scope !== 'private' && !message.addressedToAgent) return
-    if (baseRoute.scene && baseRoute.routeSource === 'matcher' && baseRoute.topicId) this.store.rememberTopicRoute(botId, message.conversation.id, baseRoute.topicId, baseRoute.scene.id)
-    const route = this.store.resolveThreadRouting(baseRoute, message)
-    const log = this.store.createMessageLog(botId, route, message)
-    let receiptReactionId = ''
-    try { receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo') }
-    catch (error) { console.warn('[feishu] failed to add receipt reaction:', provider.classifyError(error).message) }
+  private async onMessage(botId: string, provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage, logId: string, existingReceiptReactionId: string): Promise<{ ok: boolean; error: string }> {
+    const log = this.store.getMessageLog(logId)
+    let receiptReactionId = existingReceiptReactionId
+    if (!receiptReactionId) {
+      try { receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo') }
+      catch (error) { console.warn('[feishu] failed to add receipt reaction:', provider.classifyError(error).message) }
+    }
     if (!route.scene && message.conversation.scope !== 'private' && this.store.claimScenePicker(botId, message.conversation.id)) await this.sendScenePicker(botId, provider, message).catch(error => console.warn('[feishu] failed to send scene picker:', provider.classifyError(error).message))
     const note = this.responseNote(route)
     let streamMessageId = ''
@@ -160,6 +201,7 @@ export class FeishuBotManager {
       }
       this.store.finishMessageLog(log.id, { responseContent: text })
       await this.finishReaction(provider, message.messageId, receiptReactionId, 'DONE')
+      return { ok: true, error: '' }
     } catch (error) {
       if (patchTimer) clearTimeout(patchTimer)
       await patchTail
@@ -171,6 +213,7 @@ export class FeishuBotManager {
       await sendError.catch(deliveryError => console.error('[feishu] failed to send error card:', deliveryError))
       this.store.finishMessageLog(log.id, { responseContent: latestProgress.answer, error: detail })
       await this.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
+      return { ok: false, error: detail }
     }
   }
 

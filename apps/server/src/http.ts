@@ -205,6 +205,14 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
           return sendJson(response, 200, store.listThreadRoutingDecisions(number(limit, 50)))
         }
+        if (method === 'GET' && url.pathname === '/api/thread-channels') {
+          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 200
+          return sendJson(response, 200, store.listThreadChannels(number(limit, 200)))
+        }
+        if (method === 'GET' && url.pathname === '/api/thread-jobs') {
+          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 100
+          return sendJson(response, 200, store.listThreadJobs(number(limit, 100)))
+        }
         if (method === 'GET' && url.pathname === '/api/message-logs') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
           const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0

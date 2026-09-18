@@ -210,14 +210,14 @@ describe('HubStore invariants', () => {
     const linked = workspace(store, 'Thread mapping')
     const bot = store.createBot({ name: 'Thread Bot', defaultWorkspaceId: linked.id })
     const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert triage', prompt: '', priority: 10, enabled: true, matcher: { chatIds: ['oc_thread'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
-    const route = store.resolveRoute(bot.id, {
+    const message = {
       provider: 'feishu', accountId: bot.id, eventId: 'event-thread', messageId: 'message-thread',
       conversation: { id: 'oc_thread', scope: 'group' }, sender: { id: 'ou_1', type: 'user' },
       content: { type: 'text' }, text: 'check thread mapping', attachments: [], addressedToAgent: true,
       mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
-    })
-    const conversation = store.getOrCreateConversation(route, 'oc_thread')
-    store.setConversationThread(conversation.id, '01-thread-id')
+    } as const
+    const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+    store.setThreadChannelCoreThread(route.threadChannelId, '01-thread-id')
     store.upsertChatMetadata(bot.id, { chatId: 'oc_thread', name: '告警排查群', mode: 'group' })
     expect(store.listChatMetadata({ botId: bot.id, query: '告警' })).toMatchObject([{ chatId: 'oc_thread', name: '告警排查群' }])
     expect(store.listChatIdsForMetadataSync(bot.id)).toContain('oc_thread')
@@ -242,8 +242,7 @@ describe('HubStore invariants', () => {
       mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
     }
     const historicalRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, base), base)
-    const conversation = store.getOrCreateConversation(historicalRoute, base.conversation.id)
-    store.setConversationThread(conversation.id, 'thread-history')
+    store.setThreadChannelCoreThread(historicalRoute.threadChannelId, 'thread-history')
     const log = store.createMessageLog(bot.id, historicalRoute, base)
     store.setMessageLogThread(log.id, 'thread-history')
     store.finishMessageLog(log.id, { responseContent: '确认 EventBus 消费延迟，重启消费者后恢复。' })
@@ -253,12 +252,52 @@ describe('HubStore invariants', () => {
 
     const next = { ...base, eventId: 'event-new', messageId: 'message-new', conversation: { id: 'oc_new', scope: 'topic' as const, rootId: 'root-new' }, createdAtIso: new Date().toISOString() }
     const routed = store.resolveThreadRouting(store.resolveRoute(bot.id, next), next)
-    expect(routed).toMatchObject({ conversationKey: historicalRoute.conversationKey, threadRouting: { type: 'reused', matchedThreadId: 'thread-history' } })
+    expect(routed).toMatchObject({ conversationKey: `bot:${bot.id}:chat:oc_new:topic:root-new`, threadChannelId: historicalRoute.threadChannelId, threadRouting: { type: 'reused', matchedThreadId: 'thread-history' } })
     expect(routed.threadRouting.score).toBeGreaterThanOrEqual(0.85)
     const followUp = { ...next, eventId: 'event-follow-up', messageId: 'message-follow-up', text: '继续看一下这个问题' }
     const followUpRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, followUp), followUp)
-    expect(followUpRoute).toMatchObject({ conversationKey: historicalRoute.conversationKey, threadRouting: { type: 'fixed', matchedThreadId: 'thread-history' } })
-    expect(store.listConversationThreads()).toMatchObject({ total: 1, items: [{ id: historicalRoute.conversationKey, coreThreadId: 'thread-history' }] })
+    expect(followUpRoute).toMatchObject({ conversationKey: routed.conversationKey, threadChannelId: historicalRoute.threadChannelId, threadRouting: { type: 'fixed', matchedThreadId: 'thread-history' } })
+    expect(store.listConversationThreads()).toMatchObject({ total: 2, items: expect.arrayContaining([
+      expect.objectContaining({ id: historicalRoute.conversationKey, threadChannelId: historicalRoute.threadChannelId, coreThreadId: 'thread-history' }),
+      expect.objectContaining({ id: routed.conversationKey, threadChannelId: historicalRoute.threadChannelId, coreThreadId: 'thread-history' }),
+    ]) })
+    store.close()
+  })
+
+  it('persists Thread Channel jobs and keeps queued work across restart boundaries', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Thread queue')
+    const bot = store.createBot({ name: 'Queue Bot', defaultWorkspaceId: linked.id })
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-queued', messageId: 'message-queued',
+      conversation: { id: 'oc_queue', scope: 'group' as const }, sender: { id: 'ou_user', type: 'user' as const },
+      content: { type: 'text' as const }, text: '排队检查', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+    store.setThreadChannelCoreThread(route.threadChannelId, 'thread-queue')
+    const runningLog = store.createMessageLog(bot.id, route, message)
+    const runningJob = store.enqueueThreadJob(bot.id, route.threadChannelId, message, runningLog.id)
+    expect(store.startThreadJob(runningJob.id)).toBe(true)
+
+    const queuedMessage = { ...message, eventId: 'event-waiting', messageId: 'message-waiting' }
+    const queuedRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, queuedMessage), queuedMessage)
+    const queuedLog = store.createMessageLog(bot.id, queuedRoute, queuedMessage)
+    const queuedJob = store.enqueueThreadJob(bot.id, queuedRoute.threadChannelId, queuedMessage, queuedLog.id)
+    expect(store.listThreadChannels()).toMatchObject([{ id: route.threadChannelId, coreThreadId: 'thread-queue', bindingCount: 1, queuedJobs: 1, processingJobs: 1 }])
+
+    expect(store.recoverThreadJobs()).toBe(1)
+    expect(store.getThreadJob(runningJob.id)).toMatchObject({ status: 'failed', attempts: 1 })
+    expect(store.listQueuedThreadJobs()).toMatchObject([{ job: { id: queuedJob.id, status: 'queued' }, message: { messageId: 'message-waiting' } }])
+    expect(store.failProcessingMessageLogs()).toBe(1)
+    expect(store.getMessageLog(runningLog.id)).toMatchObject({ status: 'failed' })
+    expect(store.getMessageLog(queuedLog.id)).toMatchObject({ status: 'processing' })
+
+    expect(store.startThreadJob(queuedJob.id)).toBe(true)
+    store.finishThreadJob(queuedJob.id, 'completed')
+    store.finishMessageLog(queuedLog.id, { responseContent: '处理完成' })
+    expect(store.getThreadJob(queuedJob.id)).toMatchObject({ status: 'completed', attempts: 1 })
+    expect(store.listMessageLogs({ query: route.threadChannelId })).toMatchObject({ total: 2 })
     store.close()
   })
 

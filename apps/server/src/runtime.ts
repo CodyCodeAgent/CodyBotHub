@@ -120,16 +120,16 @@ export class CodyBotRuntime {
   ) {}
 
   async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void): Promise<string> {
-    const conversation = this.store.getOrCreateConversation(route, message.conversation.id)
+    const channel = this.store.getThreadChannel(route.threadChannelId)
     const manager = await this.ensureManager()
     const model = await this.resolveModel(manager, route.modelConfig)
     onModelResolved?.(model)
     const skillPlan = await this.resolveSkills(manager, route, message)
     onInvestigation?.(skillPlan.trace)
-    await this.ensureConversation(manager, conversation, route, skillPlan.instructions)
-    const activeThreadId = manager.snapshot(conversation.id)?.threadId ?? conversation.threadId
+    await this.ensureThreadChannel(manager, channel, route, skillPlan.instructions)
+    const activeThreadId = manager.snapshot(channel.id)?.threadId ?? channel.threadId
     if (activeThreadId) onThreadResolved?.(activeThreadId)
-    manager.setContext(conversation.id, this.context(route, skillPlan.instructions))
+    manager.setContext(channel.id, this.context(route, skillPlan.instructions))
     const localImages = attachments.filter(attachment => attachment.type === 'image').map(attachment => ({ path: attachment.path }))
     const turn: TurnInput = {
       input: buildTurnUserInput({
@@ -173,9 +173,9 @@ export class CodyBotRuntime {
     }
     const unsubscribe = manager.subscribe(applyProgress)
     try {
-      const submission = manager.submit(conversation.id, turn, 'queue', channelCommandId(message))
+      const submission = manager.submit(channel.id, turn, 'queue', channelCommandId(message))
       turnId = (await submission.started).turnId
-      const outcome = await this.waitForCompletion(manager, conversation.id, submission.completed)
+      const outcome = await this.waitForCompletion(manager, channel.id, submission.completed)
       if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || 'Codex Turn failed'))
       return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
     } finally {
@@ -260,19 +260,19 @@ export class CodyBotRuntime {
     return resolveRuntimeModel(requested, models, config.config.model ?? '', config.config.model_reasoning_effort ?? '')
   }
 
-  private async ensureConversation(manager: CodexSessionManager, conversation: { id: string; threadId: string }, route: ResolvedRoute, resourceInstructions: string): Promise<void> {
-    if (this.attached.has(conversation.id)) return
-    const pending = this.attaching.get(conversation.id)
+  private async ensureThreadChannel(manager: CodexSessionManager, channel: { id: string; threadId: string }, route: ResolvedRoute, resourceInstructions: string): Promise<void> {
+    if (this.attached.has(channel.id)) return
+    const pending = this.attaching.get(channel.id)
     if (pending) return pending
     const attach = (async () => {
-      if (conversation.threadId) await manager.resume({ id: conversation.id, threadId: conversation.threadId }, this.context(route, resourceInstructions))
+      if (channel.threadId) await manager.resume({ id: channel.id, threadId: channel.threadId }, this.context(route, resourceInstructions))
       else {
-        const binding = await manager.create(conversation.id, this.context(route, resourceInstructions))
-        this.store.setConversationThread(conversation.id, binding.threadId)
+        const binding = await manager.create(channel.id, this.context(route, resourceInstructions))
+        this.store.setThreadChannelCoreThread(channel.id, binding.threadId)
       }
-      this.attached.add(conversation.id)
-    })().finally(() => this.attaching.delete(conversation.id))
-    this.attaching.set(conversation.id, attach)
+      this.attached.add(channel.id)
+    })().finally(() => this.attaching.delete(channel.id))
+    this.attaching.set(channel.id, attach)
     return attach
   }
 
