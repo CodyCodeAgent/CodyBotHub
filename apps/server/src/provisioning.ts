@@ -9,7 +9,7 @@ export interface ProvisioningRequest {
   prompt: string
   permissions: string[]
   operatorIds: string[]
-  replyMode: 'reply' | 'topic'
+  conversationMode: 'chat' | 'topic'
   defaultWorkspaceId: string
   workspaceIds: string[]
 }

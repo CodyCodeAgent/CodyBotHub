@@ -1,4 +1,4 @@
-import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationRoute, MessageLog, ProvisioningJob, Scene, SkillPackage, Workspace } from './types'
+import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ProvisioningJob, Scene, SkillPackage, Workspace } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -36,12 +36,12 @@ export const api = {
     for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
     return request<ChatMetadata[]>(`/chats${params.size ? `?${params.toString()}` : ''}`)
   },
-  conversationRoutes: (filters: { limit?: number; offset?: number; botId?: string; sceneId?: string; query?: string } = {}) => {
+  conversationThreads: (filters: { limit?: number; offset?: number; botId?: string; query?: string } = {}) => {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
-    return request<{ items: ConversationRoute[]; total: number }>(`/conversation-routes${params.size ? `?${params.toString()}` : ''}`)
+    return request<{ items: ConversationThread[]; total: number }>(`/conversation-threads${params.size ? `?${params.toString()}` : ''}`)
   },
-  conversationRoute: (id: string) => request<ConversationRoute>(`/conversation-routes/${encodeURIComponent(id)}`),
+  conversationThread: (id: string) => request<ConversationThread>(`/conversation-threads/${encodeURIComponent(id)}`),
   messageLogs: (filters: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}) => {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))

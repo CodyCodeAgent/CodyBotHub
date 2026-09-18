@@ -15,7 +15,7 @@ CodyBotHub 是一个独立的飞书 Bot 管理平台。它以工作区为运行�
 - 技能包与场景关联时要求属于同一个工作区
 - 飞书凭据使用本机 AES-256-GCM 密钥加密保存
 - 使用 CodyWebCore 的 Feishu Provider 与原生 Codex Session Manager 处理消息
-- 在管理端查看 Bot、场景、群、话题、工作区与 Codex Thread 的实际会话映射
+- 在管理端查看 Bot、群、话题与 Codex Thread 的实际会话映射；场景、工作区和技能包按消息逐轮路由
 - 回复使用飞书 Markdown 卡片，并附带工作区、场景、技能包和实际权限信息
 - 支持文本、富文本、图片、文件、音频、视频和交互卡片的统一场景匹配
 - 工作区通过本机目录选择器配置，技能包支持 `$` 搜索当前 Codex Skill 目录

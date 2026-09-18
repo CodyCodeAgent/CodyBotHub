@@ -10,7 +10,7 @@ import SettingsView from './views/SettingsView.vue'
 import MessagesView from './views/MessagesView.vue'
 import AccountsView from './views/AccountsView.vue'
 import AuditLogsView from './views/AuditLogsView.vue'
-import ConversationRoutesView from './views/ConversationRoutesView.vue'
+import ConversationThreadsView from './views/ConversationThreadsView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -20,7 +20,7 @@ export const router = createRouter({
     { path: '/workspaces', name: 'workspaces', component: WorkspacesView },
     { path: '/bots', name: 'bots', component: BotsView },
     { path: '/scenes', name: 'scenes', component: ScenesView },
-    { path: '/conversation-routes', name: 'conversation-routes', component: ConversationRoutesView },
+    { path: '/conversation-threads', name: 'conversation-threads', component: ConversationThreadsView },
     { path: '/packages', name: 'packages', component: PackagesView },
     { path: '/messages', name: 'messages', component: MessagesView },
     { path: '/accounts', name: 'accounts', component: AccountsView },

@@ -16,7 +16,7 @@ export interface BotRecord {
   prompt: string
   permissions: string[]
   operatorIds: string[]
-  replyMode: 'reply' | 'topic'
+  conversationMode: 'chat' | 'topic'
   defaultWorkspaceId: string
   workspaceIds: string[]
   createdAt: string
@@ -28,10 +28,12 @@ export interface ResolvedRoute {
   workspace: WorkspaceRecord
   scene: (SceneRecord & { skillPackageIds: string[] }) | null
   skillPackages: SkillPackageRecord[]
-  replyMode: 'reply' | 'topic'
-  routeSource: 'topic_binding' | 'group_binding' | 'matcher' | 'default'
+  conversationMode: 'chat' | 'topic'
+  replyInTopic: boolean
+  routeSource: 'topic_context' | 'group_binding' | 'matcher' | 'default'
   conversationKey: string
-  systemPrompt: string
+  topicId: string
+  turnInstructions: string
 }
 
 export interface ProvisioningJobRecord {
@@ -52,7 +54,6 @@ export interface SceneRecord {
   name: string
   prompt: string
   priority: number
-  replyMode: 'inherit' | 'reply' | 'topic'
   enabled: boolean
   matcher: {
     chatIds: string[]
@@ -134,14 +135,11 @@ export interface ChatMetadataRecord {
   updatedAt: string
 }
 
-export interface ConversationRouteRecord {
+export interface ConversationThreadRecord {
   id: string
   botId: string
   botName: string
-  sceneId: string
-  sceneName: string
-  workspaceId: string
-  workspaceName: string
+  conversationMode: 'chat' | 'topic'
   chatId: string
   chatName: string
   chatMode: 'group' | 'topic' | 'p2p' | ''

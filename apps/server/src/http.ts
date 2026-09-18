@@ -120,19 +120,18 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 200
           return sendJson(response, 200, store.listChatMetadata({ botId: url.searchParams.get('botId') ?? '', query: url.searchParams.get('query') ?? '', limit: number(limit, 200) }))
         }
-        if (method === 'GET' && url.pathname === '/api/conversation-routes') {
+        if (method === 'GET' && url.pathname === '/api/conversation-threads') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
           const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0
-          return sendJson(response, 200, store.listConversationRoutes({
+          return sendJson(response, 200, store.listConversationThreads({
             limit: number(limit, 50),
             offset: number(offset, 0),
             botId: url.searchParams.get('botId') ?? '',
-            sceneId: url.searchParams.get('sceneId') ?? '',
             query: url.searchParams.get('query') ?? '',
           }))
         }
-        const conversationRouteId = matchId(url.pathname, '/api/conversation-routes/')
-        if (conversationRouteId && method === 'GET') return sendJson(response, 200, store.getConversationRoute(conversationRouteId))
+        const conversationThreadId = matchId(url.pathname, '/api/conversation-threads/')
+        if (conversationThreadId && method === 'GET') return sendJson(response, 200, store.getConversationThread(conversationThreadId))
         if (method === 'GET' && url.pathname === '/api/message-logs') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
           const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0
@@ -159,7 +158,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           const body = await readJson(request)
           const defaultWorkspaceId = required(body, 'defaultWorkspaceId')
           if (!store.listWorkspaces().some(item => item.id === defaultWorkspaceId)) throw new HttpError(400, 'Workspace not found')
-          const input: ProvisioningRequest = { name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), replyMode: body.replyMode === 'topic' ? 'topic' : 'reply', defaultWorkspaceId, workspaceIds: stringList(body.workspaceIds) }
+          const input: ProvisioningRequest = { name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', defaultWorkspaceId, workspaceIds: stringList(body.workspaceIds) }
           const job = provisioning.start(input)
           audit('bot.provision', 'provisioning', job.id, `发起飞书 Bot 自动注册：${input.name}`)
           return sendJson(response, 202, job)
@@ -193,7 +192,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (method === 'GET' && url.pathname === '/api/bots') return sendJson(response, 200, store.listBots())
         if (method === 'POST' && url.pathname === '/api/bots') {
           const body = await readJson(request), secret = optional(body, 'appSecret')
-          const result = store.createBot({ name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), replyMode: body.replyMode === 'topic' ? 'topic' : 'reply', defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
+          const result = store.createBot({ name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
           await onConfigurationChanged?.()
           audit('bot.create', 'bot', result.id, `创建飞书 Bot ${result.name}`, { appId: result.appId })
           return sendJson(response, 201, result)
@@ -201,7 +200,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         const botId = matchId(url.pathname, '/api/bots/')
         if (botId && method === 'PUT') {
           const body = await readJson(request), secret = optional(body, 'appSecret')
-          const result = store.updateBot(botId, { name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), replyMode: body.replyMode === 'topic' ? 'topic' : 'reply', defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
+          const result = store.updateBot(botId, { name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
           await onConfigurationChanged?.()
           audit('bot.update', 'bot', result.id, `更新飞书 Bot ${result.name}`, { appId: result.appId, secretChanged: Boolean(secret) })
           return sendJson(response, 200, result)
@@ -248,9 +247,8 @@ const requestIp = (request: IncomingMessage): string => {
 
 const sceneInput = (body: Json): Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt'> & { skillPackageIds: string[] } => {
   const matcher = (body.matcher && typeof body.matcher === 'object' ? body.matcher : {}) as Json
-  const replyMode = ['reply', 'topic'].includes(String(body.replyMode)) ? String(body.replyMode) as 'reply' | 'topic' : 'inherit'
   const supportedMessageTypes = new Set<string>(FEISHU_MESSAGE_TYPES)
-  return { botId: required(body, 'botId'), workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), prompt: optional(body, 'prompt'), priority: number(body.priority, 100), replyMode, enabled: bool(body.enabled, true), matcher: { chatIds: stringList(matcher.chatIds), messageTypes: stringList(matcher.messageTypes).filter(value => supportedMessageTypes.has(value)), textIncludes: stringList(matcher.textIncludes), cardTitleIncludes: stringList(matcher.cardTitleIncludes) }, skillPackageIds: stringList(body.skillPackageIds) }
+  return { botId: required(body, 'botId'), workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), prompt: optional(body, 'prompt'), priority: number(body.priority, 100), enabled: bool(body.enabled, true), matcher: { chatIds: stringList(matcher.chatIds), messageTypes: stringList(matcher.messageTypes).filter(value => supportedMessageTypes.has(value)), textIncludes: stringList(matcher.textIncludes), cardTitleIncludes: stringList(matcher.cardTitleIncludes) }, skillPackageIds: stringList(body.skillPackageIds) }
 }
 
 const skillPackageInput = (body: Json): Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => ({

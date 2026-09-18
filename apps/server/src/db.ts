@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationRouteRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 
 type Row = Record<string, unknown>
@@ -81,7 +81,7 @@ export class HubStore {
         app_secret_encrypted TEXT NOT NULL DEFAULT '',
         prompt TEXT NOT NULL DEFAULT '',
         permissions_json TEXT NOT NULL DEFAULT '[]',
-        reply_mode TEXT NOT NULL DEFAULT 'reply' CHECK (reply_mode IN ('reply', 'topic')),
+        conversation_mode TEXT NOT NULL DEFAULT 'chat' CHECK (conversation_mode IN ('chat', 'topic')),
         default_workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -98,7 +98,6 @@ export class HubStore {
         name TEXT NOT NULL,
         prompt TEXT NOT NULL DEFAULT '',
         priority INTEGER NOT NULL DEFAULT 100,
-        reply_mode TEXT NOT NULL DEFAULT 'inherit' CHECK (reply_mode IN ('inherit', 'reply', 'topic')),
         enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
         matcher_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
@@ -137,7 +136,7 @@ export class HubStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (bot_id, chat_id)
       );
-      CREATE TABLE IF NOT EXISTS topic_scene_bindings (
+      CREATE TABLE IF NOT EXISTS topic_route_contexts (
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
         chat_id TEXT NOT NULL,
         topic_id TEXT NOT NULL,
@@ -154,17 +153,22 @@ export class HubStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (bot_id, chat_id)
       );
-      CREATE TABLE IF NOT EXISTS conversation_routes (
+      CREATE TABLE IF NOT EXISTS conversation_threads (
         id TEXT PRIMARY KEY,
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
-        scene_id TEXT REFERENCES scenes(id) ON DELETE SET NULL,
-        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        conversation_mode TEXT NOT NULL CHECK (conversation_mode IN ('chat', 'topic')),
         chat_id TEXT NOT NULL,
         topic_id TEXT NOT NULL DEFAULT '',
         core_thread_id TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        UNIQUE (bot_id, scene_id, chat_id, topic_id)
+        UNIQUE (bot_id, chat_id, topic_id)
+      );
+      CREATE TABLE IF NOT EXISTS scene_picker_prompts (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL,
+        prompted_at TEXT NOT NULL,
+        PRIMARY KEY (bot_id, chat_id)
       );
       CREATE TABLE IF NOT EXISTS inbound_events (
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -210,8 +214,8 @@ export class HubStore {
         UNIQUE (bot_id, message_id)
       );
       CREATE INDEX IF NOT EXISTS idx_scenes_bot ON scenes(bot_id, enabled, priority);
-      CREATE INDEX IF NOT EXISTS idx_routes_chat ON conversation_routes(bot_id, chat_id, topic_id);
-      CREATE INDEX IF NOT EXISTS idx_topic_scene ON topic_scene_bindings(scene_id);
+      CREATE INDEX IF NOT EXISTS idx_threads_chat ON conversation_threads(bot_id, chat_id, topic_id);
+      CREATE INDEX IF NOT EXISTS idx_topic_context_scene ON topic_route_contexts(scene_id);
       CREATE INDEX IF NOT EXISTS idx_chat_metadata_name ON chat_metadata(bot_id, name);
       DELETE FROM inbound_events WHERE rowid NOT IN (SELECT MIN(rowid) FROM inbound_events GROUP BY bot_id, message_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_message ON inbound_events(bot_id, message_id);
@@ -221,14 +225,14 @@ export class HubStore {
       CREATE INDEX IF NOT EXISTS idx_message_logs_scene ON message_logs(scene_id, received_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_account_id, created_at DESC);
-      INSERT OR IGNORE INTO topic_scene_bindings (bot_id, chat_id, topic_id, scene_id, created_at, updated_at)
-        SELECT ml.bot_id, ml.chat_id, CASE WHEN ml.topic_id <> '' THEN ml.topic_id ELSE ml.message_id END, ml.scene_id, ml.received_at, ml.received_at
-        FROM message_logs ml
-        JOIN scenes s ON s.id = ml.scene_id
-        JOIN bots b ON b.id = ml.bot_id
-        WHERE ml.scene_id <> '' AND (s.reply_mode = 'topic' OR (s.reply_mode = 'inherit' AND b.reply_mode = 'topic'))
-        ORDER BY ml.received_at;
+      DROP TABLE IF EXISTS conversation_routes;
+      DROP TABLE IF EXISTS topic_scene_bindings;
     `)
+    const botColumns = this.db.prepare('PRAGMA table_info(bots)').all() as Row[]
+    if (!botColumns.some(column => String(column.name) === 'conversation_mode')) {
+      this.db.exec("ALTER TABLE bots ADD COLUMN conversation_mode TEXT NOT NULL DEFAULT 'chat' CHECK (conversation_mode IN ('chat', 'topic'))")
+      if (botColumns.some(column => String(column.name) === 'reply_mode')) this.db.exec("UPDATE bots SET conversation_mode = CASE WHEN reply_mode = 'topic' THEN 'topic' ELSE 'chat' END")
+    }
     const sessionColumns = this.db.prepare('PRAGMA table_info(auth_sessions)').all() as Row[]
     if (!sessionColumns.some(column => String(column.name) === 'account_id')) this.db.exec("ALTER TABLE auth_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
     const accountColumns = this.db.prepare('PRAGMA table_info(admin_accounts)').all() as Row[]
@@ -379,14 +383,14 @@ export class HubStore {
   listBots(): BotRecord[] {
     return (this.db.prepare('SELECT * FROM bots ORDER BY name COLLATE NOCASE').all() as Row[]).map(row => this.bot(row))
   }
-  createBot(input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string; prompt?: string; permissions?: string[]; operatorIds?: string[]; replyMode?: 'reply' | 'topic'; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+  createBot(input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
     const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
     this.assertWorkspaces(workspaceIds)
     const id = randomUUID(), timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO bots (id, name, description, app_id, app_secret_encrypted, prompt, permissions_json, reply_mode, default_workspace_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.description ?? '', input.appId ?? '', input.appSecretEncrypted ?? '', input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.replyMode ?? 'reply', input.defaultWorkspaceId, timestamp, timestamp)
+      this.db.prepare(`INSERT INTO bots (id, name, description, app_id, app_secret_encrypted, prompt, permissions_json, conversation_mode, default_workspace_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.description ?? '', input.appId ?? '', input.appSecretEncrypted ?? '', input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.defaultWorkspaceId, timestamp, timestamp)
       const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
       for (const workspaceId of workspaceIds) add.run(id, workspaceId)
       this.setBotOperators(id, input.operatorIds ?? [])
@@ -394,7 +398,7 @@ export class HubStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getBot(id)
   }
-  updateBot(id: string, input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string | null; prompt?: string; permissions?: string[]; operatorIds?: string[]; replyMode?: 'reply' | 'topic'; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+  updateBot(id: string, input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string | null; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
     const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
     this.assertWorkspaces(workspaceIds)
     const current = this.db.prepare('SELECT app_secret_encrypted FROM bots WHERE id = ?').get(id) as Row | undefined
@@ -404,8 +408,8 @@ export class HubStore {
     const secret = input.appSecretEncrypted === null || input.appSecretEncrypted === undefined ? String(current.app_secret_encrypted) : input.appSecretEncrypted
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`UPDATE bots SET name = ?, description = ?, app_id = ?, app_secret_encrypted = ?, prompt = ?, permissions_json = ?, reply_mode = ?, default_workspace_id = ?, updated_at = ? WHERE id = ?`)
-        .run(input.name, input.description ?? '', input.appId ?? '', secret, input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.replyMode ?? 'reply', input.defaultWorkspaceId, now(), id)
+      this.db.prepare(`UPDATE bots SET name = ?, description = ?, app_id = ?, app_secret_encrypted = ?, prompt = ?, permissions_json = ?, conversation_mode = ?, default_workspace_id = ?, updated_at = ? WHERE id = ?`)
+        .run(input.name, input.description ?? '', input.appId ?? '', secret, input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.defaultWorkspaceId, now(), id)
       this.db.prepare('DELETE FROM bot_workspaces WHERE bot_id = ?').run(id)
       const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
       for (const workspaceId of workspaceIds) add.run(id, workspaceId)
@@ -426,7 +430,7 @@ export class HubStore {
   private bot(row: Row): BotRecord {
     const workspaceIds = (this.db.prepare('SELECT workspace_id FROM bot_workspaces WHERE bot_id = ? ORDER BY workspace_id').all(String(row.id)) as Row[]).map(item => String(item.workspace_id))
     const operatorIds = (this.db.prepare('SELECT feishu_open_id FROM bot_operators WHERE bot_id = ? ORDER BY feishu_open_id').all(String(row.id)) as Row[]).map(item => String(item.feishu_open_id))
-    return { id: String(row.id), name: String(row.name), description: String(row.description), appId: String(row.app_id), hasAppSecret: Boolean(row.app_secret_encrypted), prompt: String(row.prompt), permissions: list(row.permissions_json), operatorIds, replyMode: String(row.reply_mode) as BotRecord['replyMode'], defaultWorkspaceId: String(row.default_workspace_id), workspaceIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { id: String(row.id), name: String(row.name), description: String(row.description), appId: String(row.app_id), hasAppSecret: Boolean(row.app_secret_encrypted), prompt: String(row.prompt), permissions: list(row.permissions_json), operatorIds, conversationMode: String(row.conversation_mode) as BotRecord['conversationMode'], defaultWorkspaceId: String(row.default_workspace_id), workspaceIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
   }
   private setBotOperators(botId: string, ids: string[]): void {
     const add = this.db.prepare('INSERT OR IGNORE INTO bot_operators (bot_id, feishu_open_id) VALUES (?, ?)')
@@ -447,8 +451,8 @@ export class HubStore {
     const id = randomUUID(), timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO scenes (id, bot_id, workspace_id, name, prompt, priority, reply_mode, enabled, matcher_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.replyMode, input.enabled ? 1 : 0, JSON.stringify(input.matcher), timestamp, timestamp)
+      this.db.prepare(`INSERT INTO scenes (id, bot_id, workspace_id, name, prompt, priority, enabled, matcher_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, JSON.stringify(input.matcher), timestamp, timestamp)
       this.setScenePackages(id, input.skillPackageIds ?? [])
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
@@ -459,8 +463,8 @@ export class HubStore {
     this.assertScenePackages(input.workspaceId, input.skillPackageIds ?? [])
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      const result = this.db.prepare(`UPDATE scenes SET bot_id = ?, workspace_id = ?, name = ?, prompt = ?, priority = ?, reply_mode = ?, enabled = ?, matcher_json = ?, updated_at = ? WHERE id = ?`)
-        .run(input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.replyMode, input.enabled ? 1 : 0, JSON.stringify(input.matcher), now(), id)
+      const result = this.db.prepare(`UPDATE scenes SET bot_id = ?, workspace_id = ?, name = ?, prompt = ?, priority = ?, enabled = ?, matcher_json = ?, updated_at = ? WHERE id = ?`)
+        .run(input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, JSON.stringify(input.matcher), now(), id)
       if (!result.changes) throw new Error('Scene not found')
       this.db.prepare('DELETE FROM scene_skill_packages WHERE scene_id = ?').run(id)
       this.setScenePackages(id, input.skillPackageIds ?? [])
@@ -477,7 +481,7 @@ export class HubStore {
   private scene(row: Row): SceneRecord & { skillPackageIds: string[] } {
     const raw = JSON.parse(String(row.matcher_json)) as Partial<SceneRecord['matcher']>
     const skillPackageIds = (this.db.prepare('SELECT skill_package_id FROM scene_skill_packages WHERE scene_id = ? ORDER BY position').all(String(row.id)) as Row[]).map(item => String(item.skill_package_id))
-    return { id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), replyMode: String(row.reply_mode) as SceneRecord['replyMode'], enabled: Boolean(row.enabled), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
   }
   private assertBotWorkspace(botId: string, workspaceId: string): void {
     if (!this.db.prepare('SELECT 1 FROM bot_workspaces WHERE bot_id = ? AND workspace_id = ?').get(botId, workspaceId)) throw new Error('Scene Workspace must be attached to its Bot')
@@ -535,7 +539,7 @@ export class HubStore {
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         id, message.eventId, message.messageId, botId, route.bot.name,
-        message.conversation.id, message.conversation.rootId ?? '', message.sender.id,
+        message.conversation.id, route.topicId, message.sender.id,
         message.content?.type ?? 'unknown', message.text.slice(0, 200_000),
         route.workspace.id, route.workspace.name, route.scene?.id ?? '', route.scene?.name ?? '',
         JSON.stringify(route.skillPackages.map(item => ({ id: item.id, name: item.name }))),
@@ -606,40 +610,53 @@ export class HubStore {
     this.createAuditLog({ action: 'scene.bind_group', targetType: 'scene', targetId: sceneId, summary: `通过飞书将群 ${chatId} 绑定到场景 ${scene.name}`, details: { botId, chatId, feishuActorId: actorId } })
   }
 
-  bindTopicScene(botId: string, chatId: string, topicId: string, sceneId: string): void {
+  rememberTopicRoute(botId: string, chatId: string, topicId: string, sceneId: string): void {
     if (!topicId) throw new Error('Topic ID is required')
     const scene = this.getScene(sceneId)
     if (scene.botId !== botId) throw new Error('Scene does not belong to this Bot')
     const timestamp = now()
-    this.db.prepare(`INSERT INTO topic_scene_bindings (bot_id, chat_id, topic_id, scene_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(bot_id, chat_id, topic_id) DO UPDATE SET updated_at = excluded.updated_at`)
+    this.db.prepare(`INSERT INTO topic_route_contexts (bot_id, chat_id, topic_id, scene_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(bot_id, chat_id, topic_id) DO UPDATE SET scene_id = excluded.scene_id, updated_at = excluded.updated_at`)
       .run(botId, chatId, topicId, sceneId, timestamp, timestamp)
   }
 
   resolveRoute(botId: string, message: ChannelInboundMessage): ResolvedRoute {
     const bot = this.getBot(botId)
-    const topicBinding = message.conversation.rootId
-      ? this.db.prepare('SELECT scene_id FROM topic_scene_bindings WHERE bot_id = ? AND chat_id = ? AND topic_id = ?').get(botId, message.conversation.id, message.conversation.rootId) as Row | undefined
+    const topicId = bot.conversationMode === 'topic' && message.conversation.scope !== 'private'
+      ? (message.conversation.rootId || message.messageId)
+      : ''
+    const topicContext = topicId
+      ? this.db.prepare('SELECT scene_id FROM topic_route_contexts WHERE bot_id = ? AND chat_id = ? AND topic_id = ?').get(botId, message.conversation.id, topicId) as Row | undefined
       : undefined
     const groupBinding = this.db.prepare('SELECT scene_id FROM group_scene_bindings WHERE bot_id = ? AND chat_id = ?').get(botId, message.conversation.id) as Row | undefined
     const candidates = this.listScenes().filter(scene => scene.botId === botId && scene.enabled)
-    const topicBound = topicBinding ? candidates.find(scene => scene.id === String(topicBinding.scene_id)) ?? null : null
+    const topicBound = topicContext ? candidates.find(scene => scene.id === String(topicContext.scene_id)) ?? null : null
     const groupBound = groupBinding ? candidates.find(scene => scene.id === String(groupBinding.scene_id)) ?? null : null
-    const matched = candidates.find(candidate => this.sceneMatches(candidate, message)) ?? null
-    const scene = topicBound ?? groupBound ?? matched
-    const routeSource: ResolvedRoute['routeSource'] = topicBound ? 'topic_binding' : groupBound ? 'group_binding' : matched ? 'matcher' : 'default'
+    const matched = candidates.find(candidate => this.hasMatcher(candidate) && this.sceneMatches(candidate, message)) ?? null
+    const fallback = candidates.find(candidate => !this.hasMatcher(candidate)) ?? null
+    const scene = matched ?? topicBound ?? groupBound ?? fallback
+    const routeSource: ResolvedRoute['routeSource'] = matched ? 'matcher' : topicBound ? 'topic_context' : groupBound ? 'group_binding' : 'default'
     const workspace = this.getWorkspace(scene?.workspaceId ?? bot.defaultWorkspaceId)
     const packages = scene ? this.listSkillPackages().filter(item => scene.skillPackageIds.includes(item.id)) : []
-    const replyMode = scene?.replyMode && scene.replyMode !== 'inherit' ? scene.replyMode : bot.replyMode
-    const topic = replyMode === 'topic' ? (message.conversation.rootId || message.messageId) : ''
-    const conversationKey = scene ? `scene:${bot.id}:${scene.id}:${message.conversation.id}` : topic ? `chat:${bot.id}:${message.conversation.id}:topic:${topic}` : `chat:${bot.id}:${message.conversation.id}`
+    const conversationKey = topicId ? `bot:${bot.id}:chat:${message.conversation.id}:topic:${topicId}` : `bot:${bot.id}:chat:${message.conversation.id}`
+    const skillNames = packages.flatMap(item => item.skills)
+    const skillPolicy = packages.some(item => item.fallbackMode === 'package_only')
+      ? '本轮只允许使用技能包中列出的 Skill。'
+      : packages.some(item => item.fallbackMode === 'mixed')
+        ? '本轮同时检索技能包和当前 Codex 环境中的其他 Skill。'
+        : skillNames.length ? '本轮优先使用技能包中的 Skill；无法满足时再检索当前 Codex 环境中的其他 Skill。' : ''
     const layers = [this.getPlatformPrompt(), workspace.prompt, bot.prompt, scene?.prompt ?? '', ...packages.map(item => item.prompt)]
       .map(value => value.trim()).filter(Boolean)
-    return { bot, workspace, scene, skillPackages: packages, replyMode, routeSource, conversationKey, systemPrompt: layers.join('\n\n') }
+    if (skillNames.length) layers.push(`当前场景技能包：${skillNames.join('、')}。${skillPolicy}`)
+    return { bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, topicId, turnInstructions: layers.join('\n\n') }
   }
 
   messageMatchesScene(sceneId: string, message: ChannelInboundMessage): boolean {
     return this.sceneMatches(this.getScene(sceneId), message)
+  }
+
+  claimScenePicker(botId: string, chatId: string): boolean {
+    return this.db.prepare('INSERT OR IGNORE INTO scene_picker_prompts (bot_id, chat_id, prompted_at) VALUES (?, ?, ?)').run(botId, chatId, now()).changes > 0
   }
 
   upsertChatMetadata(botId: string, input: { chatId: string; name: string; mode: 'group' | 'topic' | 'p2p' }): ChatMetadataRecord {
@@ -661,56 +678,55 @@ export class HubStore {
   }
 
   listChatIdsForMetadataSync(botId: string): string[] {
-    const rows = this.db.prepare(`SELECT chat_id FROM conversation_routes WHERE bot_id = ? UNION SELECT chat_id FROM group_scene_bindings WHERE bot_id = ?`).all(botId, botId) as Row[]
+    const rows = this.db.prepare(`SELECT chat_id FROM conversation_threads WHERE bot_id = ? UNION SELECT chat_id FROM group_scene_bindings WHERE bot_id = ?`).all(botId, botId) as Row[]
     const ids = new Set(rows.map(row => String(row.chat_id)).filter(Boolean))
     for (const scene of this.listScenes().filter(item => item.botId === botId)) for (const chatId of scene.matcher.chatIds) ids.add(chatId)
     return [...ids]
   }
 
-  listConversationRoutes(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; query?: string } = {}): { items: ConversationRouteRecord[]; total: number } {
+  listConversationThreads(input: { limit?: number; offset?: number; botId?: string; query?: string } = {}): { items: ConversationThreadRecord[]; total: number } {
     const filters: string[] = [], params: Array<string | number> = []
     if (input.botId) { filters.push('r.bot_id = ?'); params.push(input.botId) }
-    if (input.sceneId) { filters.push('r.scene_id = ?'); params.push(input.sceneId) }
     if (input.query?.trim()) {
       const value = `%${input.query.trim()}%`
-      filters.push('(r.id LIKE ? OR r.chat_id LIKE ? OR COALESCE(cm.name, \'\') LIKE ? OR r.topic_id LIKE ? OR r.core_thread_id LIKE ? OR b.name LIKE ? OR COALESCE(s.name, \'\') LIKE ? OR w.name LIKE ?)')
-      params.push(value, value, value, value, value, value, value, value)
+      filters.push('(r.id LIKE ? OR r.chat_id LIKE ? OR COALESCE(cm.name, \'\') LIKE ? OR r.topic_id LIKE ? OR r.core_thread_id LIKE ? OR b.name LIKE ?)')
+      params.push(value, value, value, value, value, value)
     }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
-    const from = `FROM conversation_routes r JOIN bots b ON b.id = r.bot_id JOIN workspaces w ON w.id = r.workspace_id LEFT JOIN scenes s ON s.id = r.scene_id LEFT JOIN chat_metadata cm ON cm.bot_id = r.bot_id AND cm.chat_id = r.chat_id`
+    const from = `FROM conversation_threads r JOIN bots b ON b.id = r.bot_id LEFT JOIN chat_metadata cm ON cm.bot_id = r.bot_id AND cm.chat_id = r.chat_id`
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS count ${from} ${where}`).get(...params) as Row).count)
     const limit = Math.min(200, Math.max(1, Math.trunc(input.limit ?? 50))), offset = Math.max(0, Math.trunc(input.offset ?? 0))
-    const rows = this.db.prepare(`SELECT r.*, b.name AS bot_name, w.name AS workspace_name, COALESCE(s.name, '') AS scene_name, COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode ${from} ${where} ORDER BY r.updated_at DESC, r.id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
-    return { items: rows.map(this.conversationRoute), total }
+    const rows = this.db.prepare(`SELECT r.*, b.name AS bot_name, COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode ${from} ${where} ORDER BY r.updated_at DESC, r.id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
+    return { items: rows.map(this.conversationThread), total }
   }
 
-  getConversationRoute(id: string): ConversationRouteRecord {
-    const row = this.db.prepare(`SELECT r.*, b.name AS bot_name, w.name AS workspace_name, COALESCE(s.name, '') AS scene_name, COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode
-      FROM conversation_routes r JOIN bots b ON b.id = r.bot_id JOIN workspaces w ON w.id = r.workspace_id LEFT JOIN scenes s ON s.id = r.scene_id LEFT JOIN chat_metadata cm ON cm.bot_id = r.bot_id AND cm.chat_id = r.chat_id WHERE r.id = ?`).get(id) as Row | undefined
-    if (!row) throw new Error('Conversation route not found')
-    return this.conversationRoute(row)
+  getConversationThread(id: string): ConversationThreadRecord {
+    const row = this.db.prepare(`SELECT r.*, b.name AS bot_name, COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode
+      FROM conversation_threads r JOIN bots b ON b.id = r.bot_id LEFT JOIN chat_metadata cm ON cm.bot_id = r.bot_id AND cm.chat_id = r.chat_id WHERE r.id = ?`).get(id) as Row | undefined
+    if (!row) throw new Error('Conversation thread not found')
+    return this.conversationThread(row)
   }
 
-  private conversationRoute = (row: Row): ConversationRouteRecord => ({
-    id: String(row.id), botId: String(row.bot_id), botName: String(row.bot_name), sceneId: String(row.scene_id ?? ''), sceneName: String(row.scene_name),
-    workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), chatId: String(row.chat_id), chatName: String(row.chat_name), chatMode: String(row.chat_mode) as ConversationRouteRecord['chatMode'], topicId: String(row.topic_id),
+  private conversationThread = (row: Row): ConversationThreadRecord => ({
+    id: String(row.id), botId: String(row.bot_id), botName: String(row.bot_name), conversationMode: String(row.conversation_mode) as ConversationThreadRecord['conversationMode'],
+    chatId: String(row.chat_id), chatName: String(row.chat_name), chatMode: String(row.chat_mode) as ConversationThreadRecord['chatMode'], topicId: String(row.topic_id),
     coreThreadId: String(row.core_thread_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   })
 
-  getOrCreateConversation(route: ResolvedRoute, chatId: string, topicId: string): { id: string; threadId: string } {
-    const existing = this.db.prepare('SELECT id, core_thread_id FROM conversation_routes WHERE id = ?').get(route.conversationKey) as Row | undefined
+  getOrCreateConversation(route: ResolvedRoute, chatId: string): { id: string; threadId: string } {
+    const existing = this.db.prepare('SELECT id, core_thread_id FROM conversation_threads WHERE id = ?').get(route.conversationKey) as Row | undefined
     if (existing) {
-      this.db.prepare('UPDATE conversation_routes SET updated_at = ? WHERE id = ?').run(now(), route.conversationKey)
+      this.db.prepare('UPDATE conversation_threads SET updated_at = ? WHERE id = ?').run(now(), route.conversationKey)
       return { id: String(existing.id), threadId: String(existing.core_thread_id) }
     }
     const timestamp = now()
-    this.db.prepare(`INSERT INTO conversation_routes (id, bot_id, scene_id, workspace_id, chat_id, topic_id, core_thread_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?)`)
-      .run(route.conversationKey, route.bot.id, route.scene?.id ?? null, route.workspace.id, chatId, topicId, timestamp, timestamp)
+    this.db.prepare(`INSERT INTO conversation_threads (id, bot_id, conversation_mode, chat_id, topic_id, core_thread_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, '', ?, ?)`)
+      .run(route.conversationKey, route.bot.id, route.conversationMode, chatId, route.topicId, timestamp, timestamp)
     return { id: route.conversationKey, threadId: '' }
   }
 
   setConversationThread(id: string, threadId: string): void {
-    this.db.prepare('UPDATE conversation_routes SET core_thread_id = ?, updated_at = ? WHERE id = ?').run(threadId, now(), id)
+    this.db.prepare('UPDATE conversation_threads SET core_thread_id = ?, updated_at = ? WHERE id = ?').run(threadId, now(), id)
   }
 
   claimInboundEvent(botId: string, eventId: string, messageId: string): boolean {
@@ -765,5 +781,10 @@ export class HubStore {
     if (!includes(matcher.textIncludes, message.text)) return false
     if (!includes(matcher.cardTitleIncludes, message.content?.title ?? '')) return false
     return true
+  }
+
+  private hasMatcher(scene: SceneRecord): boolean {
+    const matcher = scene.matcher
+    return Boolean(matcher.chatIds.length || matcher.messageTypes.length || matcher.textIncludes.length || matcher.cardTitleIncludes.length)
   }
 }

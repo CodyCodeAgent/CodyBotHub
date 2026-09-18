@@ -29,7 +29,7 @@ export class CodyBotRuntime {
   constructor(private readonly store: HubStore, private readonly runtimeDirectory: string, private readonly codexCommand = 'codex') {}
 
   async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void): Promise<string> {
-    const conversation = this.store.getOrCreateConversation(route, message.conversation.id, message.conversation.rootId ?? '')
+    const conversation = this.store.getOrCreateConversation(route, message.conversation.id)
     const manager = await this.ensureManager()
     await this.ensureConversation(manager, conversation, route)
     const activeThreadId = manager.snapshot(conversation.id)?.threadId ?? conversation.threadId
@@ -38,7 +38,7 @@ export class CodyBotRuntime {
     const localImages = attachments.filter(attachment => attachment.type === 'image').map(attachment => ({ path: attachment.path }))
     const turn: TurnInput = {
       input: buildTurnUserInput({
-        text: this.turnText(route, this.messageText(message.text, attachments)),
+        text: this.messageText(message.text, attachments),
         ...(skills.length ? { skills } : {}),
         ...(localImages.length ? { localImages } : {}),
       }),
@@ -126,7 +126,7 @@ export class CodyBotRuntime {
         approvalPolicy: 'never',
         sandbox: 'danger-full-access',
         runtimeWorkspaceRoots: [cwd],
-        baseInstructions: route.systemPrompt || null,
+        baseInstructions: null,
         experimentalRawEvents: false,
         ephemeral: false,
       },
@@ -136,6 +136,9 @@ export class CodyBotRuntime {
         approvalPolicy: 'never',
         sandboxPolicy: { type: 'dangerFullAccess' },
         summary: 'detailed',
+        additionalContext: route.turnInstructions ? {
+          'cody-bot-hub-route': { kind: 'application', value: route.turnInstructions },
+        } : null,
       },
     }
   }
@@ -156,16 +159,6 @@ export class CodyBotRuntime {
       if (skillPath) result.push({ name: path.basename(path.dirname(skillPath)), path: skillPath })
     }
     return [...new Map(result.map(item => [item.path, item])).values()]
-  }
-
-  private turnText(route: ResolvedRoute, text: string): string {
-    const skillNames = route.skillPackages.flatMap(item => item.skills)
-    const restrictions = route.skillPackages.some(item => item.fallbackMode === 'package_only')
-      ? '本场景只允许使用技能包中列出的 Skill。'
-      : route.skillPackages.some(item => item.fallbackMode === 'mixed')
-        ? '同时检索技能包和当前 Codex 环境中的其他 Skill。'
-        : skillNames.length ? '优先使用技能包中的 Skill；无法满足时再检索当前 Codex 环境中的其他 Skill。' : ''
-    return [skillNames.length ? `当前场景技能包：${skillNames.join('、')}。${restrictions}` : '', text].filter(Boolean).join('\n\n')
   }
 
   private messageText(text: string, attachments: RuntimeAttachment[]): string {

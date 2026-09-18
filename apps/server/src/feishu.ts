@@ -66,7 +66,10 @@ export class FeishuBotManager {
       mode: message.conversation.scope === 'topic' ? 'topic' : message.conversation.scope === 'private' ? 'p2p' : 'group',
     })
     if (!this.store.claimInboundEvent(botId, message.eventId, message.messageId)) return
-    const anchor = [botId, message.conversation.id, message.conversation.rootId ?? 'chat'].join(':')
+    const bot = this.store.listBots().find(item => item.id === botId)
+    if (!bot) return
+    const topicId = bot.conversationMode === 'topic' && message.conversation.scope !== 'private' ? (message.conversation.rootId || message.messageId) : 'chat'
+    const anchor = [botId, message.conversation.id, topicId].join(':')
     const previous = this.conversationQueues.get(anchor) ?? Promise.resolve()
     const current = previous.catch(() => undefined).then(() => this.onMessage(botId, provider, message))
     this.conversationQueues.set(anchor, current)
@@ -97,18 +100,18 @@ export class FeishuBotManager {
     // their content independently matches a Scene; a group binding alone must
     // not turn every bot message into an agent turn or create reply loops.
     if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !route.scene || !independentlyMatches)) return
-    if (message.sender.type === 'user' && route.routeSource === 'topic_binding' && !message.addressedToAgent && !independentlyMatches) return
+    if (message.sender.type === 'user' && route.routeSource === 'topic_context' && !message.addressedToAgent && !independentlyMatches) return
     if (!route.scene && message.conversation.scope !== 'private' && !message.addressedToAgent) return
-    if (route.scene && route.replyMode === 'topic') this.store.bindTopicScene(botId, message.conversation.id, message.conversation.rootId || message.messageId, route.scene.id)
+    if (route.scene && route.routeSource === 'matcher' && route.topicId) this.store.rememberTopicRoute(botId, message.conversation.id, route.topicId, route.scene.id)
     const log = this.store.createMessageLog(botId, route, message)
     let receiptReactionId = ''
     try { receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo') }
     catch (error) { console.warn('[feishu] failed to add receipt reaction:', provider.classifyError(error).message) }
-    if (!route.scene) await this.sendScenePicker(botId, provider, message).catch(error => console.warn('[feishu] failed to send scene picker:', provider.classifyError(error).message))
+    if (!route.scene && message.conversation.scope !== 'private' && this.store.claimScenePicker(botId, message.conversation.id)) await this.sendScenePicker(botId, provider, message).catch(error => console.warn('[feishu] failed to send scene picker:', provider.classifyError(error).message))
     const note = this.responseNote(route)
     let streamMessageId = ''
     try {
-      streamMessageId = await this.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', note }), route.replyMode === 'topic', `${message.eventId}:answer`)
+      streamMessageId = await this.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', note }), route.replyInTopic, `${message.eventId}:answer`)
     } catch (error) {
       console.warn('[feishu] failed to create streaming card:', provider.classifyError(error).message)
     }
@@ -140,11 +143,11 @@ export class FeishuBotManager {
       if (streamMessageId) {
         await this.retryDelivery(provider, () => provider.updateCard(streamMessageId, cards[0]!))
         for (let index = 1; index < cards.length; index += 1) {
-          await this.replyCard(provider, message.messageId, cards[index]!, route.replyMode === 'topic', `${message.eventId}:answer:${index}`)
+          await this.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
         }
       } else {
         for (let index = 0; index < cards.length; index += 1) {
-          await this.replyCard(provider, message.messageId, cards[index]!, route.replyMode === 'topic', `${message.eventId}:answer:${index}`)
+          await this.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
         }
       }
       this.store.finishMessageLog(log.id, { responseContent: text })
@@ -156,7 +159,7 @@ export class FeishuBotManager {
       const errorCard = feishuStreamingCard({ state: 'failed', error: detail, note })
       const sendError = streamMessageId
         ? this.retryDelivery(provider, () => provider.updateCard(streamMessageId, errorCard))
-        : this.replyCard(provider, message.messageId, errorCard, route.replyMode === 'topic', `${message.eventId}:error`).then(() => undefined)
+        : this.replyCard(provider, message.messageId, errorCard, route.replyInTopic, `${message.eventId}:error`).then(() => undefined)
       await sendError.catch(deliveryError => console.error('[feishu] failed to send error card:', deliveryError))
       this.store.finishMessageLog(log.id, { responseContent: latestProgress.answer, error: detail })
       await this.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
@@ -190,7 +193,7 @@ export class FeishuBotManager {
   private async sendScenePicker(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
     const scenes = this.store.listScenes().filter(scene => scene.botId === botId && scene.enabled)
     if (!scenes.length || message.conversation.scope === 'private') return
-    const card = feishuSelectionCard('选择群场景', '这条消息已经在默认工作区中处理。选择场景后，后续消息会固定使用该场景的工作区、Prompt 和技能包。', scenes.map(scene => ({ text: scene.name, value: { action: 'bind_scene', botId, chatId: message.conversation.id, sceneId: scene.id } })), '只有 Bot 管理员或平台中配置的操作人可以保存绑定。')
+    const card = feishuSelectionCard('选择群场景', '这条消息已经在默认工作区中处理。选择后，它会作为这个群的默认场景；匹配到更具体的场景时仍会按消息动态路由。', scenes.map(scene => ({ text: scene.name, value: { action: 'bind_scene', botId, chatId: message.conversation.id, sceneId: scene.id } })), '只在群首次接入时提示。只有 Bot 管理员或平台中配置的操作人可以保存绑定。')
     await this.replyCard(provider, message.messageId, card, false, `${message.eventId}:scene-picker`)
   }
 
@@ -208,7 +211,7 @@ export class FeishuBotManager {
     if (!chatId || !sceneId) return { toast: { type: 'error', content: '场景参数不完整' } }
     this.store.bindGroupScene(botId, chatId, sceneId, action.actorId)
     const scene = this.store.listScenes().find(item => item.id === sceneId)
-    if (action.remoteMessageId) await this.retryDelivery(provider, () => provider.updateCard(action.remoteMessageId, feishuTextCard('群场景已绑定', `后续消息将使用场景：**${scene?.name ?? sceneId}**`, { color: 'green' })))
+    if (action.remoteMessageId) await this.retryDelivery(provider, () => provider.updateCard(action.remoteMessageId, feishuTextCard('群默认场景已绑定', `未命中更具体规则时，将使用场景：**${scene?.name ?? sceneId}**`, { color: 'green' })))
     return { toast: { type: 'success', content: '场景已绑定' } }
   }
 

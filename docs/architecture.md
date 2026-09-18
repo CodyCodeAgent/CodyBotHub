@@ -2,7 +2,7 @@
 
 ## Boundaries
 
-CodyBotHub owns the management product and its domain entities: Workspace, Bot, Scene, Skill Package, group binding, provisioning job and conversation route. CodyWebCore remains the single owner of Codex protocol, session lifecycle, normalized conversation events and provider-neutral channel primitives.
+CodyBotHub owns the management product and its domain entities: Workspace, Bot, Scene, Skill Package, group binding, topic routing context, provisioning job and conversation thread mapping. CodyWebCore remains the single owner of Codex protocol, session lifecycle, normalized conversation events and provider-neutral channel primitives.
 
 Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@codycodeagent/cody-web-core/feishu`. CodyBotHub adds only product routing and policy.
 
@@ -10,8 +10,8 @@ Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@cody
 
 1. `FeishuProvider` converts a Feishu event into `ChannelInboundMessage`.
 2. The SQLite inbox claim deduplicates `bot_id + message_id`, so Feishu retries with a new event id remain idempotent across restarts. Claims expire after the provider retry window.
-3. The router checks a saved group binding, then enabled scenes ordered by `priority ASC, name ASC`.
-4. A matched scene chooses its configured Workspace. No match uses the Bot default Workspace.
+3. The Bot conversation mode derives the Thread identity from the chat, or from the chat plus topic root.
+4. The router checks specific enabled Scene matchers, an inherited topic routing context, a saved group default, and finally a matcher-free fallback Scene. The selected Scene chooses the Workspace; no Scene uses the Bot default Workspace.
 5. CodyBotHub composes system instructions in this exact order:
 
    ```text
@@ -22,9 +22,9 @@ Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@cody
    + Skill Package Prompt(s)
    ```
 
-6. `CodexSessionManager` creates or resumes the native Codex Thread. CodyBotHub stores only the routing key and native Thread id; native Codex history remains the transcript source of truth.
+6. The composed instructions are supplied as trusted per-turn application context. `CodexSessionManager` creates or resumes the native Codex Thread, while the selected Workspace becomes that turn’s cwd and runtime root. CodyBotHub stores only the conversation key and native Thread id; native Codex history remains the transcript source of truth.
 7. Messages sharing one chat/topic anchor are serialized before entering Codex; unrelated conversations still run concurrently.
-8. The final Core Turn outcome is replied as one or more Feishu Markdown cards. Scene or Bot configuration selects direct or topic reply. Every card carries a footer with the effective Workspace, Scene, Skill Package and permission policy.
+8. The final Core Turn outcome is replied as one or more Feishu Markdown cards. The Bot conversation mode selects direct or topic reply. Every card carries a footer with the effective Workspace, Scene, Skill Package and permission policy.
 
 ## Matching
 
@@ -35,23 +35,25 @@ Scene matcher fields are ANDed across populated categories and ORed within each 
 - `textIncludes`: case-insensitive substring
 - `cardTitleIncludes`: case-insensitive substring against normalized post/card title
 
-An empty category does not restrict the match. The first matching scene in deterministic priority order wins.
+An empty category does not restrict the match. The first specifically matching scene in deterministic priority order wins. In topic mode, later addressed messages can inherit the most recent specifically matched Scene for that topic. A group binding is the group default, while a Scene with no matcher is the final Bot-level fallback.
 
 App-authored messages are accepted only when their content independently matches a Scene. A saved group binding does not make arbitrary bot output executable. This supports alert cards while preventing reply loops.
 
-A card selection creates a `group_scene_bindings` row. A bound scene wins over automatic matching until changed or deleted.
+A card selection creates a `group_scene_bindings` row. A bound scene supplies the group default until changed or deleted; a more specific message matcher can override it for the current message and topic routing context.
 
 ## Thread identity
 
-- Matched Scene: `Bot + Scene + Chat`
-- No Scene, normal reply: `Bot + Chat`
-- No Scene, topic reply: `Bot + Chat + topic root`
+Thread identity is controlled only by the Bot conversation mode:
 
-Including Chat in a reusable Scene key prevents conversation history from leaking between groups while keeping one stable Thread for that Scene inside a group.
+- Chat mode: `Bot + Chat`
+- Topic mode: `Bot + Chat + topic root`
+- Private conversations always use `Bot + Chat`
+
+Scene, Workspace and Skill Package never participate in the conversation key. The same Thread can therefore process turns through different Scenes while retaining one native Codex history. A topic routing context may remember the most recent specifically matched Scene for later follow-ups, but it does not own or split the Thread.
 
 ## Unknown groups
 
-An addressed message in a group without a matched or bound Scene is submitted immediately in the Bot default Workspace. CodyBotHub also replies with a Scene picker. Selecting a Scene affects later messages and does not replay the first message.
+An addressed message in a group without a matched or bound Scene is submitted immediately in the Bot default Workspace. CodyBotHub also replies with a Scene picker once when the group is first encountered. Selecting a Scene sets the group default, affects later messages and does not replay the first message.
 
 Unaddressed group messages are ignored unless an enabled or bound Scene matches them. This allows alert cards to trigger automation without making the Bot answer every message in an unconfigured group.
 

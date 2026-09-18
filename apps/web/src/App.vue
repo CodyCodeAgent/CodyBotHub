@@ -13,7 +13,7 @@ const items = [
   { to: '/workspaces', label: '工作区', icon: Boxes },
   { to: '/bots', label: '飞书 Bot', icon: Bot },
   { to: '/scenes', label: '场景路由', icon: Workflow },
-  { to: '/conversation-routes', label: '会话线程', icon: GitBranch },
+  { to: '/conversation-threads', label: '会话线程', icon: GitBranch },
   { to: '/packages', label: '技能包', icon: Puzzle },
   { to: '/messages', label: '消息记录', icon: MessageSquareText },
   { to: '/accounts', label: '账号管理', icon: Users },

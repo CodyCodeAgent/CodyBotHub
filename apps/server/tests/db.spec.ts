@@ -58,7 +58,7 @@ describe('HubStore invariants', () => {
     const attached = workspace(store, 'Attached')
     const detached = workspace(store, 'Detached')
     const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: attached.id })
-    expect(() => store.createScene({ botId: bot.id, workspaceId: detached.id, name: 'Wrong workspace', prompt: '', priority: 100, replyMode: 'inherit', enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })).toThrow('Scene Workspace must be attached to its Bot')
+    expect(() => store.createScene({ botId: bot.id, workspaceId: detached.id, name: 'Wrong workspace', prompt: '', priority: 100, enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })).toThrow('Scene Workspace must be attached to its Bot')
     store.close()
   })
 
@@ -68,7 +68,7 @@ describe('HubStore invariants', () => {
     const second = workspace(store, 'Second')
     const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: first.id })
     const skillPackage = store.createSkillPackage({ workspaceId: second.id, name: 'Foreign package', description: '', prompt: '', skills: ['test'], fallbackMode: 'package_first' })
-    expect(() => store.createScene({ botId: bot.id, workspaceId: first.id, name: 'Scene', prompt: '', priority: 100, replyMode: 'inherit', enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] }, skillPackageIds: [skillPackage.id] })).toThrow('Scene and Skill Package must use the same Workspace')
+    expect(() => store.createScene({ botId: bot.id, workspaceId: first.id, name: 'Scene', prompt: '', priority: 100, enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] }, skillPackageIds: [skillPackage.id] })).toThrow('Scene and Skill Package must use the same Workspace')
     store.close()
   })
 
@@ -84,10 +84,10 @@ describe('HubStore invariants', () => {
     const store = new HubStore(':memory:')
     store.setPlatformPrompt('platform')
     const linked = store.createWorkspace({ name: 'Linked', path: '/tmp', prompt: 'workspace' })
-    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id, prompt: 'bot' })
+    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id, prompt: 'bot', conversationMode: 'topic' })
     const skillPackage = store.createSkillPackage({ workspaceId: linked.id, name: 'Package', description: '', prompt: 'package', skills: ['report'], fallbackMode: 'package_first' })
-    store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Fallback', prompt: 'fallback', priority: 200, replyMode: 'inherit', enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
-    const selected = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: 'scene', priority: 10, replyMode: 'topic', enabled: true, matcher: { chatIds: ['oc_1'], messageTypes: ['interactive'], textIncludes: [], cardTitleIncludes: ['P0'] }, skillPackageIds: [skillPackage.id] })
+    store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Fallback', prompt: 'fallback', priority: 200, enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
+    const selected = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: 'scene', priority: 10, enabled: true, matcher: { chatIds: ['oc_1'], messageTypes: ['interactive'], textIncludes: [], cardTitleIncludes: ['P0'] }, skillPackageIds: [skillPackage.id] })
     const route = store.resolveRoute(bot.id, {
       provider: 'feishu', accountId: bot.id, eventId: 'event-1', messageId: 'message-1',
       conversation: { id: 'oc_1', scope: 'group' }, sender: { id: 'ou_1', type: 'user' },
@@ -95,9 +95,10 @@ describe('HubStore invariants', () => {
       addressedToAgent: false, mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
     })
     expect(route.scene?.id).toBe(selected.id)
-    expect(route.replyMode).toBe('topic')
-    expect(route.conversationKey).toBe(`scene:${bot.id}:${selected.id}:oc_1`)
-    expect(route.systemPrompt).toBe('platform\n\nworkspace\n\nbot\n\nscene\n\npackage')
+    expect(route.conversationMode).toBe('topic')
+    expect(route.replyInTopic).toBe(true)
+    expect(route.conversationKey).toBe(`bot:${bot.id}:chat:oc_1:topic:message-1`)
+    expect(route.turnInstructions).toContain('platform\n\nworkspace\n\nbot\n\nscene\n\npackage')
     store.close()
   })
 
@@ -105,7 +106,7 @@ describe('HubStore invariants', () => {
     const store = new HubStore(':memory:')
     const linked = workspace(store, 'Group binding')
     const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id })
-    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Chosen', prompt: '', priority: 100, replyMode: 'inherit', enabled: true, matcher: { chatIds: ['another-chat'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
+    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Chosen', prompt: '', priority: 100, enabled: true, matcher: { chatIds: ['another-chat'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
     store.bindGroupScene(bot.id, 'oc_target', scene.id, 'ou_admin')
     const route = store.resolveRoute(bot.id, {
       provider: 'feishu', accountId: bot.id, eventId: 'event-2', messageId: 'message-2',
@@ -120,9 +121,9 @@ describe('HubStore invariants', () => {
   it('inherits the original Scene for addressed follow-ups in the same topic', () => {
     const store = new HubStore(':memory:')
     const linked = workspace(store, 'Topic inheritance')
-    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id })
-    const fallback = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Group fallback', prompt: '', priority: 200, replyMode: 'topic', enabled: true, matcher: { chatIds: ['another-chat'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
-    const alert = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: '', priority: 10, replyMode: 'topic', enabled: true, matcher: { chatIds: ['oc_alert'], messageTypes: ['interactive', 'text'], textIncludes: [], cardTitleIncludes: ['Argos-CRITICAL'] } })
+    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id, conversationMode: 'topic' })
+    const fallback = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Group fallback', prompt: '', priority: 200, enabled: true, matcher: { chatIds: ['another-chat'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
+    const alert = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: '', priority: 10, enabled: true, matcher: { chatIds: ['oc_alert'], messageTypes: ['interactive', 'text'], textIncludes: [], cardTitleIncludes: ['Argos-CRITICAL'] } })
     const initial = {
       provider: 'feishu' as const, accountId: bot.id, eventId: 'event-alert', messageId: 'om_alert',
       conversation: { id: 'oc_alert', scope: 'group' as const }, sender: { id: 'app-alert', type: 'app' as const },
@@ -131,7 +132,7 @@ describe('HubStore invariants', () => {
     }
     const initialRoute = store.resolveRoute(bot.id, initial)
     expect(initialRoute).toMatchObject({ scene: { id: alert.id }, routeSource: 'matcher' })
-    store.bindTopicScene(bot.id, 'oc_alert', initial.messageId, alert.id)
+    store.rememberTopicRoute(bot.id, 'oc_alert', initial.messageId, alert.id)
     store.bindGroupScene(bot.id, 'oc_alert', fallback.id, 'ou_admin')
     const followUp = {
       ...initial, eventId: 'event-follow-up', messageId: 'om_follow_up',
@@ -139,9 +140,50 @@ describe('HubStore invariants', () => {
       sender: { id: 'ou_user', type: 'user' as const }, content: { type: 'text' }, text: '只是 PPE base 是吧', addressedToAgent: true,
     }
     const inherited = store.resolveRoute(bot.id, followUp)
-    expect(inherited).toMatchObject({ scene: { id: alert.id }, routeSource: 'topic_binding', conversationKey: initialRoute.conversationKey })
+    expect(inherited).toMatchObject({ scene: { id: alert.id }, routeSource: 'topic_context', conversationKey: initialRoute.conversationKey })
     const unrelated = store.resolveRoute(bot.id, { ...followUp, conversation: { ...followUp.conversation, rootId: 'om_other_topic' } })
     expect(unrelated).toMatchObject({ scene: { id: fallback.id }, routeSource: 'group_binding' })
+    store.close()
+  })
+
+  it('keeps Thread identity independent from the matched Scene in chat mode', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Scene independent')
+    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id, conversationMode: 'chat' })
+    const first = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'First', prompt: '', priority: 10, enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: ['alpha'], cardTitleIncludes: [] } })
+    const second = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Second', prompt: '', priority: 20, enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: ['beta'], cardTitleIncludes: [] } })
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-alpha', messageId: 'message-alpha',
+      conversation: { id: 'oc_shared', scope: 'group' as const }, sender: { id: 'ou_user', type: 'user' as const },
+      content: { type: 'text' as const }, text: 'alpha', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const alpha = store.resolveRoute(bot.id, message)
+    const beta = store.resolveRoute(bot.id, { ...message, eventId: 'event-beta', messageId: 'message-beta', text: 'beta' })
+    expect(alpha.scene?.id).toBe(first.id)
+    expect(beta.scene?.id).toBe(second.id)
+    expect(beta.conversationKey).toBe(alpha.conversationKey)
+    expect(beta.conversationKey).toBe(`bot:${bot.id}:chat:oc_shared`)
+    store.close()
+  })
+
+  it('uses one Thread per topic in topic mode and one Thread for private chat', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Topic boundaries')
+    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id, conversationMode: 'topic' })
+    const base = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-1', messageId: 'message-1',
+      conversation: { id: 'oc_topics', scope: 'topic' as const, rootId: 'root-1' }, sender: { id: 'ou_user', type: 'user' as const },
+      content: { type: 'text' as const }, text: 'hello', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const first = store.resolveRoute(bot.id, base)
+    const same = store.resolveRoute(bot.id, { ...base, eventId: 'event-2', messageId: 'message-2' })
+    const other = store.resolveRoute(bot.id, { ...base, eventId: 'event-3', messageId: 'message-3', conversation: { ...base.conversation, rootId: 'root-2' } })
+    const privateMessage = store.resolveRoute(bot.id, { ...base, eventId: 'event-4', messageId: 'message-4', conversation: { id: 'ou_private', scope: 'private' as const } })
+    expect(same.conversationKey).toBe(first.conversationKey)
+    expect(other.conversationKey).not.toBe(first.conversationKey)
+    expect(privateMessage).toMatchObject({ conversationKey: `bot:${bot.id}:chat:ou_private`, topicId: '', replyInTopic: false })
     store.close()
   })
 
@@ -149,23 +191,23 @@ describe('HubStore invariants', () => {
     const store = new HubStore(':memory:')
     const linked = workspace(store, 'Thread mapping')
     const bot = store.createBot({ name: 'Thread Bot', defaultWorkspaceId: linked.id })
-    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert triage', prompt: '', priority: 10, replyMode: 'inherit', enabled: true, matcher: { chatIds: ['oc_thread'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
+    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert triage', prompt: '', priority: 10, enabled: true, matcher: { chatIds: ['oc_thread'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
     const route = store.resolveRoute(bot.id, {
       provider: 'feishu', accountId: bot.id, eventId: 'event-thread', messageId: 'message-thread',
       conversation: { id: 'oc_thread', scope: 'group' }, sender: { id: 'ou_1', type: 'user' },
       content: { type: 'text' }, text: 'check thread mapping', attachments: [], addressedToAgent: true,
       mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
     })
-    const conversation = store.getOrCreateConversation(route, 'oc_thread', '')
+    const conversation = store.getOrCreateConversation(route, 'oc_thread')
     store.setConversationThread(conversation.id, '01-thread-id')
     store.upsertChatMetadata(bot.id, { chatId: 'oc_thread', name: '告警排查群', mode: 'group' })
     expect(store.listChatMetadata({ botId: bot.id, query: '告警' })).toMatchObject([{ chatId: 'oc_thread', name: '告警排查群' }])
     expect(store.listChatIdsForMetadataSync(bot.id)).toContain('oc_thread')
-    expect(store.listConversationRoutes({ sceneId: scene.id, query: '01-thread-id' })).toMatchObject({
+    expect(store.listConversationThreads({ query: '01-thread-id' })).toMatchObject({
       total: 1,
-      items: [{ id: route.conversationKey, botName: 'Thread Bot', sceneName: 'Alert triage', workspaceName: 'Thread mapping', chatId: 'oc_thread', chatName: '告警排查群', chatMode: 'group', topicId: '', coreThreadId: '01-thread-id' }],
+      items: [{ id: route.conversationKey, botName: 'Thread Bot', conversationMode: 'chat', chatId: 'oc_thread', chatName: '告警排查群', chatMode: 'group', topicId: '', coreThreadId: '01-thread-id' }],
     })
-    expect(store.getConversationRoute(route.conversationKey)).toMatchObject({ sceneId: scene.id, coreThreadId: '01-thread-id' })
+    expect(store.getConversationThread(route.conversationKey)).toMatchObject({ conversationMode: 'chat', coreThreadId: '01-thread-id' })
     store.close()
   })
 
@@ -184,8 +226,8 @@ describe('HubStore invariants', () => {
     const linked = workspace(store, 'Statistics')
     const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id })
     const matcher = { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] }
-    store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Enabled', prompt: '', priority: 10, replyMode: 'inherit', enabled: true, matcher })
-    store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Disabled', prompt: '', priority: 20, replyMode: 'inherit', enabled: false, matcher })
+    store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Enabled', prompt: '', priority: 10, enabled: true, matcher })
+    store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Disabled', prompt: '', priority: 20, enabled: false, matcher })
     expect(store.stats().scenes).toBe(1)
     store.close()
   })
@@ -205,7 +247,7 @@ describe('HubStore invariants', () => {
     const linked = store.createWorkspace({ name: 'Review', path: '/tmp/review' })
     const bot = store.createBot({ name: 'Reviewer', defaultWorkspaceId: linked.id })
     const skillPackage = store.createSkillPackage({ workspaceId: linked.id, name: 'Triage', description: '', prompt: '', skills: [], fallbackMode: 'package_first' })
-    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: '', priority: 10, replyMode: 'inherit', enabled: true, matcher: { chatIds: ['oc_review'], messageTypes: ['text'], textIncludes: ['alarm'], cardTitleIncludes: [] }, skillPackageIds: [skillPackage.id] })
+    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: '', priority: 10, enabled: true, matcher: { chatIds: ['oc_review'], messageTypes: ['text'], textIncludes: ['alarm'], cardTitleIncludes: [] }, skillPackageIds: [skillPackage.id] })
     const message = {
       provider: 'feishu' as const, accountId: bot.id, eventId: 'event-review', messageId: 'message-review',
       conversation: { id: 'oc_review', scope: 'group' as const }, sender: { id: 'ou_reviewer', type: 'user' as const },
