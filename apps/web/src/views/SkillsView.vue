@@ -8,6 +8,9 @@ const items = ref<SkillCatalogItem[]>([]), sources = ref<SkillSource[]>([]), wor
 const workspaceId = ref(''), sourceId = ref(''), status = ref(''), query = ref(''), loading = ref(false), working = ref(false), error = ref(''), notice = ref('')
 const isBulkSelectable = (item: SkillCatalogItem) => item.status === 'available' || item.status === 'update_available'
 const selectable = computed(() => items.value.filter(isBulkSelectable))
+const conflicts = computed(() => items.value.filter(item => item.status === 'conflict'))
+const selectedItems = computed(() => items.value.filter(item => selected.value.includes(selectionKey(item))))
+const selectedHasConflict = computed(() => selectedItems.value.some(item => item.status === 'conflict'))
 const selectionKey = (item: SkillCatalogItem) => `${item.sourceId}\u0000${item.workspaceId}\u0000${item.key}`
 const statusLabel: Record<SkillCatalogItem['status'], string> = { available: '可安装', installed: '已安装', update_available: '有更新', conflict: '目录冲突', local: '本地' }
 
@@ -20,6 +23,7 @@ const load = async () => {
 }
 onMounted(() => { void load() })
 const toggleAll = () => { selected.value = selected.value.length === selectable.value.length ? [] : selectable.value.map(selectionKey) }
+const selectConflicts = () => { selected.value = conflicts.value.map(selectionKey) }
 const installItems = async (targets: SkillCatalogItem[], force = false) => {
   if (!targets.length) return
   working.value = true; error.value = ''; notice.value = ''
@@ -37,7 +41,7 @@ const installItems = async (targets: SkillCatalogItem[], force = false) => {
     selected.value = []; await load()
   } catch (value) { error.value = value instanceof Error ? value.message : '安装失败' } finally { working.value = false }
 }
-const installSelected = () => installItems(items.value.filter(item => selected.value.includes(selectionKey(item))))
+const installSelected = () => installItems(selectedItems.value, selectedHasConflict.value)
 const installOne = (item: SkillCatalogItem) => installItems([item], item.status === 'conflict')
 const syncSource = async (source: SkillSource) => {
   working.value = true; error.value = ''; notice.value = ''
@@ -56,10 +60,10 @@ const syncSource = async (source: SkillSource) => {
     <div v-if="sources.length" class="source-toolbar"><span>远程同步：</span><button v-for="source in sources" :key="source.id" class="ghost-button compact" :disabled="working" @click="syncSource(source)"><RefreshCw :size="13" />{{ source.name }}</button></div>
     <div v-if="error" class="error-banner" role="alert">{{ error }}</div><div v-if="notice" class="notice" role="status">{{ notice }}</div>
     <section class="panel">
-      <div class="panel-header"><div><h2>识别结果</h2><p class="panel-description">同名未受管理目录标记为冲突，只有点击“接管安装”才会备份原目录并替换。</p></div><div class="actions"><button class="ghost-button compact" :disabled="!selectable.length" @click="toggleAll">{{ selected.length === selectable.length && selectable.length ? '取消全选' : '选择可更新项' }}</button><button class="button" :disabled="!selected.length || working" @click="installSelected"><Download :size="15" />安装所选（{{ selected.length }}）</button></div></div>
+      <div class="panel-header"><div><h2>识别结果</h2><p class="panel-description">同名未受管理目录标记为冲突；接管时会先备份原目录，再安装远程版本。</p></div><div class="actions"><button class="ghost-button compact" :disabled="!selectable.length" @click="toggleAll">{{ selected.length === selectable.length && selectable.length ? '取消全选' : '选择可更新项' }}</button><button class="ghost-button compact" :disabled="!conflicts.length" @click="selectConflicts">选择冲突项</button><button class="button" :disabled="!selected.length || working" @click="installSelected"><Download :size="15" />{{ selectedHasConflict ? '备份并接管' : '安装所选' }}（{{ selected.length }}）</button></div></div>
       <div v-if="loading" class="empty">正在扫描工作区和技能源…</div>
       <div v-else-if="!items.length" class="empty"><LibraryBig :size="36" /><strong>没有识别到 Skill</strong><span>请检查工作区目录，或先在平台设置中添加并同步技能源。</span></div>
-      <div v-else class="table-wrap"><table class="skill-table"><thead><tr><th class="select-cell"></th><th>Skill</th><th>工作区 / 来源</th><th>路径</th><th>状态</th><th></th></tr></thead><tbody><tr v-for="item in items" :key="selectionKey(item)"><td class="select-cell"><input v-if="isBulkSelectable(item)" v-model="selected" type="checkbox" :value="selectionKey(item)" /></td><td><div class="entity-title">{{ item.name }}</div><div class="entity-subtitle skill-description">{{ item.description || '未提供描述' }}</div></td><td><div>{{ item.workspaceName }}</div><div class="muted">{{ item.sourceName }}</div></td><td><code class="mono path-code">{{ item.sourcePath }}</code></td><td><span class="badge" :class="{ green: item.status === 'installed', red: item.status === 'conflict', gray: item.status === 'local' }"><ShieldAlert v-if="item.status === 'conflict'" :size="12" /><CheckCircle2 v-else-if="item.status === 'installed'" :size="12" />{{ statusLabel[item.status] }}</span></td><td><button v-if="item.sourceId && item.status !== 'installed'" class="ghost-button compact" :disabled="working" @click="installOne(item)">{{ item.status === 'conflict' ? '备份并接管' : item.status === 'update_available' ? '更新' : '安装' }}</button></td></tr></tbody></table></div>
+      <div v-else class="table-wrap"><table class="skill-table"><thead><tr><th class="select-cell"></th><th>Skill</th><th>工作区 / 来源</th><th>路径</th><th>状态</th><th></th></tr></thead><tbody><tr v-for="item in items" :key="selectionKey(item)"><td class="select-cell"><input v-if="isBulkSelectable(item) || item.status === 'conflict'" v-model="selected" type="checkbox" :value="selectionKey(item)" /></td><td><div class="entity-title">{{ item.name }}</div><div class="entity-subtitle skill-description">{{ item.description || '未提供描述' }}</div></td><td><div>{{ item.workspaceName }}</div><div class="muted">{{ item.sourceName }}</div></td><td><code class="mono path-code">{{ item.sourcePath }}</code></td><td><span class="badge" :class="{ green: item.status === 'installed', red: item.status === 'conflict', gray: item.status === 'local' }"><ShieldAlert v-if="item.status === 'conflict'" :size="12" /><CheckCircle2 v-else-if="item.status === 'installed'" :size="12" />{{ statusLabel[item.status] }}</span></td><td><button v-if="item.sourceId && item.status !== 'installed'" class="ghost-button compact" :disabled="working" @click="installOne(item)">{{ item.status === 'conflict' ? '备份并接管' : item.status === 'update_available' ? '更新' : '安装' }}</button></td></tr></tbody></table></div>
     </section>
   </div>
 </template>
