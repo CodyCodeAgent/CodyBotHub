@@ -227,6 +227,7 @@ export class HubStore {
         model_source TEXT NOT NULL DEFAULT 'codex',
         reasoning_effort_source TEXT NOT NULL DEFAULT 'codex',
         model_fallback INTEGER NOT NULL DEFAULT 0 CHECK (model_fallback IN (0, 1)),
+        core_thread_id TEXT NOT NULL DEFAULT '',
         received_at TEXT NOT NULL,
         started_at TEXT NOT NULL,
         completed_at TEXT NOT NULL DEFAULT '',
@@ -302,6 +303,14 @@ export class HubStore {
     if (!messageLogColumns.some(column => String(column.name) === 'model_fallback')) this.db.exec('ALTER TABLE message_logs ADD COLUMN model_fallback INTEGER NOT NULL DEFAULT 0 CHECK (model_fallback IN (0, 1))')
     if (!messageLogColumns.some(column => String(column.name) === 'inbound_raw_json')) this.db.exec("ALTER TABLE message_logs ADD COLUMN inbound_raw_json TEXT NOT NULL DEFAULT 'null'")
     if (!messageLogColumns.some(column => String(column.name) === 'investigation_json')) this.db.exec("ALTER TABLE message_logs ADD COLUMN investigation_json TEXT NOT NULL DEFAULT '{}'")
+    if (!messageLogColumns.some(column => String(column.name) === 'core_thread_id')) {
+      this.db.exec("ALTER TABLE message_logs ADD COLUMN core_thread_id TEXT NOT NULL DEFAULT ''")
+      this.db.exec(`UPDATE message_logs SET core_thread_id = COALESCE((
+        SELECT r.core_thread_id FROM conversation_threads r
+        WHERE r.bot_id = message_logs.bot_id AND r.chat_id = message_logs.chat_id AND r.topic_id = message_logs.topic_id
+        ORDER BY r.updated_at DESC LIMIT 1
+      ), '') WHERE core_thread_id = ''`)
+    }
     const sessionColumns = this.db.prepare('PRAGMA table_info(auth_sessions)').all() as Row[]
     if (!sessionColumns.some(column => String(column.name) === 'account_id')) this.db.exec("ALTER TABLE auth_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
     const accountColumns = this.db.prepare('PRAGMA table_info(admin_accounts)').all() as Row[]
@@ -676,19 +685,21 @@ export class HubStore {
   createMessageLog(botId: string, route: ResolvedRoute, message: ChannelInboundMessage): MessageLogRecord {
     const id = randomUUID()
     const startedAt = now()
+    const conversation = this.db.prepare('SELECT core_thread_id FROM conversation_threads WHERE id = ?').get(route.conversationKey) as Row | undefined
+    const coreThreadId = String(conversation?.core_thread_id ?? '')
     this.db.prepare(`INSERT INTO message_logs (
       id, event_id, message_id, bot_id, bot_name, chat_id, topic_id, sender_id,
       message_type, inbound_content, inbound_raw_json, status, workspace_id, workspace_name,
       scene_id, scene_name, skill_packages_json, investigation_json, model, reasoning_effort, model_source,
-      reasoning_effort_source, model_fallback, received_at, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?)`)
+      reasoning_effort_source, model_fallback, core_thread_id, received_at, started_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?)`)
       .run(
         id, message.eventId, message.messageId, botId, route.bot.name,
         message.conversation.id, route.topicId, message.sender.id,
         message.content?.type ?? 'unknown', message.text.slice(0, 200_000), JSON.stringify(message.content?.raw ?? null).slice(0, 500_000),
         route.workspace.id, route.workspace.name, route.scene?.id ?? '', route.scene?.name ?? '',
         JSON.stringify(route.skillPackages.map(item => ({ id: item.id, name: item.name }))),
-        route.modelConfig.model, route.modelConfig.reasoningEffort, route.modelConfig.modelSource, route.modelConfig.reasoningEffortSource,
+        route.modelConfig.model, route.modelConfig.reasoningEffort, route.modelConfig.modelSource, route.modelConfig.reasoningEffortSource, coreThreadId,
         message.createdAtIso, startedAt,
       )
     return this.getMessageLog(id)
@@ -727,6 +738,11 @@ export class HubStore {
     return this.getMessageLog(id)
   }
 
+  setMessageLogThread(id: string, coreThreadId: string): MessageLogRecord {
+    this.db.prepare('UPDATE message_logs SET core_thread_id = ? WHERE id = ?').run(coreThreadId, id)
+    return this.getMessageLog(id)
+  }
+
   listMessageLogs(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}): { items: MessageLogRecord[]; total: number } {
     const filters: string[] = []
     const params: Array<string | number> = []
@@ -734,9 +750,9 @@ export class HubStore {
     if (input.sceneId) { filters.push('scene_id = ?'); params.push(input.sceneId) }
     if (input.status && ['processing', 'completed', 'failed'].includes(input.status)) { filters.push('status = ?'); params.push(input.status) }
     if (input.query?.trim()) {
-      filters.push('(inbound_content LIKE ? ESCAPE \'\\\' OR response_content LIKE ? ESCAPE \'\\\' OR message_id LIKE ? OR id LIKE ?)')
+      filters.push('(inbound_content LIKE ? ESCAPE \'\\\' OR response_content LIKE ? ESCAPE \'\\\' OR message_id LIKE ? OR id LIKE ? OR core_thread_id LIKE ?)')
       const escaped = input.query.trim().replace(/[\\%_]/gu, value => `\\${value}`)
-      params.push(`%${escaped}%`, `%${escaped}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`)
+      params.push(`%${escaped}%`, `%${escaped}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`)
     }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM message_logs ${where}`).get(...params) as Row).count)
@@ -772,6 +788,7 @@ export class HubStore {
     })(),
     model: String(row.model), reasoningEffort: String(row.reasoning_effort), modelSource: String(row.model_source) as ModelConfigSource,
     reasoningEffortSource: String(row.reasoning_effort_source) as ModelConfigSource, modelFallback: Boolean(row.model_fallback),
+    coreThreadId: String(row.core_thread_id),
     receivedAt: String(row.received_at), startedAt: String(row.started_at), completedAt: String(row.completed_at),
     durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
   })

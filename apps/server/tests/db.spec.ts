@@ -276,11 +276,13 @@ describe('HubStore invariants', () => {
     expect(log).toMatchObject({ status: 'processing', sceneId: scene.id, sceneName: 'Alert', inboundContent: 'alarm database latency', inboundRaw: { text: 'alarm database latency', ticket: 'T-1' }, skillPackages: [{ id: skillPackage.id, name: 'Triage' }], modelSource: 'codex' })
     expect(store.setMessageLogInvestigation(log.id, { mode: 'package_first', primarySkills: [{ name: 'triage', description: '告警处理', path: '/skills/triage/SKILL.md' }], candidateSkills: [{ name: 'rds', description: '数据库查询', path: '/skills/rds/SKILL.md' }], knowledgeResources: [{ title: '表结构', path: '/knowledge/schema.md' }], knowledgeRoots: ['/knowledge'], codeRoot: '/workspace', tools: [{ kind: 'command', title: 'Command execution', summary: 'rg IssueBudget', status: 'completed' }] })).toMatchObject({ investigation: { mode: 'package_first', primarySkills: [{ name: 'triage' }], candidateSkills: [{ name: 'rds' }], tools: [{ summary: 'rg IssueBudget' }] } })
     expect(store.setMessageLogModel(log.id, { model: 'gpt-test', reasoningEffort: 'high', modelSource: 'platform', reasoningEffortSource: 'scene', fallback: true })).toMatchObject({ model: 'gpt-test', reasoningEffort: 'high', modelSource: 'platform', reasoningEffortSource: 'scene', modelFallback: true })
+    expect(store.setMessageLogThread(log.id, '01a0-test-thread')).toMatchObject({ coreThreadId: '01a0-test-thread' })
     const completed = store.finishMessageLog(log.id, { responseContent: 'database recovered' })
     expect(completed).toMatchObject({ status: 'completed', responseContent: 'database recovered' })
     expect(completed.durationMs).toBeTypeOf('number')
     expect(store.listMessageLogs({ query: 'recovered', sceneId: scene.id })).toMatchObject({ total: 1, items: [{ id: log.id }] })
     expect(store.listMessageLogs({ query: log.id })).toMatchObject({ total: 1, items: [{ messageId: message.messageId }] })
+    expect(store.listMessageLogs({ query: '01a0-test-thread' })).toMatchObject({ total: 1, items: [{ id: log.id }] })
     const interruptedMessage = { ...message, eventId: 'event-interrupted', messageId: 'message-interrupted' }
     const interrupted = store.createMessageLog(bot.id, route, interruptedMessage)
     expect(store.failProcessingMessageLogs()).toBe(1)

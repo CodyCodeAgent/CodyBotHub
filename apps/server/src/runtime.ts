@@ -118,7 +118,7 @@ export class CodyBotRuntime {
     private readonly turnTimeoutMs = 15 * 60 * 1000,
   ) {}
 
-  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void): Promise<string> {
+  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void): Promise<string> {
     const conversation = this.store.getOrCreateConversation(route, message.conversation.id)
     const manager = await this.ensureManager()
     const model = await this.resolveModel(manager, route.modelConfig)
@@ -127,6 +127,7 @@ export class CodyBotRuntime {
     onInvestigation?.(skillPlan.trace)
     await this.ensureConversation(manager, conversation, route, skillPlan.instructions)
     const activeThreadId = manager.snapshot(conversation.id)?.threadId ?? conversation.threadId
+    if (activeThreadId) onThreadResolved?.(activeThreadId)
     manager.setContext(conversation.id, this.context(route, skillPlan.instructions))
     const localImages = attachments.filter(attachment => attachment.type === 'image').map(attachment => ({ path: attachment.path }))
     const turn: TurnInput = {

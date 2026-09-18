@@ -147,6 +147,7 @@ export interface MessageLogRecord {
   modelSource: ModelConfigSource
   reasoningEffortSource: ModelConfigSource
   modelFallback: boolean
+  coreThreadId: string
   receivedAt: string
   startedAt: string
   completedAt: string

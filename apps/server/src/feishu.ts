@@ -142,6 +142,7 @@ export class FeishuBotManager {
         schedulePatch,
         model => this.store.setMessageLogModel(log.id, model),
         trace => this.store.setMessageLogInvestigation(log.id, trace),
+        threadId => this.store.setMessageLogThread(log.id, threadId),
       )
       if (patchTimer) { clearTimeout(patchTimer); patchTimer = null }
       await patchTail
