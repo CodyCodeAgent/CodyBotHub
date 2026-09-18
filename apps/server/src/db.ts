@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { BotRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 
 type Row = Record<string, unknown>
@@ -31,6 +31,16 @@ export class HubStore {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS admin_accounts (
+        id TEXT PRIMARY KEY,
+        login_name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+        display_name TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        last_login_at TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS platform_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         base_prompt TEXT NOT NULL DEFAULT '',
@@ -39,6 +49,19 @@ export class HubStore {
       CREATE TABLE IF NOT EXISTS auth_sessions (
         token_hash TEXT PRIMARY KEY,
         expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id TEXT PRIMARY KEY,
+        actor_account_id TEXT NOT NULL DEFAULT '',
+        actor_login_name TEXT NOT NULL DEFAULT '',
+        actor_display_name TEXT NOT NULL DEFAULT '',
+        action TEXT NOT NULL,
+        target_type TEXT NOT NULL DEFAULT '',
+        target_id TEXT NOT NULL DEFAULT '',
+        summary TEXT NOT NULL,
+        details_json TEXT NOT NULL DEFAULT '{}',
+        ip_address TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS workspaces (
@@ -176,29 +199,105 @@ export class HubStore {
       CREATE INDEX IF NOT EXISTS idx_message_logs_received ON message_logs(received_at DESC);
       CREATE INDEX IF NOT EXISTS idx_message_logs_bot ON message_logs(bot_id, received_at DESC);
       CREATE INDEX IF NOT EXISTS idx_message_logs_scene ON message_logs(scene_id, received_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_account_id, created_at DESC);
     `)
+    const sessionColumns = this.db.prepare('PRAGMA table_info(auth_sessions)').all() as Row[]
+    if (!sessionColumns.some(column => String(column.name) === 'account_id')) this.db.exec("ALTER TABLE auth_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
+    const legacy = this.db.prepare('SELECT password_hash, created_at, updated_at FROM admin_credentials WHERE id = 1').get() as Row | undefined
+    if (legacy && !(this.db.prepare('SELECT 1 FROM admin_accounts LIMIT 1').get())) {
+      this.db.prepare('INSERT INTO admin_accounts (id, login_name, display_name, password_hash, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)')
+        .run('legacy-admin', 'admin', '管理员', String(legacy.password_hash), String(legacy.created_at), String(legacy.updated_at))
+    }
+    const firstAccount = this.db.prepare('SELECT id FROM admin_accounts ORDER BY created_at LIMIT 1').get() as Row | undefined
+    if (firstAccount) this.db.prepare("UPDATE auth_sessions SET account_id = ? WHERE account_id = ''").run(String(firstAccount.id))
   }
 
   hasAdmin(): boolean {
-    return Boolean(this.db.prepare('SELECT 1 FROM admin_credentials WHERE id = 1').get())
+    return Boolean(this.db.prepare('SELECT 1 FROM admin_accounts WHERE enabled = 1 LIMIT 1').get())
   }
-  getAdminHash(): string | null {
-    const row = this.db.prepare('SELECT password_hash FROM admin_credentials WHERE id = 1').get() as Row | undefined
-    return row ? String(row.password_hash) : null
+  listAdminAccounts(): AdminAccountRecord[] {
+    return (this.db.prepare('SELECT * FROM admin_accounts ORDER BY login_name COLLATE NOCASE').all() as Row[]).map(this.adminAccount)
   }
-  setAdminHash(hash: string): void {
-    const timestamp = now()
-    this.db.prepare(`INSERT INTO admin_credentials (id, password_hash, created_at, updated_at) VALUES (1, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET password_hash = excluded.password_hash, updated_at = excluded.updated_at`).run(hash, timestamp, timestamp)
+  getAdminAccount(id: string): AdminAccountRecord {
+    const row = this.db.prepare('SELECT * FROM admin_accounts WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Account not found')
+    return this.adminAccount(row)
   }
-  createSession(tokenHash: string, expiresAt: string): void {
+  findAdminAccountByLogin(loginName: string): (AdminAccountRecord & { passwordHash: string }) | null {
+    const row = this.db.prepare('SELECT * FROM admin_accounts WHERE login_name = ? COLLATE NOCASE').get(loginName) as Row | undefined
+    return row ? { ...this.adminAccount(row), passwordHash: String(row.password_hash) } : null
+  }
+  createAdminAccount(input: { loginName: string; displayName: string; passwordHash: string }): AdminAccountRecord {
+    const id = randomUUID(), timestamp = now()
+    this.db.prepare('INSERT INTO admin_accounts (id, login_name, display_name, password_hash, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?)')
+      .run(id, input.loginName, input.displayName, input.passwordHash, timestamp, timestamp)
+    return this.getAdminAccount(id)
+  }
+  updateAdminAccount(id: string, input: { loginName: string; displayName: string; passwordHash?: string }): AdminAccountRecord {
+    this.getAdminAccount(id)
+    const result = input.passwordHash
+      ? this.db.prepare('UPDATE admin_accounts SET login_name = ?, display_name = ?, password_hash = ?, updated_at = ? WHERE id = ?').run(input.loginName, input.displayName, input.passwordHash, now(), id)
+      : this.db.prepare('UPDATE admin_accounts SET login_name = ?, display_name = ?, updated_at = ? WHERE id = ?').run(input.loginName, input.displayName, now(), id)
+    if (!result.changes) throw new Error('Account not found')
+    return this.getAdminAccount(id)
+  }
+  deleteAdminAccount(id: string): void {
+    if (this.listAdminAccounts().filter(item => item.enabled).length <= 1) throw new Error('Cannot delete the last administrator account')
+    this.db.prepare('DELETE FROM auth_sessions WHERE account_id = ?').run(id)
+    if (!this.db.prepare('DELETE FROM admin_accounts WHERE id = ?').run(id).changes) throw new Error('Account not found')
+  }
+  touchAdminLogin(id: string): void { this.db.prepare('UPDATE admin_accounts SET last_login_at = ? WHERE id = ?').run(now(), id) }
+  private adminAccount = (row: Row): AdminAccountRecord => ({
+    id: String(row.id), loginName: String(row.login_name), displayName: String(row.display_name), enabled: Boolean(row.enabled),
+    lastLoginAt: String(row.last_login_at), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  })
+
+  createSession(tokenHash: string, accountId: string, expiresAt: string): void {
     this.db.prepare('DELETE FROM auth_sessions WHERE expires_at <= ?').run(now())
-    this.db.prepare('INSERT INTO auth_sessions (token_hash, expires_at, created_at) VALUES (?, ?, ?)').run(tokenHash, expiresAt, now())
+    this.db.prepare('INSERT INTO auth_sessions (token_hash, account_id, expires_at, created_at) VALUES (?, ?, ?, ?)').run(tokenHash, accountId, expiresAt, now())
   }
   hasSession(tokenHash: string): boolean {
-    return Boolean(this.db.prepare('SELECT 1 FROM auth_sessions WHERE token_hash = ? AND expires_at > ?').get(tokenHash, now()))
+    return Boolean(this.getSessionAccount(tokenHash))
+  }
+  getSessionAccount(tokenHash: string): AdminAccountRecord | null {
+    const row = this.db.prepare(`SELECT a.* FROM auth_sessions s JOIN admin_accounts a ON a.id = s.account_id
+      WHERE s.token_hash = ? AND s.expires_at > ? AND a.enabled = 1`).get(tokenHash, now()) as Row | undefined
+    return row ? this.adminAccount(row) : null
   }
   deleteSession(tokenHash: string): void { this.db.prepare('DELETE FROM auth_sessions WHERE token_hash = ?').run(tokenHash) }
+
+  createAuditLog(input: { actor?: AdminAccountRecord | null; action: string; targetType?: string; targetId?: string; summary: string; details?: Record<string, unknown>; ipAddress?: string }): AuditLogRecord {
+    const id = randomUUID(), timestamp = now(), actor = input.actor
+    this.db.prepare(`INSERT INTO audit_logs (id, actor_account_id, actor_login_name, actor_display_name, action, target_type, target_id, summary, details_json, ip_address, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, actor?.id ?? '', actor?.loginName ?? '', actor?.displayName ?? '', input.action, input.targetType ?? '', input.targetId ?? '', input.summary, JSON.stringify(input.details ?? {}), input.ipAddress ?? '', timestamp)
+    return this.getAuditLog(id)
+  }
+  listAuditLogs(input: { limit?: number; offset?: number; actorAccountId?: string; action?: string; query?: string } = {}): { items: AuditLogRecord[]; total: number } {
+    const filters: string[] = [], params: Array<string | number> = []
+    if (input.actorAccountId) { filters.push('actor_account_id = ?'); params.push(input.actorAccountId) }
+    if (input.action) { filters.push('action = ?'); params.push(input.action) }
+    if (input.query?.trim()) {
+      filters.push('(summary LIKE ? ESCAPE \'\\\' OR target_id LIKE ? OR actor_login_name LIKE ? OR actor_display_name LIKE ?)')
+      const escaped = input.query.trim().replace(/[\\%_]/gu, value => `\\${value}`), plain = `%${input.query.trim()}%`
+      params.push(`%${escaped}%`, plain, plain, plain)
+    }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM audit_logs ${where}`).get(...params) as Row).count)
+    const limit = Math.min(200, Math.max(1, Math.trunc(input.limit ?? 50))), offset = Math.max(0, Math.trunc(input.offset ?? 0))
+    return { items: (this.db.prepare(`SELECT * FROM audit_logs ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]).map(this.auditLog), total }
+  }
+  getAuditLog(id: string): AuditLogRecord {
+    const row = this.db.prepare('SELECT * FROM audit_logs WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Audit log not found')
+    return this.auditLog(row)
+  }
+  private auditLog = (row: Row): AuditLogRecord => ({
+    id: String(row.id), actorAccountId: String(row.actor_account_id), actorLoginName: String(row.actor_login_name), actorDisplayName: String(row.actor_display_name),
+    action: String(row.action), targetType: String(row.target_type), targetId: String(row.target_id), summary: String(row.summary),
+    details: (() => { try { return JSON.parse(String(row.details_json)) as Record<string, unknown> } catch { return {} } })(),
+    ipAddress: String(row.ip_address), createdAt: String(row.created_at),
+  })
 
   getPlatformPrompt(): string {
     const row = this.db.prepare('SELECT base_prompt FROM platform_settings WHERE id = 1').get() as Row | undefined
@@ -470,6 +569,7 @@ export class HubStore {
     this.db.prepare(`INSERT INTO group_scene_bindings (bot_id, chat_id, scene_id, bound_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(bot_id, chat_id) DO UPDATE SET scene_id = excluded.scene_id, bound_by = excluded.bound_by, updated_at = excluded.updated_at`)
       .run(botId, chatId, sceneId, actorId, timestamp, timestamp)
+    this.createAuditLog({ action: 'scene.bind_group', targetType: 'scene', targetId: sceneId, summary: `通过飞书将群 ${chatId} 绑定到场景 ${scene.name}`, details: { botId, chatId, feishuActorId: actorId } })
   }
 
   resolveRoute(botId: string, message: ChannelInboundMessage): ResolvedRoute {

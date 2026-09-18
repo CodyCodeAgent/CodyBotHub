@@ -8,6 +8,8 @@ import ScenesView from './views/ScenesView.vue'
 import WorkspacesView from './views/WorkspacesView.vue'
 import SettingsView from './views/SettingsView.vue'
 import MessagesView from './views/MessagesView.vue'
+import AccountsView from './views/AccountsView.vue'
+import AuditLogsView from './views/AuditLogsView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -19,6 +21,8 @@ export const router = createRouter({
     { path: '/scenes', name: 'scenes', component: ScenesView },
     { path: '/packages', name: 'packages', component: PackagesView },
     { path: '/messages', name: 'messages', component: MessagesView },
+    { path: '/accounts', name: 'accounts', component: AccountsView },
+    { path: '/audit-logs', name: 'audit-logs', component: AuditLogsView },
     { path: '/settings', name: 'settings', component: SettingsView },
   ],
 })

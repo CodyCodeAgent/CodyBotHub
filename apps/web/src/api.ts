@@ -1,8 +1,9 @@
-import type { Bot, MessageLog, ProvisioningJob, Scene, SkillPackage, Workspace } from './types'
+import type { AdminAccount, AuditLog, Bot, MessageLog, ProvisioningJob, Scene, SkillPackage, Workspace } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
 export interface MessageTypeOption { value: string; label: string }
+export interface AuthStatus { setupRequired: boolean; authenticated: boolean; account: AdminAccount | null }
 
 export class ApiError extends Error { constructor(readonly status: number, message: string) { super(message) } }
 
@@ -16,10 +17,19 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
 }
 
 export const api = {
-  authStatus: () => request<{ setupRequired: boolean; authenticated: boolean }>('/auth/status'),
-  setup: (password: string) => request('/auth/setup', { method: 'POST', body: JSON.stringify({ password }) }),
-  login: (password: string) => request('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
+  authStatus: () => request<AuthStatus>('/auth/status'),
+  setup: (loginName: string, displayName: string, password: string) => request<AuthStatus>('/auth/setup', { method: 'POST', body: JSON.stringify({ loginName, displayName, password }) }),
+  login: (loginName: string, password: string) => request<AuthStatus>('/auth/login', { method: 'POST', body: JSON.stringify({ loginName, password }) }),
   logout: () => request('/auth/logout', { method: 'POST' }),
+  accounts: () => request<AdminAccount[]>('/accounts'),
+  saveAccount: (value: { id?: string; loginName: string; displayName: string; password?: string }) => request<AdminAccount>(value.id ? `/accounts/${value.id}` : '/accounts', { method: value.id ? 'PUT' : 'POST', body: JSON.stringify(value) }),
+  deleteAccount: (id: string) => request<void>(`/accounts/${id}`, { method: 'DELETE' }),
+  auditLogs: (filters: { limit?: number; offset?: number; actorAccountId?: string; action?: string; query?: string } = {}) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+    return request<{ items: AuditLog[]; total: number }>(`/audit-logs${params.size ? `?${params.toString()}` : ''}`)
+  },
+  auditLog: (id: string) => request<AuditLog>(`/audit-logs/${encodeURIComponent(id)}`),
   dashboard: () => request<{ workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number }>('/dashboard'),
   messageLogs: (filters: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}) => {
     const params = new URLSearchParams()

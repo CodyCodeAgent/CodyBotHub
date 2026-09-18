@@ -99,3 +99,27 @@ export interface MessageLogRecord {
   completedAt: string
   durationMs: number | null
 }
+
+export interface AdminAccountRecord {
+  id: string
+  loginName: string
+  displayName: string
+  enabled: boolean
+  lastLoginAt: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AuditLogRecord {
+  id: string
+  actorAccountId: string
+  actorLoginName: string
+  actorDisplayName: string
+  action: string
+  targetType: string
+  targetId: string
+  summary: string
+  details: Record<string, unknown>
+  ipAddress: string
+  createdAt: string
+}

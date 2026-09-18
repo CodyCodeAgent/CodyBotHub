@@ -1,9 +1,45 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { HubStore } from '../src/db.js'
 
 const workspace = (store: HubStore, name = 'Workspace') => store.createWorkspace({ name, path: `/tmp/${name.toLowerCase().replaceAll(' ', '-')}` })
 
 describe('HubStore invariants', () => {
+  it('migrates the legacy administrator and keeps existing sessions authenticated', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'codybothub-auth-'))
+    const filename = path.join(directory, 'hub.sqlite')
+    const legacy = new DatabaseSync(filename)
+    legacy.exec(`
+      CREATE TABLE admin_credentials (id INTEGER PRIMARY KEY, password_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE auth_sessions (token_hash TEXT PRIMARY KEY, expires_at TEXT NOT NULL, created_at TEXT NOT NULL);
+      INSERT INTO admin_credentials VALUES (1, 'legacy-hash', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+      INSERT INTO auth_sessions VALUES ('legacy-token', '2099-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    `)
+    legacy.close()
+    const store = new HubStore(filename)
+    expect(store.listAdminAccounts()).toMatchObject([{ id: 'legacy-admin', loginName: 'admin', displayName: '管理员' }])
+    expect(store.getSessionAccount('legacy-token')).toMatchObject({ id: 'legacy-admin' })
+    store.close()
+    rmSync(directory, { recursive: true, force: true })
+  })
+
+  it('manages administrator accounts, sessions, and immutable audit snapshots', () => {
+    const store = new HubStore(':memory:')
+    const first = store.createAdminAccount({ loginName: 'admin', displayName: '平台管理员', passwordHash: 'hash-1' })
+    const second = store.createAdminAccount({ loginName: 'operator', displayName: '运营同学', passwordHash: 'hash-2' })
+    store.createSession('token-2', second.id, '2099-01-01T00:00:00.000Z')
+    expect(store.getSessionAccount('token-2')).toMatchObject({ loginName: 'operator' })
+    store.createAuditLog({ actor: second, action: 'scene.update', targetType: 'scene', targetId: 'scene-1', summary: '更新场景' })
+    store.deleteAdminAccount(second.id)
+    expect(store.getSessionAccount('token-2')).toBeNull()
+    expect(store.listAuditLogs({ query: '运营同学' })).toMatchObject({ total: 1, items: [{ actorAccountId: second.id, actorLoginName: 'operator' }] })
+    expect(() => store.deleteAdminAccount(first.id)).toThrow('last administrator')
+    store.close()
+  })
+
   it('requires the Bot default Workspace to be attached', () => {
     const store = new HubStore(':memory:')
     const primary = workspace(store, 'Primary')

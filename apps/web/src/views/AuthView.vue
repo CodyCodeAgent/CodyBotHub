@@ -6,6 +6,8 @@ import { api } from '../api'
 
 const router = useRouter()
 const setupRequired = ref(false)
+const loginName = ref('admin')
+const displayName = ref('管理员')
 const password = ref('')
 const confirmPassword = ref('')
 const error = ref('')
@@ -16,8 +18,8 @@ const submit = async () => {
   if (setupRequired.value && password.value !== confirmPassword.value) { error.value = '两次输入的密码不一致'; return }
   loading.value = true
   try {
-    if (setupRequired.value) await api.setup(password.value)
-    else await api.login(password.value)
+    if (setupRequired.value) await api.setup(loginName.value, displayName.value, password.value)
+    else await api.login(loginName.value, password.value)
     await router.push('/')
   } catch (cause) { error.value = cause instanceof Error ? cause.message : '操作失败' }
   finally { loading.value = false }
@@ -31,9 +33,11 @@ const submit = async () => {
         <div class="brand"><div class="brand-mark"><Bot :size="22" /></div><div><strong>CodyBotHub</strong><span>Feishu Agent Control</span></div></div>
         <p class="eyebrow">{{ setupRequired ? '首次启动' : '安全登录' }}</p>
         <h1>{{ setupRequired ? '创建管理员密码' : '欢迎回来' }}</h1>
-        <p>{{ setupRequired ? '此密码用于保护 Bot 配置、工作区和飞书凭据。至少输入 10 个字符。' : '登录后管理工作区、Bot、场景路由和技能包。' }}</p>
+        <p>{{ setupRequired ? '创建首个平台管理员账号。密码至少输入 10 个字符。' : '使用平台账号登录并管理工作区、Bot、场景路由和技能包。' }}</p>
         <div class="auth-fields">
-          <div class="field"><label for="password">管理员密码</label><input id="password" v-model="password" type="password" autocomplete="current-password" minlength="10" required autofocus placeholder="输入密码" /></div>
+          <div class="field"><label for="login-name">账号名</label><input id="login-name" v-model.trim="loginName" autocomplete="username" minlength="2" maxlength="64" required autofocus placeholder="例如：admin" /></div>
+          <div v-if="setupRequired" class="field"><label for="display-name">用户名</label><input id="display-name" v-model.trim="displayName" autocomplete="name" maxlength="64" required placeholder="例如：平台管理员" /></div>
+          <div class="field"><label for="password">密码</label><input id="password" v-model="password" type="password" :autocomplete="setupRequired ? 'new-password' : 'current-password'" minlength="10" required placeholder="输入密码" /></div>
           <div v-if="setupRequired" class="field"><label for="confirm">确认密码</label><input id="confirm" v-model="confirmPassword" type="password" autocomplete="new-password" minlength="10" required placeholder="再次输入密码" /></div>
           <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
           <button class="button full" type="submit" :disabled="loading">{{ loading ? '正在处理…' : setupRequired ? '创建并进入平台' : '登录' }}</button>
