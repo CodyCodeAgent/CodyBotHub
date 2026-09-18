@@ -26,6 +26,12 @@ Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@cody
 7. Messages sharing one chat/topic anchor are serialized before entering Codex; unrelated conversations still run concurrently.
 8. The final Core Turn outcome is replied as one or more Feishu Markdown cards. The Bot conversation mode selects direct or topic reply. Every card carries a footer with the effective Workspace, Scene, Skill Package and permission policy.
 
+## Model selection
+
+Model and reasoning effort are resolved independently for every message in this order: Scene override, Bot override, platform default, then the current Codex account default. The model list and supported reasoning efforts come from CodyWebCore at runtime rather than from a hard-coded catalog.
+
+The resolved values are passed on the Core Turn and do not participate in Thread identity. If an option disappears from the account catalog, the platform fallback policy either selects the Codex default or rejects the turn. Message logs store the actual model, reasoning effort, source level and fallback state for later diagnosis.
+
 ## Matching
 
 Scene matcher fields are ANDed across populated categories and ORed within each category:

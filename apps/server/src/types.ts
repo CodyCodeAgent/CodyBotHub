@@ -17,6 +17,8 @@ export interface BotRecord {
   permissions: string[]
   operatorIds: string[]
   conversationMode: 'chat' | 'topic'
+  model: string
+  reasoningEffort: string
   defaultWorkspaceId: string
   workspaceIds: string[]
   createdAt: string
@@ -34,6 +36,23 @@ export interface ResolvedRoute {
   conversationKey: string
   topicId: string
   turnInstructions: string
+  modelConfig: ResolvedModelConfig
+}
+
+export type ModelConfigSource = 'scene' | 'bot' | 'platform' | 'codex'
+export interface ResolvedModelConfig {
+  model: string
+  reasoningEffort: string
+  modelSource: ModelConfigSource
+  reasoningEffortSource: ModelConfigSource
+  fallbackEnabled: boolean
+}
+
+export interface PlatformSettingsRecord {
+  basePrompt: string
+  defaultModel: string
+  defaultReasoningEffort: string
+  modelFallbackEnabled: boolean
 }
 
 export interface ProvisioningJobRecord {
@@ -55,6 +74,8 @@ export interface SceneRecord {
   prompt: string
   priority: number
   enabled: boolean
+  model: string
+  reasoningEffort: string
   matcher: {
     chatIds: string[]
     messageTypes: string[]
@@ -96,6 +117,11 @@ export interface MessageLogRecord {
   sceneId: string
   sceneName: string
   skillPackages: Array<{ id: string; name: string }>
+  model: string
+  reasoningEffort: string
+  modelSource: ModelConfigSource
+  reasoningEffortSource: ModelConfigSource
+  modelFallback: boolean
   receivedAt: string
   startedAt: string
   completedAt: string

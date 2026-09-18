@@ -10,6 +10,8 @@ export interface ProvisioningRequest {
   permissions: string[]
   operatorIds: string[]
   conversationMode: 'chat' | 'topic'
+  model: string
+  reasoningEffort: string
   defaultWorkspaceId: string
   workspaceIds: string[]
 }

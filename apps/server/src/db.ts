@@ -2,10 +2,15 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 
 type Row = Record<string, unknown>
+type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'model' | 'reasoningEffort'> & {
+  model?: string
+  reasoningEffort?: string
+  skillPackageIds?: string[]
+}
 const now = () => new Date().toISOString()
 const list = (value: unknown): string[] => {
   try { return JSON.parse(String(value)) as string[] } catch { return [] }
@@ -46,6 +51,9 @@ export class HubStore {
       CREATE TABLE IF NOT EXISTS platform_settings (
         id INTEGER PRIMARY KEY CHECK (id = 1),
         base_prompt TEXT NOT NULL DEFAULT '',
+        default_model TEXT NOT NULL DEFAULT '',
+        default_reasoning_effort TEXT NOT NULL DEFAULT '',
+        model_fallback_enabled INTEGER NOT NULL DEFAULT 1 CHECK (model_fallback_enabled IN (0, 1)),
         updated_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -83,6 +91,8 @@ export class HubStore {
         prompt TEXT NOT NULL DEFAULT '',
         permissions_json TEXT NOT NULL DEFAULT '[]',
         conversation_mode TEXT NOT NULL DEFAULT 'chat' CHECK (conversation_mode IN ('chat', 'topic')),
+        model TEXT NOT NULL DEFAULT '',
+        reasoning_effort TEXT NOT NULL DEFAULT '',
         default_workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -100,6 +110,8 @@ export class HubStore {
         prompt TEXT NOT NULL DEFAULT '',
         priority INTEGER NOT NULL DEFAULT 100,
         enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        model TEXT NOT NULL DEFAULT '',
+        reasoning_effort TEXT NOT NULL DEFAULT '',
         matcher_json TEXT NOT NULL DEFAULT '{}',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -208,6 +220,11 @@ export class HubStore {
         scene_id TEXT NOT NULL DEFAULT '',
         scene_name TEXT NOT NULL DEFAULT '',
         skill_packages_json TEXT NOT NULL DEFAULT '[]',
+        model TEXT NOT NULL DEFAULT '',
+        reasoning_effort TEXT NOT NULL DEFAULT '',
+        model_source TEXT NOT NULL DEFAULT 'codex',
+        reasoning_effort_source TEXT NOT NULL DEFAULT 'codex',
+        model_fallback INTEGER NOT NULL DEFAULT 0 CHECK (model_fallback IN (0, 1)),
         received_at TEXT NOT NULL,
         started_at TEXT NOT NULL,
         completed_at TEXT NOT NULL DEFAULT '',
@@ -266,6 +283,21 @@ export class HubStore {
       this.db.exec("ALTER TABLE bots ADD COLUMN conversation_mode TEXT NOT NULL DEFAULT 'chat' CHECK (conversation_mode IN ('chat', 'topic'))")
       if (botColumns.some(column => String(column.name) === 'reply_mode')) this.db.exec("UPDATE bots SET conversation_mode = CASE WHEN reply_mode = 'topic' THEN 'topic' ELSE 'chat' END")
     }
+    if (!botColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE bots ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    if (!botColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE bots ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
+    const settingsColumns = this.db.prepare('PRAGMA table_info(platform_settings)').all() as Row[]
+    if (!settingsColumns.some(column => String(column.name) === 'default_model')) this.db.exec("ALTER TABLE platform_settings ADD COLUMN default_model TEXT NOT NULL DEFAULT ''")
+    if (!settingsColumns.some(column => String(column.name) === 'default_reasoning_effort')) this.db.exec("ALTER TABLE platform_settings ADD COLUMN default_reasoning_effort TEXT NOT NULL DEFAULT ''")
+    if (!settingsColumns.some(column => String(column.name) === 'model_fallback_enabled')) this.db.exec('ALTER TABLE platform_settings ADD COLUMN model_fallback_enabled INTEGER NOT NULL DEFAULT 1 CHECK (model_fallback_enabled IN (0, 1))')
+    const sceneColumns = this.db.prepare('PRAGMA table_info(scenes)').all() as Row[]
+    if (!sceneColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE scenes ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    if (!sceneColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE scenes ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
+    const messageLogColumns = this.db.prepare('PRAGMA table_info(message_logs)').all() as Row[]
+    if (!messageLogColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE message_logs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    if (!messageLogColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE message_logs ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
+    if (!messageLogColumns.some(column => String(column.name) === 'model_source')) this.db.exec("ALTER TABLE message_logs ADD COLUMN model_source TEXT NOT NULL DEFAULT 'codex'")
+    if (!messageLogColumns.some(column => String(column.name) === 'reasoning_effort_source')) this.db.exec("ALTER TABLE message_logs ADD COLUMN reasoning_effort_source TEXT NOT NULL DEFAULT 'codex'")
+    if (!messageLogColumns.some(column => String(column.name) === 'model_fallback')) this.db.exec('ALTER TABLE message_logs ADD COLUMN model_fallback INTEGER NOT NULL DEFAULT 0 CHECK (model_fallback IN (0, 1))')
     const sessionColumns = this.db.prepare('PRAGMA table_info(auth_sessions)').all() as Row[]
     if (!sessionColumns.some(column => String(column.name) === 'account_id')) this.db.exec("ALTER TABLE auth_sessions ADD COLUMN account_id TEXT NOT NULL DEFAULT ''")
     const accountColumns = this.db.prepare('PRAGMA table_info(admin_accounts)').all() as Row[]
@@ -376,14 +408,22 @@ export class HubStore {
     ipAddress: String(row.ip_address), createdAt: String(row.created_at),
   })
 
-  getPlatformPrompt(): string {
-    const row = this.db.prepare('SELECT base_prompt FROM platform_settings WHERE id = 1').get() as Row | undefined
-    return row ? String(row.base_prompt) : ''
+  getPlatformSettings(): PlatformSettingsRecord {
+    const row = this.db.prepare('SELECT * FROM platform_settings WHERE id = 1').get() as Row | undefined
+    return row ? {
+      basePrompt: String(row.base_prompt), defaultModel: String(row.default_model), defaultReasoningEffort: String(row.default_reasoning_effort), modelFallbackEnabled: Boolean(row.model_fallback_enabled),
+    } : { basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true }
   }
+  getPlatformPrompt(): string { return this.getPlatformSettings().basePrompt }
   setPlatformPrompt(value: string): string {
-    this.db.prepare(`INSERT INTO platform_settings (id, base_prompt, updated_at) VALUES (1, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET base_prompt = excluded.base_prompt, updated_at = excluded.updated_at`).run(value, now())
+    this.setPlatformSettings({ ...this.getPlatformSettings(), basePrompt: value })
     return value
+  }
+  setPlatformSettings(input: PlatformSettingsRecord): PlatformSettingsRecord {
+    this.db.prepare(`INSERT INTO platform_settings (id, base_prompt, default_model, default_reasoning_effort, model_fallback_enabled, updated_at) VALUES (1, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET base_prompt = excluded.base_prompt, default_model = excluded.default_model, default_reasoning_effort = excluded.default_reasoning_effort, model_fallback_enabled = excluded.model_fallback_enabled, updated_at = excluded.updated_at`)
+      .run(input.basePrompt, input.defaultModel, input.defaultReasoningEffort, input.modelFallbackEnabled ? 1 : 0, now())
+    return this.getPlatformSettings()
   }
 
   listWorkspaces(): WorkspaceRecord[] {
@@ -483,14 +523,14 @@ export class HubStore {
   listBots(): BotRecord[] {
     return (this.db.prepare('SELECT * FROM bots ORDER BY name COLLATE NOCASE').all() as Row[]).map(row => this.bot(row))
   }
-  createBot(input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+  createBot(input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
     const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
     this.assertWorkspaces(workspaceIds)
     const id = randomUUID(), timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO bots (id, name, description, app_id, app_secret_encrypted, prompt, permissions_json, conversation_mode, default_workspace_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.description ?? '', input.appId ?? '', input.appSecretEncrypted ?? '', input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.defaultWorkspaceId, timestamp, timestamp)
+      this.db.prepare(`INSERT INTO bots (id, name, description, app_id, app_secret_encrypted, prompt, permissions_json, conversation_mode, model, reasoning_effort, default_workspace_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.description ?? '', input.appId ?? '', input.appSecretEncrypted ?? '', input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, timestamp, timestamp)
       const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
       for (const workspaceId of workspaceIds) add.run(id, workspaceId)
       this.setBotOperators(id, input.operatorIds ?? [])
@@ -498,7 +538,7 @@ export class HubStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getBot(id)
   }
-  updateBot(id: string, input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string | null; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+  updateBot(id: string, input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string | null; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
     const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
     this.assertWorkspaces(workspaceIds)
     const current = this.db.prepare('SELECT app_secret_encrypted FROM bots WHERE id = ?').get(id) as Row | undefined
@@ -508,8 +548,8 @@ export class HubStore {
     const secret = input.appSecretEncrypted === null || input.appSecretEncrypted === undefined ? String(current.app_secret_encrypted) : input.appSecretEncrypted
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`UPDATE bots SET name = ?, description = ?, app_id = ?, app_secret_encrypted = ?, prompt = ?, permissions_json = ?, conversation_mode = ?, default_workspace_id = ?, updated_at = ? WHERE id = ?`)
-        .run(input.name, input.description ?? '', input.appId ?? '', secret, input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.defaultWorkspaceId, now(), id)
+      this.db.prepare(`UPDATE bots SET name = ?, description = ?, app_id = ?, app_secret_encrypted = ?, prompt = ?, permissions_json = ?, conversation_mode = ?, model = ?, reasoning_effort = ?, default_workspace_id = ?, updated_at = ? WHERE id = ?`)
+        .run(input.name, input.description ?? '', input.appId ?? '', secret, input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, now(), id)
       this.db.prepare('DELETE FROM bot_workspaces WHERE bot_id = ?').run(id)
       const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
       for (const workspaceId of workspaceIds) add.run(id, workspaceId)
@@ -530,7 +570,7 @@ export class HubStore {
   private bot(row: Row): BotRecord {
     const workspaceIds = (this.db.prepare('SELECT workspace_id FROM bot_workspaces WHERE bot_id = ? ORDER BY workspace_id').all(String(row.id)) as Row[]).map(item => String(item.workspace_id))
     const operatorIds = (this.db.prepare('SELECT feishu_open_id FROM bot_operators WHERE bot_id = ? ORDER BY feishu_open_id').all(String(row.id)) as Row[]).map(item => String(item.feishu_open_id))
-    return { id: String(row.id), name: String(row.name), description: String(row.description), appId: String(row.app_id), hasAppSecret: Boolean(row.app_secret_encrypted), prompt: String(row.prompt), permissions: list(row.permissions_json), operatorIds, conversationMode: String(row.conversation_mode) as BotRecord['conversationMode'], defaultWorkspaceId: String(row.default_workspace_id), workspaceIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { id: String(row.id), name: String(row.name), description: String(row.description), appId: String(row.app_id), hasAppSecret: Boolean(row.app_secret_encrypted), prompt: String(row.prompt), permissions: list(row.permissions_json), operatorIds, conversationMode: String(row.conversation_mode) as BotRecord['conversationMode'], model: String(row.model), reasoningEffort: String(row.reasoning_effort), defaultWorkspaceId: String(row.default_workspace_id), workspaceIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
   }
   private setBotOperators(botId: string, ids: string[]): void {
     const add = this.db.prepare('INSERT OR IGNORE INTO bot_operators (bot_id, feishu_open_id) VALUES (?, ?)')
@@ -545,26 +585,26 @@ export class HubStore {
   listScenes(): Array<SceneRecord & { skillPackageIds: string[] }> {
     return (this.db.prepare('SELECT * FROM scenes ORDER BY priority ASC, name COLLATE NOCASE').all() as Row[]).map(row => this.scene(row))
   }
-  createScene(input: Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt'> & { skillPackageIds?: string[] }): SceneRecord & { skillPackageIds: string[] } {
+  createScene(input: SceneWriteInput): SceneRecord & { skillPackageIds: string[] } {
     this.assertBotWorkspace(input.botId, input.workspaceId)
     this.assertScenePackages(input.workspaceId, input.skillPackageIds ?? [])
     const id = randomUUID(), timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO scenes (id, bot_id, workspace_id, name, prompt, priority, enabled, matcher_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(id, input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, JSON.stringify(input.matcher), timestamp, timestamp)
+      this.db.prepare(`INSERT INTO scenes (id, bot_id, workspace_id, name, prompt, priority, enabled, model, reasoning_effort, matcher_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(id, input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, input.model ?? '', input.reasoningEffort ?? '', JSON.stringify(input.matcher), timestamp, timestamp)
       this.setScenePackages(id, input.skillPackageIds ?? [])
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getScene(id)
   }
-  updateScene(id: string, input: Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt'> & { skillPackageIds?: string[] }): SceneRecord & { skillPackageIds: string[] } {
+  updateScene(id: string, input: SceneWriteInput): SceneRecord & { skillPackageIds: string[] } {
     this.assertBotWorkspace(input.botId, input.workspaceId)
     this.assertScenePackages(input.workspaceId, input.skillPackageIds ?? [])
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      const result = this.db.prepare(`UPDATE scenes SET bot_id = ?, workspace_id = ?, name = ?, prompt = ?, priority = ?, enabled = ?, matcher_json = ?, updated_at = ? WHERE id = ?`)
-        .run(input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, JSON.stringify(input.matcher), now(), id)
+      const result = this.db.prepare(`UPDATE scenes SET bot_id = ?, workspace_id = ?, name = ?, prompt = ?, priority = ?, enabled = ?, model = ?, reasoning_effort = ?, matcher_json = ?, updated_at = ? WHERE id = ?`)
+        .run(input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, input.model ?? '', input.reasoningEffort ?? '', JSON.stringify(input.matcher), now(), id)
       if (!result.changes) throw new Error('Scene not found')
       this.db.prepare('DELETE FROM scene_skill_packages WHERE scene_id = ?').run(id)
       this.setScenePackages(id, input.skillPackageIds ?? [])
@@ -581,7 +621,7 @@ export class HubStore {
   private scene(row: Row): SceneRecord & { skillPackageIds: string[] } {
     const raw = JSON.parse(String(row.matcher_json)) as Partial<SceneRecord['matcher']>
     const skillPackageIds = (this.db.prepare('SELECT skill_package_id FROM scene_skill_packages WHERE scene_id = ? ORDER BY position').all(String(row.id)) as Row[]).map(item => String(item.skill_package_id))
-    return { id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), model: String(row.model), reasoningEffort: String(row.reasoning_effort), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
   }
   private assertBotWorkspace(botId: string, workspaceId: string): void {
     if (!this.db.prepare('SELECT 1 FROM bot_workspaces WHERE bot_id = ? AND workspace_id = ?').get(botId, workspaceId)) throw new Error('Scene Workspace must be attached to its Bot')
@@ -635,14 +675,16 @@ export class HubStore {
     this.db.prepare(`INSERT INTO message_logs (
       id, event_id, message_id, bot_id, bot_name, chat_id, topic_id, sender_id,
       message_type, inbound_content, status, workspace_id, workspace_name,
-      scene_id, scene_name, skill_packages_json, received_at, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, ?, ?)`)
+      scene_id, scene_name, skill_packages_json, model, reasoning_effort, model_source,
+      reasoning_effort_source, model_fallback, received_at, started_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`)
       .run(
         id, message.eventId, message.messageId, botId, route.bot.name,
         message.conversation.id, route.topicId, message.sender.id,
         message.content?.type ?? 'unknown', message.text.slice(0, 200_000),
         route.workspace.id, route.workspace.name, route.scene?.id ?? '', route.scene?.name ?? '',
         JSON.stringify(route.skillPackages.map(item => ({ id: item.id, name: item.name }))),
+        route.modelConfig.model, route.modelConfig.reasoningEffort, route.modelConfig.modelSource, route.modelConfig.reasoningEffortSource,
         message.createdAtIso, startedAt,
       )
     return this.getMessageLog(id)
@@ -655,6 +697,12 @@ export class HubStore {
     const error = update.error?.slice(0, 20_000) ?? ''
     this.db.prepare(`UPDATE message_logs SET response_content = ?, status = ?, error = ?, completed_at = ?, duration_ms = ? WHERE id = ?`)
       .run((update.responseContent ?? '').slice(0, 500_000), error ? 'failed' : 'completed', error, completedAt, durationMs, id)
+    return this.getMessageLog(id)
+  }
+
+  setMessageLogModel(id: string, update: { model: string; reasoningEffort: string; modelSource: ModelConfigSource; reasoningEffortSource: ModelConfigSource; fallback: boolean }): MessageLogRecord {
+    this.db.prepare('UPDATE message_logs SET model = ?, reasoning_effort = ?, model_source = ?, reasoning_effort_source = ?, model_fallback = ? WHERE id = ?')
+      .run(update.model, update.reasoningEffort, update.modelSource, update.reasoningEffortSource, update.fallback ? 1 : 0, id)
     return this.getMessageLog(id)
   }
 
@@ -690,6 +738,8 @@ export class HubStore {
     status: String(row.status) as MessageLogRecord['status'], error: String(row.error),
     workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), sceneId: String(row.scene_id), sceneName: String(row.scene_name),
     skillPackages: (() => { try { return JSON.parse(String(row.skill_packages_json)) as Array<{ id: string; name: string }> } catch { return [] } })(),
+    model: String(row.model), reasoningEffort: String(row.reasoning_effort), modelSource: String(row.model_source) as ModelConfigSource,
+    reasoningEffortSource: String(row.reasoning_effort_source) as ModelConfigSource, modelFallback: Boolean(row.model_fallback),
     receivedAt: String(row.received_at), startedAt: String(row.started_at), completedAt: String(row.completed_at),
     durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
   })
@@ -745,10 +795,15 @@ export class HubStore {
       : packages.some(item => item.fallbackMode === 'mixed')
         ? '本轮同时检索技能包和当前 Codex 环境中的其他 Skill。'
         : skillNames.length ? '本轮优先使用技能包中的 Skill；无法满足时再检索当前 Codex 环境中的其他 Skill。' : ''
-    const layers = [this.getPlatformPrompt(), workspace.prompt, bot.prompt, scene?.prompt ?? '', ...packages.map(item => item.prompt)]
+    const settings = this.getPlatformSettings()
+    const model = scene?.model || bot.model || settings.defaultModel
+    const reasoningEffort = scene?.reasoningEffort || bot.reasoningEffort || settings.defaultReasoningEffort
+    const modelSource: ModelConfigSource = scene?.model ? 'scene' : bot.model ? 'bot' : settings.defaultModel ? 'platform' : 'codex'
+    const reasoningEffortSource: ModelConfigSource = scene?.reasoningEffort ? 'scene' : bot.reasoningEffort ? 'bot' : settings.defaultReasoningEffort ? 'platform' : 'codex'
+    const layers = [settings.basePrompt, workspace.prompt, bot.prompt, scene?.prompt ?? '', ...packages.map(item => item.prompt)]
       .map(value => value.trim()).filter(Boolean)
     if (skillNames.length) layers.push(`当前场景技能包：${skillNames.join('、')}。${skillPolicy}`)
-    return { bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, topicId, turnInstructions: layers.join('\n\n') }
+    return { bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, topicId, turnInstructions: layers.join('\n\n'), modelConfig: { model, reasoningEffort, modelSource, reasoningEffortSource, fallbackEnabled: settings.modelFallbackEnabled } }
   }
 
   messageMatchesScene(sceneId: string, message: ChannelInboundMessage): boolean {

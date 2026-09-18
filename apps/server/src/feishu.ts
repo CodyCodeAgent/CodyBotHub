@@ -136,7 +136,7 @@ export class FeishuBotManager {
     }
     try {
       const attachments = await this.downloadAttachments(botId, provider, message)
-      const text = await this.runtime.execute(route, message, attachments, schedulePatch)
+      const text = await this.runtime.execute(route, message, attachments, schedulePatch, model => this.store.setMessageLogModel(log.id, model))
       if (patchTimer) { clearTimeout(patchTimer); patchTimer = null }
       await patchTail
       const cards = feishuMarkdownCards(text, { note })

@@ -1,4 +1,4 @@
-import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, Workspace } from './types'
+import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, Workspace } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -50,8 +50,9 @@ export const api = {
     return request<{ items: MessageLog[]; total: number }>(`/message-logs${params.size ? `?${params.toString()}` : ''}`)
   },
   messageLog: (id: string) => request<MessageLog>(`/message-logs/${encodeURIComponent(id)}`),
-  settings: () => request<{ basePrompt: string }>('/settings'),
-  saveSettings: (basePrompt: string) => request<{ basePrompt: string }>('/settings', { method: 'PUT', body: JSON.stringify({ basePrompt }) }),
+  models: () => request<ModelCatalog>('/models'),
+  settings: () => request<PlatformSettings>('/settings'),
+  saveSettings: (value: PlatformSettings) => request<PlatformSettings>('/settings', { method: 'PUT', body: JSON.stringify(value) }),
   workspaces: () => request<Workspace[]>('/workspaces'),
   directories: (path?: string) => request<DirectoryListing>(`/filesystem/directories${path ? `?path=${encodeURIComponent(path)}` : ''}`),
   skills: (workspaceId: string) => request<SkillOption[]>(`/skills?workspaceId=${encodeURIComponent(workspaceId)}`),

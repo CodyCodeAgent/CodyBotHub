@@ -167,6 +167,23 @@ describe('HubStore invariants', () => {
     store.close()
   })
 
+  it('resolves model and reasoning overrides per field without changing Thread identity', () => {
+    const store = new HubStore(':memory:')
+    store.setPlatformSettings({ basePrompt: '', defaultModel: 'platform-model', defaultReasoningEffort: 'medium', modelFallbackEnabled: false })
+    const linked = workspace(store, 'Model routing')
+    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id, model: 'bot-model' })
+    store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Deep analysis', prompt: '', priority: 10, enabled: true, model: '', reasoningEffort: 'high', matcher: { chatIds: [], messageTypes: [], textIncludes: ['deep'], cardTitleIncludes: [] } })
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-model', messageId: 'message-model', conversation: { id: 'oc_model', scope: 'group' as const },
+      sender: { id: 'ou_user', type: 'user' as const }, content: { type: 'text' as const }, text: 'deep review', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const route = store.resolveRoute(bot.id, message)
+    expect(route.modelConfig).toEqual({ model: 'bot-model', reasoningEffort: 'high', modelSource: 'bot', reasoningEffortSource: 'scene', fallbackEnabled: false })
+    expect(route.conversationKey).toBe(`bot:${bot.id}:chat:oc_model`)
+    store.close()
+  })
+
   it('uses one Thread per topic in topic mode and one Thread for private chat', () => {
     const store = new HubStore(':memory:')
     const linked = workspace(store, 'Topic boundaries')
@@ -256,7 +273,8 @@ describe('HubStore invariants', () => {
     }
     const route = store.resolveRoute(bot.id, message)
     const log = store.createMessageLog(bot.id, route, message)
-    expect(log).toMatchObject({ status: 'processing', sceneId: scene.id, sceneName: 'Alert', inboundContent: 'alarm database latency', skillPackages: [{ id: skillPackage.id, name: 'Triage' }] })
+    expect(log).toMatchObject({ status: 'processing', sceneId: scene.id, sceneName: 'Alert', inboundContent: 'alarm database latency', skillPackages: [{ id: skillPackage.id, name: 'Triage' }], modelSource: 'codex' })
+    expect(store.setMessageLogModel(log.id, { model: 'gpt-test', reasoningEffort: 'high', modelSource: 'platform', reasoningEffortSource: 'scene', fallback: true })).toMatchObject({ model: 'gpt-test', reasoningEffort: 'high', modelSource: 'platform', reasoningEffortSource: 'scene', modelFallback: true })
     const completed = store.finishMessageLog(log.id, { responseContent: 'database recovered' })
     expect(completed).toMatchObject({ status: 'completed', responseContent: 'database recovered' })
     expect(completed.durationMs).toBeTypeOf('number')

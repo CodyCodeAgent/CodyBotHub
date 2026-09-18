@@ -3,9 +3,9 @@ import path from 'node:path'
 import { channelCommandId, type ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import type { CodexEvent } from '@codycodeagent/cody-web-core/conversation'
 import { createAppServerHost, type AppServerHost } from '@codycodeagent/cody-web-core/runtime'
-import { buildTurnUserInput, CodexSessionManager, type CodexSkillOption, type ExecutionContext, type ExecutionPolicyProvider, type TurnInput, type TurnInputSkill } from '@codycodeagent/cody-web-core/session'
+import { buildTurnUserInput, CodexSessionManager, type CodexModelOption, type CodexSkillOption, type ExecutionContext, type ExecutionPolicyProvider, type TurnInput, type TurnInputSkill } from '@codycodeagent/cody-web-core/session'
 import type { HubStore } from './db.js'
-import type { ResolvedRoute } from './types.js'
+import type { ModelConfigSource, ResolvedModelConfig, ResolvedRoute } from './types.js'
 
 export type RuntimeAttachment = {
   path: string
@@ -20,6 +20,45 @@ export type RuntimeProgress = {
   answer: string
 }
 
+export type RuntimeResolvedModel = {
+  model: string
+  reasoningEffort: string
+  modelSource: ModelConfigSource
+  reasoningEffortSource: ModelConfigSource
+  fallback: boolean
+}
+
+export type RuntimeModelCatalog = {
+  items: CodexModelOption[]
+  defaultModel: string
+  defaultReasoningEffort: string
+}
+
+export const resolveRuntimeModel = (requested: ResolvedModelConfig, models: CodexModelOption[], configuredModel = '', configuredEffort = ''): RuntimeResolvedModel => {
+  const visible = models.filter(item => !item.hidden)
+  const findModel = (value: string) => models.find(item => item.id === value || item.model === value)
+  const accountDefault = findModel(configuredModel) ?? models.find(item => item.isDefault) ?? visible[0] ?? models[0]
+  const selected = requested.model ? findModel(requested.model) : accountDefault
+  let fallback = false
+  let modelSource = requested.modelSource
+  if (requested.model && !selected) {
+    if (!requested.fallbackEnabled) throw new Error(`Model ${requested.model} is unavailable for the current Codex account`)
+    fallback = true
+    modelSource = 'codex'
+  }
+  const actual = selected ?? accountDefault
+  const model = actual?.id || actual?.model || requested.model || configuredModel
+  let reasoningEffort = requested.reasoningEffort || configuredEffort || actual?.defaultReasoningEffort || ''
+  let reasoningEffortSource = requested.reasoningEffort ? requested.reasoningEffortSource : 'codex'
+  if (reasoningEffort && actual?.supportedReasoningEfforts.length && !actual.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort'])) {
+    if (!requested.fallbackEnabled) throw new Error(`Reasoning effort ${reasoningEffort} is unsupported by model ${model}`)
+    reasoningEffort = actual.defaultReasoningEffort || ''
+    reasoningEffortSource = 'codex'
+    fallback = true
+  }
+  return { model, reasoningEffort, modelSource, reasoningEffortSource, fallback }
+}
+
 export class CodyBotRuntime {
   private host: AppServerHost | null = null
   private manager: CodexSessionManager | null = null
@@ -28,9 +67,11 @@ export class CodyBotRuntime {
 
   constructor(private readonly store: HubStore, private readonly runtimeDirectory: string, private readonly codexCommand = 'codex') {}
 
-  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void): Promise<string> {
+  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void): Promise<string> {
     const conversation = this.store.getOrCreateConversation(route, message.conversation.id)
     const manager = await this.ensureManager()
+    const model = await this.resolveModel(manager, route.modelConfig)
+    onModelResolved?.(model)
     await this.ensureConversation(manager, conversation, route)
     const activeThreadId = manager.snapshot(conversation.id)?.threadId ?? conversation.threadId
     manager.setContext(conversation.id, this.context(route))
@@ -45,6 +86,8 @@ export class CodyBotRuntime {
       runtimeWorkspaceRoots: [realpathSync.native(route.workspace.path)],
       approvalPolicy: 'never',
       ...this.permissions(route),
+      ...(model.model ? { model: model.model } : {}),
+      ...(model.reasoningEffort ? { effort: model.reasoningEffort as TurnInput['effort'] } : {}),
     }
     let turnId = ''
     let reasoning = ''
@@ -85,6 +128,25 @@ export class CodyBotRuntime {
     return manager.listSkills([realpathSync.native(workspacePath)])
   }
 
+  async listModels(): Promise<RuntimeModelCatalog> {
+    const manager = await this.ensureManager()
+    const [models, config] = await Promise.all([manager.listModels(), manager.readConfig()])
+    const configuredModel = config.config.model ?? ''
+    const selected = models.find(item => item.id === configuredModel || item.model === configuredModel) ?? models.find(item => item.isDefault) ?? models.find(item => !item.hidden) ?? models[0]
+    const items = models.filter(item => !item.hidden || item === selected)
+    return { items, defaultModel: selected?.id || selected?.model || configuredModel, defaultReasoningEffort: config.config.model_reasoning_effort ?? selected?.defaultReasoningEffort ?? '' }
+  }
+
+  async validateModelSelection(model: string, reasoningEffort: string): Promise<void> {
+    const catalog = await this.listModels()
+    const selected = model ? catalog.items.find(item => item.id === model || item.model === model) : undefined
+    if (model && !selected) throw new Error(`Model ${model} is unavailable for the current Codex account`)
+    if (reasoningEffort && selected?.supportedReasoningEfforts.length && !selected.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort'])) {
+      throw new Error(`Reasoning effort ${reasoningEffort} is unsupported by model ${selected.id || selected.model}`)
+    }
+    if (reasoningEffort && !selected && !catalog.items.some(item => item.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort']))) throw new Error(`Reasoning effort ${reasoningEffort} is unavailable for the current Codex account`)
+  }
+
   private async ensureManager(): Promise<CodexSessionManager> {
     if (this.manager) return this.manager
     const policy: ExecutionPolicyProvider = {
@@ -100,6 +162,11 @@ export class CodyBotRuntime {
     this.manager = new CodexSessionManager({ host: this.host, policy })
     await this.host.ensureInitialized()
     return this.manager
+  }
+
+  private async resolveModel(manager: CodexSessionManager, requested: ResolvedModelConfig): Promise<RuntimeResolvedModel> {
+    const [models, config] = await Promise.all([manager.listModels(), manager.readConfig()])
+    return resolveRuntimeModel(requested, models, config.config.model ?? '', config.config.model_reasoning_effort ?? '')
   }
 
   private async ensureConversation(manager: CodexSessionManager, conversation: { id: string; threadId: string }, route: ResolvedRoute): Promise<void> {

@@ -2,22 +2,25 @@
 import { Edit3, GitPullRequest, Moon, Plus, RefreshCw, Save, Settings, Sun, Trash2, X } from 'lucide-vue-next'
 import { onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
+import ModelConfigFields from '../components/ModelConfigFields.vue'
 import { announceTheme } from '../theme'
-import type { SkillSource, ThemePreference, Workspace } from '../types'
+import type { ModelCatalog, SkillSource, ThemePreference, Workspace } from '../types'
 
 const basePrompt = ref(''), theme = ref<ThemePreference>('system'), saving = ref(false), saved = ref(false), error = ref('')
+const defaultModel = ref(''), defaultReasoningEffort = ref(''), modelFallbackEnabled = ref(true)
+const catalog = ref<ModelCatalog>({ items: [], defaultModel: '', defaultReasoningEffort: '' })
 const sources = ref<SkillSource[]>([]), workspaces = ref<Workspace[]>([]), dialogOpen = ref(false), syncingId = ref('')
 const form = reactive({ id: '', name: '', repositoryUrl: '', branch: 'main', workspaceId: '', skillRoots: 'skills\n.codex/skills\n.agents/skills', knowledgeRoots: '', autoInstall: false })
 
 const showError = (value: unknown) => { error.value = value instanceof Error ? value.message : '操作失败' }
 const load = async () => {
-  const [settings, preferences, sourceItems, workspaceItems] = await Promise.all([api.settings(), api.preferences(), api.skillSources(), api.workspaces()])
-  basePrompt.value = settings.basePrompt; theme.value = preferences.theme; sources.value = sourceItems; workspaces.value = workspaceItems
+  const [settings, preferences, sourceItems, workspaceItems, models] = await Promise.all([api.settings(), api.preferences(), api.skillSources(), api.workspaces(), api.models()])
+  basePrompt.value = settings.basePrompt; defaultModel.value = settings.defaultModel; defaultReasoningEffort.value = settings.defaultReasoningEffort; modelFallbackEnabled.value = settings.modelFallbackEnabled; theme.value = preferences.theme; sources.value = sourceItems; workspaces.value = workspaceItems; catalog.value = models
 }
 onMounted(() => { void load().catch(showError) })
 const save = async () => {
   saving.value = true; saved.value = false; error.value = ''
-  try { await Promise.all([api.saveSettings(basePrompt.value), api.savePreferences(theme.value)]); announceTheme(theme.value); saved.value = true; setTimeout(() => { saved.value = false }, 1800) }
+  try { await Promise.all([api.saveSettings({ basePrompt: basePrompt.value, defaultModel: defaultModel.value, defaultReasoningEffort: defaultReasoningEffort.value, modelFallbackEnabled: modelFallbackEnabled.value }), api.savePreferences(theme.value)]); announceTheme(theme.value); saved.value = true; setTimeout(() => { saved.value = false }, 1800) }
   catch (value) { showError(value) } finally { saving.value = false }
 }
 const openSource = (source?: SkillSource) => {
@@ -47,13 +50,15 @@ const remove = async (source: SkillSource) => {
     <header class="page-header"><div><p class="eyebrow">Global policy</p><h1>平台设置</h1><p class="page-description">配置平台 Prompt、个人显示主题，以及供 AI 更新和安装能力的 Git 技能源。</p></div></header>
     <div class="settings-stack">
       <form class="panel" @submit.prevent="save">
-        <div class="panel-header"><h2><Settings :size="16" />基础 Prompt 与显示</h2><span class="badge green">账号级</span></div>
+        <div class="panel-header"><h2><Settings :size="16" />平台策略与显示</h2><span class="badge green">全局默认</span></div>
         <div class="dialog-body">
           <div class="field"><label>显示主题</label><div class="theme-options">
             <label class="check-card"><input v-model="theme" value="system" type="radio" /><Settings :size="16" /><span>跟随系统</span></label>
             <label class="check-card"><input v-model="theme" value="light" type="radio" /><Sun :size="16" /><span>白天模式</span></label>
             <label class="check-card"><input v-model="theme" value="dark" type="radio" /><Moon :size="16" /><span>黑夜模式</span></label>
           </div><small>偏好绑定当前登录账号，并在这台设备上立即生效。</small></div>
+          <ModelConfigFields :catalog="catalog" :model="defaultModel" :reasoning-effort="defaultReasoningEffort" inherit-label="使用 Codex 账号默认模型" :inherited-model="catalog.defaultModel" @update:model="defaultModel = $event" @update:reasoning-effort="defaultReasoningEffort = $event" />
+          <label class="check-card"><input v-model="modelFallbackEnabled" type="checkbox" /><span><strong>模型不可用时自动回退</strong><small>配置的模型或推理强度不可用时，改用当前 Codex 账号默认值，并在消息记录中标记。</small></span></label>
           <div class="field"><label for="base-prompt">平台基础 Prompt</label><textarea id="base-prompt" v-model="basePrompt" rows="12" placeholder="定义平台级安全边界、统一行为和输出规范…" /><small>最终顺序：平台基础 → 工作区 → Bot → 场景 → 技能包。</small></div>
           <div v-if="error" class="error-banner" role="alert">{{ error }}</div><div v-if="saved" class="notice" role="status">设置已保存。</div>
         </div><footer class="dialog-actions"><button class="button" :disabled="saving"><Save :size="16" />{{ saving ? '保存中…' : '保存设置' }}</button></footer>
