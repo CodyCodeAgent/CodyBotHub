@@ -182,6 +182,15 @@ export class HubStore {
         updated_at TEXT NOT NULL,
         UNIQUE (bot_id, chat_id, topic_id)
       );
+      CREATE TABLE IF NOT EXISTS thread_conversation_aliases (
+        source_key TEXT PRIMARY KEY,
+        target_key TEXT NOT NULL REFERENCES conversation_threads(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS thread_routing_rules (
         scene_id TEXT PRIMARY KEY REFERENCES scenes(id) ON DELETE CASCADE,
         enabled INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
@@ -309,6 +318,7 @@ export class HubStore {
       );
       CREATE INDEX IF NOT EXISTS idx_scenes_bot ON scenes(bot_id, enabled, priority);
       CREATE INDEX IF NOT EXISTS idx_threads_chat ON conversation_threads(bot_id, chat_id, topic_id);
+      CREATE INDEX IF NOT EXISTS idx_thread_aliases_target ON thread_conversation_aliases(target_key);
       CREATE INDEX IF NOT EXISTS idx_thread_profiles_scope ON thread_profiles(bot_id, workspace_id, scene_id, last_active_at DESC);
       CREATE INDEX IF NOT EXISTS idx_thread_profile_jobs_created ON thread_profile_jobs(created_at);
       CREATE INDEX IF NOT EXISTS idx_topic_context_scene ON topic_route_contexts(scene_id);
@@ -363,6 +373,14 @@ export class HubStore {
     if (!messageLogColumns.some(column => String(column.name) === 'matched_thread_id')) this.db.exec("ALTER TABLE message_logs ADD COLUMN matched_thread_id TEXT NOT NULL DEFAULT ''")
     if (!messageLogColumns.some(column => String(column.name) === 'thread_match_score')) this.db.exec('ALTER TABLE message_logs ADD COLUMN thread_match_score REAL NOT NULL DEFAULT 0')
     if (!messageLogColumns.some(column => String(column.name) === 'thread_match_reason')) this.db.exec("ALTER TABLE message_logs ADD COLUMN thread_match_reason TEXT NOT NULL DEFAULT ''")
+    this.db.prepare(`WITH canonical AS (
+      SELECT p.core_thread_id, p.conversation_key FROM thread_profiles p
+      WHERE p.last_active_at = (SELECT MAX(p2.last_active_at) FROM thread_profiles p2 WHERE p2.core_thread_id = p.core_thread_id)
+      GROUP BY p.core_thread_id
+    ) INSERT OR IGNORE INTO thread_conversation_aliases (source_key, target_key, bot_id, chat_id, topic_id, created_at, updated_at)
+      SELECT c.id, canonical.conversation_key, c.bot_id, c.chat_id, c.topic_id, ?, ?
+      FROM conversation_threads c JOIN canonical ON canonical.core_thread_id = c.core_thread_id
+      WHERE c.id <> canonical.conversation_key`).run(now(), now())
     this.db.prepare(`INSERT OR IGNORE INTO thread_profile_jobs (log_id, created_at, updated_at)
       SELECT m.id, ?, ? FROM message_logs m LEFT JOIN thread_profiles p ON p.core_thread_id = m.core_thread_id AND p.scene_id = m.scene_id
       WHERE m.status = 'completed' AND m.core_thread_id <> '' AND (p.core_thread_id IS NULL OR m.received_at > p.last_active_at)`).run(now(), now())
@@ -933,6 +951,9 @@ export class HubStore {
   }
 
   resolveThreadRouting(route: ResolvedRoute, message: ChannelInboundMessage): ResolvedRoute {
+    const alias = this.db.prepare(`SELECT a.target_key, c.core_thread_id FROM thread_conversation_aliases a
+      JOIN conversation_threads c ON c.id = a.target_key WHERE a.source_key = ? AND c.core_thread_id <> ''`).get(route.conversationKey) as Row | undefined
+    if (alias) return { ...route, conversationKey: String(alias.target_key), threadRouting: { type: 'fixed', matchedThreadId: String(alias.core_thread_id), score: 1, reason: '当前群或话题已通过会话别名绑定历史 Codex Thread' } }
     if (!route.scene) return route
     const existing = this.db.prepare("SELECT core_thread_id FROM conversation_threads WHERE id = ? AND core_thread_id <> ''").get(route.conversationKey) as Row | undefined
     if (existing) return { ...route, threadRouting: { type: 'fixed', matchedThreadId: String(existing.core_thread_id), score: 1, reason: '当前群或话题已经绑定 Codex Thread' } }
@@ -958,9 +979,12 @@ export class HubStore {
     if (!best) return { ...route, threadRouting: { type: 'new', matchedThreadId: '', score: 0, reason: '同场景时间窗口内没有历史 Thread 画像' } }
     const matchedThreadId = String(best.row.core_thread_id)
     if (best.score >= rule.reuseThreshold) {
-      const conversation = this.getOrCreateConversation(route, message.conversation.id)
-      this.setConversationThread(conversation.id, matchedThreadId)
-      return { ...route, threadRouting: { type: 'reused', matchedThreadId, score: best.score, reason: best.reason } }
+      const targetKey = String(best.row.conversation_key)
+      const timestamp = now()
+      this.db.prepare(`INSERT INTO thread_conversation_aliases (source_key, target_key, bot_id, chat_id, topic_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source_key) DO UPDATE SET target_key = excluded.target_key, updated_at = excluded.updated_at`)
+        .run(route.conversationKey, targetKey, route.bot.id, message.conversation.id, route.topicId, timestamp, timestamp)
+      return { ...route, conversationKey: targetKey, threadRouting: { type: 'reused', matchedThreadId, score: best.score, reason: best.reason } }
     }
     if (best.score >= rule.experienceThreshold) {
       const experience = String(best.row.experience_summary).slice(0, 8_000)
@@ -1055,7 +1079,8 @@ export class HubStore {
       if (features.normalizedText) normalized.push(features.normalizedText)
     }
     const latest = logs[0]!
-    const conversation = this.db.prepare('SELECT id FROM conversation_threads WHERE core_thread_id = ? ORDER BY updated_at DESC LIMIT 1').get(coreThreadId) as Row | undefined
+    const conversation = this.db.prepare(`SELECT c.id FROM conversation_threads c LEFT JOIN thread_conversation_aliases a ON a.source_key = c.id
+      WHERE c.core_thread_id = ? AND a.source_key IS NULL ORDER BY c.updated_at DESC LIMIT 1`).get(coreThreadId) as Row | undefined
     if (!conversation) return
     const title = String(latest.inbound_content).split('\n').map(value => value.trim()).find(Boolean)?.slice(0, 300) ?? ''
     const summary = String(latest.response_content).trim().slice(0, 8_000)

@@ -253,10 +253,12 @@ describe('HubStore invariants', () => {
 
     const next = { ...base, eventId: 'event-new', messageId: 'message-new', conversation: { id: 'oc_new', scope: 'topic' as const, rootId: 'root-new' }, createdAtIso: new Date().toISOString() }
     const routed = store.resolveThreadRouting(store.resolveRoute(bot.id, next), next)
-    expect(routed).toMatchObject({ threadRouting: { type: 'reused', matchedThreadId: 'thread-history' } })
-    expect(routed.conversationKey).not.toBe(historicalRoute.conversationKey)
-    expect(store.getConversationThread(routed.conversationKey)).toMatchObject({ coreThreadId: 'thread-history' })
+    expect(routed).toMatchObject({ conversationKey: historicalRoute.conversationKey, threadRouting: { type: 'reused', matchedThreadId: 'thread-history' } })
     expect(routed.threadRouting.score).toBeGreaterThanOrEqual(0.85)
+    const followUp = { ...next, eventId: 'event-follow-up', messageId: 'message-follow-up', text: '继续看一下这个问题' }
+    const followUpRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, followUp), followUp)
+    expect(followUpRoute).toMatchObject({ conversationKey: historicalRoute.conversationKey, threadRouting: { type: 'fixed', matchedThreadId: 'thread-history' } })
+    expect(store.listConversationThreads()).toMatchObject({ total: 1, items: [{ id: historicalRoute.conversationKey, coreThreadId: 'thread-history' }] })
     store.close()
   })
 
