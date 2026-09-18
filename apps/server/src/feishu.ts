@@ -50,6 +50,7 @@ export class FeishuBotManager {
           onAction: action => this.onAction(botId, provider, action),
           onState: (state, error) => console[state === 'failed' ? 'error' : 'info'](`[feishu:${bot.name}] ${state}${error ? `: ${error.message}` : ''}`),
         })
+        void this.refreshKnownChats(botId, provider).catch(error => console.warn(`[feishu:${bot.name}] chat metadata refresh failed:`, error))
       } catch (error) {
         this.providers.delete(botId)
         provider.stop()
@@ -59,6 +60,11 @@ export class FeishuBotManager {
   }
 
   private async acceptMessage(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
+    if (message.conversation.name) this.store.upsertChatMetadata(botId, {
+      chatId: message.conversation.id,
+      name: message.conversation.name,
+      mode: message.conversation.scope === 'topic' ? 'topic' : message.conversation.scope === 'private' ? 'p2p' : 'group',
+    })
     if (!this.store.claimInboundEvent(botId, message.eventId, message.messageId)) return
     const anchor = [botId, message.conversation.id, message.conversation.rootId ?? 'chat'].join(':')
     const previous = this.conversationQueues.get(anchor) ?? Promise.resolve()
@@ -67,6 +73,21 @@ export class FeishuBotManager {
     const cleanup = () => { if (this.conversationQueues.get(anchor) === current) this.conversationQueues.delete(anchor) }
     void current.then(cleanup, cleanup)
     return current
+  }
+
+  private async refreshKnownChats(botId: string, provider: FeishuProvider): Promise<void> {
+    const chatIds = this.store.listChatIdsForMetadataSync(botId)
+    for (let offset = 0; offset < chatIds.length; offset += 5) {
+      const batch = chatIds.slice(offset, offset + 5)
+      await Promise.all(batch.map(async chatId => {
+        try {
+          const metadata = await provider.chatMetadata(chatId)
+          this.store.upsertChatMetadata(botId, { chatId, name: metadata.name, mode: metadata.mode })
+        } catch (error) {
+          console.warn(`[feishu] failed to resolve chat ${chatId}:`, provider.classifyError(error).message)
+        }
+      }))
+    }
   }
 
   private async onMessage(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {

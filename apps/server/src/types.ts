@@ -125,6 +125,14 @@ export interface AuditLogRecord {
   createdAt: string
 }
 
+export interface ChatMetadataRecord {
+  botId: string
+  chatId: string
+  name: string
+  mode: 'group' | 'topic' | 'p2p'
+  updatedAt: string
+}
+
 export interface ConversationRouteRecord {
   id: string
   botId: string
@@ -134,6 +142,8 @@ export interface ConversationRouteRecord {
   workspaceId: string
   workspaceName: string
   chatId: string
+  chatName: string
+  chatMode: 'group' | 'topic' | 'p2p' | ''
   topicId: string
   coreThreadId: string
   createdAt: string

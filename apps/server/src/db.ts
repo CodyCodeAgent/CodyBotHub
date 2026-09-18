@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ConversationRouteRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationRouteRecord, MessageLogRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillPackageRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 
 type Row = Record<string, unknown>
@@ -137,6 +137,14 @@ export class HubStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (bot_id, chat_id)
       );
+      CREATE TABLE IF NOT EXISTS chat_metadata (
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        chat_id TEXT NOT NULL,
+        name TEXT NOT NULL DEFAULT '',
+        mode TEXT NOT NULL DEFAULT 'group' CHECK (mode IN ('group', 'topic', 'p2p')),
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (bot_id, chat_id)
+      );
       CREATE TABLE IF NOT EXISTS conversation_routes (
         id TEXT PRIMARY KEY,
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -194,6 +202,7 @@ export class HubStore {
       );
       CREATE INDEX IF NOT EXISTS idx_scenes_bot ON scenes(bot_id, enabled, priority);
       CREATE INDEX IF NOT EXISTS idx_routes_chat ON conversation_routes(bot_id, chat_id, topic_id);
+      CREATE INDEX IF NOT EXISTS idx_chat_metadata_name ON chat_metadata(bot_id, name);
       DELETE FROM inbound_events WHERE rowid NOT IN (SELECT MIN(rowid) FROM inbound_events GROUP BY bot_id, message_id);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_inbound_message ON inbound_events(bot_id, message_id);
       CREATE INDEX IF NOT EXISTS idx_inbound_received ON inbound_events(received_at);
@@ -600,33 +609,58 @@ export class HubStore {
     return this.sceneMatches(this.getScene(sceneId), message)
   }
 
+  upsertChatMetadata(botId: string, input: { chatId: string; name: string; mode: 'group' | 'topic' | 'p2p' }): ChatMetadataRecord {
+    const timestamp = now()
+    this.db.prepare(`INSERT INTO chat_metadata (bot_id, chat_id, name, mode, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(bot_id, chat_id) DO UPDATE SET name = CASE WHEN excluded.name <> '' THEN excluded.name ELSE chat_metadata.name END, mode = excluded.mode, updated_at = excluded.updated_at`)
+      .run(botId, input.chatId, input.name.trim(), input.mode, timestamp)
+    return { botId, chatId: input.chatId, name: input.name.trim(), mode: input.mode, updatedAt: timestamp }
+  }
+
+  listChatMetadata(input: { botId?: string; query?: string; limit?: number } = {}): ChatMetadataRecord[] {
+    const filters: string[] = [], params: Array<string | number> = []
+    if (input.botId) { filters.push('bot_id = ?'); params.push(input.botId) }
+    if (input.query?.trim()) { filters.push('(name LIKE ? OR chat_id LIKE ?)'); const value = `%${input.query.trim()}%`; params.push(value, value) }
+    const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
+    const limit = Math.min(500, Math.max(1, Math.trunc(input.limit ?? 200)))
+    const rows = this.db.prepare(`SELECT * FROM chat_metadata ${where} ORDER BY name COLLATE NOCASE, chat_id LIMIT ?`).all(...params, limit) as Row[]
+    return rows.map(row => ({ botId: String(row.bot_id), chatId: String(row.chat_id), name: String(row.name), mode: String(row.mode) as ChatMetadataRecord['mode'], updatedAt: String(row.updated_at) }))
+  }
+
+  listChatIdsForMetadataSync(botId: string): string[] {
+    const rows = this.db.prepare(`SELECT chat_id FROM conversation_routes WHERE bot_id = ? UNION SELECT chat_id FROM group_scene_bindings WHERE bot_id = ?`).all(botId, botId) as Row[]
+    const ids = new Set(rows.map(row => String(row.chat_id)).filter(Boolean))
+    for (const scene of this.listScenes().filter(item => item.botId === botId)) for (const chatId of scene.matcher.chatIds) ids.add(chatId)
+    return [...ids]
+  }
+
   listConversationRoutes(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; query?: string } = {}): { items: ConversationRouteRecord[]; total: number } {
     const filters: string[] = [], params: Array<string | number> = []
     if (input.botId) { filters.push('r.bot_id = ?'); params.push(input.botId) }
     if (input.sceneId) { filters.push('r.scene_id = ?'); params.push(input.sceneId) }
     if (input.query?.trim()) {
       const value = `%${input.query.trim()}%`
-      filters.push('(r.id LIKE ? OR r.chat_id LIKE ? OR r.topic_id LIKE ? OR r.core_thread_id LIKE ? OR b.name LIKE ? OR COALESCE(s.name, \'\') LIKE ? OR w.name LIKE ?)')
-      params.push(value, value, value, value, value, value, value)
+      filters.push('(r.id LIKE ? OR r.chat_id LIKE ? OR COALESCE(cm.name, \'\') LIKE ? OR r.topic_id LIKE ? OR r.core_thread_id LIKE ? OR b.name LIKE ? OR COALESCE(s.name, \'\') LIKE ? OR w.name LIKE ?)')
+      params.push(value, value, value, value, value, value, value, value)
     }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
-    const from = `FROM conversation_routes r JOIN bots b ON b.id = r.bot_id JOIN workspaces w ON w.id = r.workspace_id LEFT JOIN scenes s ON s.id = r.scene_id`
+    const from = `FROM conversation_routes r JOIN bots b ON b.id = r.bot_id JOIN workspaces w ON w.id = r.workspace_id LEFT JOIN scenes s ON s.id = r.scene_id LEFT JOIN chat_metadata cm ON cm.bot_id = r.bot_id AND cm.chat_id = r.chat_id`
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS count ${from} ${where}`).get(...params) as Row).count)
     const limit = Math.min(200, Math.max(1, Math.trunc(input.limit ?? 50))), offset = Math.max(0, Math.trunc(input.offset ?? 0))
-    const rows = this.db.prepare(`SELECT r.*, b.name AS bot_name, w.name AS workspace_name, COALESCE(s.name, '') AS scene_name ${from} ${where} ORDER BY r.updated_at DESC, r.id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
+    const rows = this.db.prepare(`SELECT r.*, b.name AS bot_name, w.name AS workspace_name, COALESCE(s.name, '') AS scene_name, COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode ${from} ${where} ORDER BY r.updated_at DESC, r.id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
     return { items: rows.map(this.conversationRoute), total }
   }
 
   getConversationRoute(id: string): ConversationRouteRecord {
-    const row = this.db.prepare(`SELECT r.*, b.name AS bot_name, w.name AS workspace_name, COALESCE(s.name, '') AS scene_name
-      FROM conversation_routes r JOIN bots b ON b.id = r.bot_id JOIN workspaces w ON w.id = r.workspace_id LEFT JOIN scenes s ON s.id = r.scene_id WHERE r.id = ?`).get(id) as Row | undefined
+    const row = this.db.prepare(`SELECT r.*, b.name AS bot_name, w.name AS workspace_name, COALESCE(s.name, '') AS scene_name, COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode
+      FROM conversation_routes r JOIN bots b ON b.id = r.bot_id JOIN workspaces w ON w.id = r.workspace_id LEFT JOIN scenes s ON s.id = r.scene_id LEFT JOIN chat_metadata cm ON cm.bot_id = r.bot_id AND cm.chat_id = r.chat_id WHERE r.id = ?`).get(id) as Row | undefined
     if (!row) throw new Error('Conversation route not found')
     return this.conversationRoute(row)
   }
 
   private conversationRoute = (row: Row): ConversationRouteRecord => ({
     id: String(row.id), botId: String(row.bot_id), botName: String(row.bot_name), sceneId: String(row.scene_id ?? ''), sceneName: String(row.scene_name),
-    workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), chatId: String(row.chat_id), topicId: String(row.topic_id),
+    workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), chatId: String(row.chat_id), chatName: String(row.chat_name), chatMode: String(row.chat_mode) as ConversationRouteRecord['chatMode'], topicId: String(row.topic_id),
     coreThreadId: String(row.core_thread_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   })
 

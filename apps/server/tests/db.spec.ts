@@ -130,9 +130,12 @@ describe('HubStore invariants', () => {
     })
     const conversation = store.getOrCreateConversation(route, 'oc_thread', '')
     store.setConversationThread(conversation.id, '01-thread-id')
+    store.upsertChatMetadata(bot.id, { chatId: 'oc_thread', name: '告警排查群', mode: 'group' })
+    expect(store.listChatMetadata({ botId: bot.id, query: '告警' })).toMatchObject([{ chatId: 'oc_thread', name: '告警排查群' }])
+    expect(store.listChatIdsForMetadataSync(bot.id)).toContain('oc_thread')
     expect(store.listConversationRoutes({ sceneId: scene.id, query: '01-thread-id' })).toMatchObject({
       total: 1,
-      items: [{ id: route.conversationKey, botName: 'Thread Bot', sceneName: 'Alert triage', workspaceName: 'Thread mapping', chatId: 'oc_thread', topicId: '', coreThreadId: '01-thread-id' }],
+      items: [{ id: route.conversationKey, botName: 'Thread Bot', sceneName: 'Alert triage', workspaceName: 'Thread mapping', chatId: 'oc_thread', chatName: '告警排查群', chatMode: 'group', topicId: '', coreThreadId: '01-thread-id' }],
     })
     expect(store.getConversationRoute(route.conversationKey)).toMatchObject({ sceneId: scene.id, coreThreadId: '01-thread-id' })
     store.close()
