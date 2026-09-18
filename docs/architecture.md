@@ -2,7 +2,7 @@
 
 ## Boundaries
 
-CodyBotHub owns the management product and its domain entities: Workspace, Bot, Scene, Skill Package, group binding, topic routing context, provisioning job and conversation thread mapping. CodyWebCore remains the single owner of Codex protocol, session lifecycle, normalized conversation events and provider-neutral channel primitives.
+CodyBotHub owns the management product and its domain entities: Workspace, Bot, Scene, Skill Package, group binding, topic routing context, provisioning job, Thread Channel, conversation binding and Thread job. CodyWebCore remains the single owner of Codex protocol, session lifecycle, normalized conversation events and provider-neutral channel primitives.
 
 Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@codycodeagent/cody-web-core/feishu`. CodyBotHub adds only product routing and policy.
 
@@ -10,9 +10,10 @@ Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@cody
 
 1. `FeishuProvider` converts a Feishu event into `ChannelInboundMessage`.
 2. The SQLite inbox claim deduplicates `bot_id + message_id`, so Feishu retries with a new event id remain idempotent across restarts. Claims expire after the provider retry window.
-3. The Bot conversation mode derives the Thread identity from the chat, or from the chat plus topic root.
+3. The Bot conversation mode derives a conversation key from the chat, or from the chat plus topic root.
 4. The router checks specific enabled Scene matchers, an inherited topic routing context, a saved group default, and finally a matcher-free fallback Scene. The selected Scene chooses the Workspace; no Scene uses the Bot default Workspace.
-5. CodyBotHub composes system instructions in this exact order:
+5. Thread routing first honors an existing conversation binding. For an unbound conversation, a high-confidence match inside the same Bot, Workspace and Scene binds it to the historical Thread Channel; a medium-confidence match creates a new Channel and injects the historical result as a lead; otherwise a new Channel is created.
+6. CodyBotHub composes system instructions in this exact order:
 
    ```text
    Platform base Prompt
@@ -22,9 +23,10 @@ Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@cody
    + Skill Package Prompt(s)
    ```
 
-6. The composed instructions are supplied as trusted per-turn application context. `CodexSessionManager` creates or resumes the native Codex Thread, while the selected Workspace becomes that turn’s cwd and runtime root. CodyBotHub stores only the conversation key and native Thread id; native Codex history remains the transcript source of truth.
-7. Messages sharing one chat/topic anchor are serialized before entering Codex; unrelated conversations still run concurrently.
-8. The final Core Turn outcome is replied as one or more Feishu Markdown cards. The Bot conversation mode selects direct or topic reply. Every card carries a footer with the effective Workspace, Scene, Skill Package and permission policy.
+7. The accepted message is recorded as a persistent Thread job. CodyBotHub immediately adds the receipt reaction, then queues the job by Thread Channel.
+8. The composed instructions are supplied as trusted per-turn application context. One Thread Channel is the Core binding id and owns one native Codex Thread. The selected Workspace becomes that turn’s cwd and runtime root; native Codex history remains the transcript source of truth.
+9. Jobs in one Thread Channel are serialized by CodyBotHub and again by `CodexSessionManager`. Different Channels still run concurrently.
+10. The final Core Turn outcome is replied as one or more Feishu Markdown cards. The Bot conversation mode selects direct or topic reply. Every card carries a footer with the effective Workspace, Scene, Skill Package and permission policy.
 
 ## Model selection
 
@@ -47,15 +49,19 @@ App-authored messages are accepted only when their content independently matches
 
 A card selection creates a `group_scene_bindings` row. A bound scene supplies the group default until changed or deleted; a more specific message matcher can override it for the current message and topic routing context.
 
-## Thread identity
+## Thread Channels and conversation bindings
 
-Thread identity is controlled only by the Bot conversation mode:
+The Bot conversation mode controls the conversation binding key:
 
 - Chat mode: `Bot + Chat`
 - Topic mode: `Bot + Chat + topic root`
 - Private conversations always use `Bot + Chat`
 
-Scene, Workspace and Skill Package never participate in the conversation key. The same Thread can therefore process turns through different Scenes while retaining one native Codex history. A topic routing context may remember the most recent specifically matched Scene for later follow-ups, but it does not own or split the Thread.
+Each conversation key is permanently bound to one Thread Channel after its first accepted message. Multiple conversation keys can bind to one Channel when the initial similarity route exceeds the reuse threshold. Each Channel owns exactly one Core binding and native Codex Thread, which prevents the same Thread from being attached under competing binding ids.
+
+Scene, Workspace and Skill Package never become part of the Channel identity. They are resolved again for every message, so one Channel can process turns through different Scenes while retaining one native Codex history. Scene scope is used only when selecting a historical Channel for a previously unbound conversation. A topic routing context may remember the most recent specifically matched Scene for later follow-ups, but it does not own or split the Channel.
+
+`thread_jobs` persists queue state. Queued jobs survive a service restart and resume after the Bot provider connects. A job that was already running is marked failed on restart instead of being replayed, because its Codex turn may already have invoked external tools.
 
 ## Unknown groups
 
@@ -97,4 +103,5 @@ The shared provider resolves `nonsupport` and reduced interactive-card events th
 - One process owns one shared `AppServerHost` and `CodexSessionManager`.
 - Configured Bots each own one Core `FeishuProvider` connection.
 - Editing credentials reloads the affected providers.
+- Queued Thread jobs resume after providers reconnect; in-flight jobs are marked failed to avoid duplicate side effects.
 - In-progress Device Flow jobs are marked failed after a process restart because the remote poll cannot be resumed safely; users can start a new job.
