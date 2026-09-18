@@ -42,4 +42,11 @@ describe('workspace Skill ranking', () => {
     ], '券使用更新时间异常，需要排查实时对账告警根因')
     expect(ranked.slice(0, 2).map(item => item.name)).toEqual(expect.arrayContaining(['rds', 'argos-query']))
   })
+
+  it('deduplicates skills by name and prefers the installed workspace copy', () => {
+    const installed = skill('argos-query', '安装后的日志查询能力')
+    const source = { ...skill('argos-query', '源码目录中的日志查询能力'), path: '/workspace/skills/argos-query/SKILL.md' }
+    const ranked = rankSkillCandidates([source, installed, skill('rds', '只读数据库查询')], '告警日志排查')
+    expect(ranked.filter(item => item.name === 'argos-query')).toEqual([installed])
+  })
 })

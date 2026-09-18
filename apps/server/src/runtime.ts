@@ -82,9 +82,20 @@ export const rankSkillCandidates = (skills: CodexSkillOption[], query: string): 
     if (normalized.includes(skill.name.toLocaleLowerCase())) score += 30
     if (incident && /rds|sql|database|数据库|argos|log|日志|alert|告警|incident|排查|oncall|knowledge|知识/iu.test(searchable)) score += 8
     if (/卡片|飞书|feishu|lark/iu.test(normalized) && /feishu|lark|card|im|飞书/iu.test(searchable)) score += 8
-    return { skill, score }
+    const sourcePriority = skill.path.includes(`${path.sep}.codex${path.sep}skills${path.sep}`)
+      ? 3
+      : skill.path.includes(`${path.sep}.agents${path.sep}skills${path.sep}`)
+        ? 2
+        : 1
+    return { skill, score, sourcePriority }
   })
-  return scored.sort((left, right) => right.score - left.score || left.skill.name.localeCompare(right.skill.name, 'zh-CN')).map(item => item.skill)
+  const ranked = scored.sort((left, right) => right.score - left.score || right.sourcePriority - left.sourcePriority || left.skill.name.localeCompare(right.skill.name, 'zh-CN'))
+  const unique = new Map<string, CodexSkillOption>()
+  for (const item of ranked) {
+    const key = item.skill.name.trim().toLocaleLowerCase()
+    if (!unique.has(key)) unique.set(key, item.skill)
+  }
+  return [...unique.values()]
 }
 
 const skillSnapshot = (skill: CodexSkillOption): InvestigationSkillRecord => ({ name: skill.name, description: skill.description, path: skill.path })
@@ -309,13 +320,16 @@ export class CodyBotRuntime {
     })
     const uniquePrimary = [...new Map(primary.map(item => [item.path, item])).values()]
     const primaryPaths = new Set(uniquePrimary.map(item => item.path))
+    const primaryNames = new Set(uniquePrimary.flatMap(item => [item.name, item.displayName, path.basename(path.dirname(item.path))]).filter(Boolean).map(item => item.trim().toLocaleLowerCase()))
     const mode: InvestigationTraceRecord['mode'] = route.skillPackages.some(item => item.fallbackMode === 'package_only')
       ? 'package_only'
       : route.skillPackages.some(item => item.fallbackMode === 'mixed')
         ? 'mixed'
         : requested.length ? 'package_first' : 'workspace'
     const query = [message.content?.title, message.text, route.scene?.name, route.scene?.prompt, ...route.skillPackages.flatMap(item => [item.name, item.description, item.prompt])].filter(Boolean).join('\n')
-    const workspaceSkills = catalog.filter(skill => isWithin(codeRoot, skill.path) && !primaryPaths.has(skill.path))
+    const workspaceSkills = catalog.filter(skill => isWithin(codeRoot, skill.path)
+      && !primaryPaths.has(skill.path)
+      && ![skill.name, skill.displayName, path.basename(path.dirname(skill.path))].filter(Boolean).some(name => primaryNames.has(name.trim().toLocaleLowerCase())))
     const ranked = rankSkillCandidates(workspaceSkills, query).slice(0, 12)
     const knowledge = mode === 'package_only' ? [] : await this.resources.listKnowledge(codeRoot, query, 20)
     const knowledgeRoots = mode === 'package_only' ? [] : await this.resources.listRoots(codeRoot)
