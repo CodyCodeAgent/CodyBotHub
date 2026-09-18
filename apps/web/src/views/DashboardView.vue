@@ -19,7 +19,7 @@ const metrics = [
       <article v-for="metric in metrics" :key="metric.key" class="metric"><div class="metric-icon"><component :is="metric.icon" :size="18" /></div><strong>{{ stats[metric.key] }}</strong><span>{{ metric.label }}</span></article>
     </section>
     <section class="callout">
-      <div><p class="eyebrow">Prompt composition</p><h2>每次运行都能解释上下文来源</h2><p class="page-description">平台按固定顺序合并 Prompt。场景和技能包只增加当前消息需要的上下文，工作区仍是文件与会话的边界。</p></div>
+      <div><p class="eyebrow">Prompt composition</p><h2>每次运行都能解释上下文来源</h2><p class="page-description">平台按固定顺序合并 Prompt。场景和技能包只增加当前消息需要的上下文，工作区是当前轮次的文件访问与执行边界。</p></div>
       <div class="prompt-stack"><div class="prompt-layer"><Layers3 :size="12" /> 平台基础 Prompt</div><div class="prompt-layer">+ 工作区 Prompt</div><div class="prompt-layer">+ Bot Prompt</div><div class="prompt-layer">+ 场景 Prompt</div><div class="prompt-layer">+ 技能包 Prompt</div></div>
     </section>
   </div>
