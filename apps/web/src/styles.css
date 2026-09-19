@@ -554,7 +554,10 @@ tbody tr:hover { background: linear-gradient(90deg, rgba(110,93,255,.065), rgba(
 @keyframes orbit { to { transform: rotate(360deg); } }
 @keyframes status-pulse { 0%,55% { box-shadow: 0 0 0 4px rgba(66,232,164,.1),0 0 8px rgba(66,232,164,.16) } 100% { box-shadow: 0 0 0 10px rgba(66,232,164,0),0 0 8px rgba(66,232,164,.12) } }
 @keyframes signal-sweep { from { background-position: 180% 0 } to { background-position: -120% 0 } }
-@keyframes page-enter { from { opacity: 0; transform: translateY(7px) } to { opacity: 1; transform: none } }
+/* Keep the route transition opacity-only. A transformed page becomes the containing
+   block for fixed descendants, which makes dialogs center against a long document
+   instead of the current viewport. */
+@keyframes page-enter { from { opacity: 0 } to { opacity: 1 } }
 
 :root[data-theme='light'] body { background: radial-gradient(circle at 78% -12%, rgba(79, 70, 229, .07), transparent 28rem), var(--bg); }
 :root[data-theme='light'] .app-atmosphere { opacity: .22; }
