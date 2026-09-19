@@ -831,6 +831,13 @@ export class HubStore {
     workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number
     today: { received: number; completed: number; failed: number; processing: number; reused: number; experience: number; created: number; averageDurationMs: number }
     threads: { channels: number; bindings: number; profiles: number; queuedJobs: number; processingJobs: number }
+    analytics: {
+      total: { received: number; completed: number; failed: number; processing: number; uniqueChats: number; averageDurationMs: number }
+      daily: Array<{ date: string; received: number; completed: number; failed: number; reused: number; experience: number }>
+      chats: Array<{ botId: string; botName: string; chatId: string; chatName: string; chatMode: string; received: number; completed: number; failed: number; averageDurationMs: number; lastActiveAt: string }>
+      scenes: Array<{ sceneId: string; sceneName: string; received: number; completed: number; failed: number }>
+      routes: Array<{ type: string; count: number }>
+    }
   } {
     const count = (table: string) => Number((this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as Row).count)
     const enabledScenes = Number((this.db.prepare('SELECT COUNT(*) AS count FROM scenes WHERE enabled = 1').get() as Row).count)
@@ -847,10 +854,52 @@ export class HubStore {
     const queue = this.db.prepare(`SELECT
       SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_jobs,
       SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_jobs FROM thread_jobs`).get() as Row
+    const total = this.db.prepare(`SELECT COUNT(*) AS received,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing,
+      COUNT(DISTINCT bot_id || char(31) || chat_id) AS unique_chats,
+      AVG(CASE WHEN status = 'completed' AND duration_ms IS NOT NULL THEN duration_ms END) AS average_duration_ms
+      FROM message_logs`).get() as Row
+    const dailyStart = new Date(); dailyStart.setHours(0, 0, 0, 0); dailyStart.setDate(dailyStart.getDate() - 13)
+    const dailyRows = this.db.prepare(`SELECT date(received_at, 'localtime') AS date, COUNT(*) AS received,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN thread_route_type = 'reused' THEN 1 ELSE 0 END) AS reused,
+      SUM(CASE WHEN thread_route_type = 'experience' THEN 1 ELSE 0 END) AS experience
+      FROM message_logs WHERE received_at >= ? GROUP BY date(received_at, 'localtime') ORDER BY date`).all(dailyStart.toISOString()) as Row[]
+    const dailyByDate = new Map(dailyRows.map(row => [String(row.date), row]))
+    const daily = Array.from({ length: 14 }, (_, index) => {
+      const date = new Date(dailyStart); date.setDate(date.getDate() + index)
+      const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+      const row = dailyByDate.get(key)
+      return { date: key, received: Number(row?.received ?? 0), completed: Number(row?.completed ?? 0), failed: Number(row?.failed ?? 0), reused: Number(row?.reused ?? 0), experience: Number(row?.experience ?? 0) }
+    })
+    const chats = (this.db.prepare(`SELECT m.bot_id, MAX(m.bot_name) AS bot_name, m.chat_id,
+      COALESCE(NULLIF(MAX(cm.name), ''), m.chat_id) AS chat_name, COALESCE(MAX(cm.mode), '') AS chat_mode,
+      COUNT(*) AS received, SUM(CASE WHEN m.status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN m.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      AVG(CASE WHEN m.status = 'completed' AND m.duration_ms IS NOT NULL THEN m.duration_ms END) AS average_duration_ms,
+      MAX(m.received_at) AS last_active_at FROM message_logs m
+      LEFT JOIN chat_metadata cm ON cm.bot_id = m.bot_id AND cm.chat_id = m.chat_id
+      GROUP BY m.bot_id, m.chat_id ORDER BY received DESC, last_active_at DESC LIMIT 10`).all() as Row[]).map(row => ({
+        botId: String(row.bot_id), botName: String(row.bot_name), chatId: String(row.chat_id), chatName: String(row.chat_name), chatMode: String(row.chat_mode), received: Number(row.received), completed: Number(row.completed), failed: Number(row.failed), averageDurationMs: Number(row.average_duration_ms || 0), lastActiveAt: String(row.last_active_at),
+      }))
+    const sceneStats = (this.db.prepare(`SELECT scene_id, CASE WHEN scene_id = '' THEN '默认路由' ELSE MAX(scene_name) END AS scene_name,
+      COUNT(*) AS received, SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+      FROM message_logs GROUP BY scene_id ORDER BY received DESC LIMIT 8`).all() as Row[]).map(row => ({
+        sceneId: String(row.scene_id), sceneName: String(row.scene_name), received: Number(row.received), completed: Number(row.completed), failed: Number(row.failed),
+      }))
+    const routes = (this.db.prepare('SELECT thread_route_type AS type, COUNT(*) AS count FROM message_logs GROUP BY thread_route_type ORDER BY count DESC').all() as Row[]).map(row => ({ type: String(row.type), count: Number(row.count) }))
     return {
       workspaces: count('workspaces'), bots: count('bots'), scenes: enabledScenes, skillPackages: count('skill_packages'), messageLogs: count('message_logs'),
       today: { received: Number(activity.received), completed: Number(activity.completed), failed: Number(activity.failed), processing: Number(activity.processing), reused: Number(activity.reused), experience: Number(activity.experience), created: Number(activity.created), averageDurationMs: Number(activity.average_duration_ms || 0) },
       threads: { channels: count('thread_channels'), bindings: count('conversation_bindings'), profiles: count('thread_profiles'), queuedJobs: Number(queue.queued_jobs), processingJobs: Number(queue.processing_jobs) },
+      analytics: {
+        total: { received: Number(total.received), completed: Number(total.completed), failed: Number(total.failed), processing: Number(total.processing), uniqueChats: Number(total.unique_chats), averageDurationMs: Number(total.average_duration_ms || 0) },
+        daily, chats, scenes: sceneStats, routes,
+      },
     }
   }
 

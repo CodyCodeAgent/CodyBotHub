@@ -26,4 +26,15 @@ export interface ConversationThread { id: string; threadChannelId: string; botId
 export interface SkillSource { id: string; name: string; repositoryUrl: string; branch: string; workspaceId: string; workspaceName: string; skillRoots: string[]; knowledgeRoots: string[]; autoInstall: boolean; lastSyncedAt: string; lastCommit: string; lastError: string; createdAt: string; updatedAt: string }
 export interface SkillCatalogItem { key: string; name: string; description: string; sourceId: string; sourceName: string; workspaceId: string; workspaceName: string; sourcePath: string; targetPath: string; status: 'available'|'installed'|'update_available'|'conflict'|'local'; checksum: string; installedCommit: string }
 export interface WorkspaceResources { codeRoot: string; knowledgeRoots: string[]; knowledge: Array<{ title: string; description: string; path: string; relativePath: string; updatedAt: string }>; skills: Array<{ name: string; path: string; displayName: string; description: string; scope: 'repo'|'user'|'system'|'admin'; enabled: boolean }> }
-export interface DashboardOverview { workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number; today: { received: number; completed: number; failed: number; processing: number; reused: number; experience: number; created: number; averageDurationMs: number }; threads: { channels: number; bindings: number; profiles: number; queuedJobs: number; processingJobs: number } }
+export interface DashboardOverview {
+  workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number
+  today: { received: number; completed: number; failed: number; processing: number; reused: number; experience: number; created: number; averageDurationMs: number }
+  threads: { channels: number; bindings: number; profiles: number; queuedJobs: number; processingJobs: number }
+  analytics: {
+    total: { received: number; completed: number; failed: number; processing: number; uniqueChats: number; averageDurationMs: number }
+    daily: Array<{ date: string; received: number; completed: number; failed: number; reused: number; experience: number }>
+    chats: Array<{ botId: string; botName: string; chatId: string; chatName: string; chatMode: string; received: number; completed: number; failed: number; averageDurationMs: number; lastActiveAt: string }>
+    scenes: Array<{ sceneId: string; sceneName: string; received: number; completed: number; failed: number }>
+    routes: Array<{ type: string; count: number }>
+  }
+}

@@ -371,6 +371,11 @@ describe('HubStore invariants', () => {
       messageLogs: 2,
       today: { received: 2, completed: 1, failed: 1, processing: 0 },
       threads: { queuedJobs: 0, processingJobs: 0 },
+      analytics: {
+        total: { received: 2, completed: 1, failed: 1, processing: 0, uniqueChats: 1 },
+        chats: [{ chatId: 'oc_review', received: 2, completed: 1, failed: 1 }],
+        scenes: [{ sceneId: scene.id, received: 2, completed: 1, failed: 1 }],
+      },
     })
     store.close()
   })
