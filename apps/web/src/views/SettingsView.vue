@@ -3,6 +3,7 @@ import { Edit3, GitPullRequest, Moon, Plus, RefreshCw, Save, Settings, Sun, Tras
 import { onMounted, reactive, ref } from 'vue'
 import { api } from '../api'
 import ModelConfigFields from '../components/ModelConfigFields.vue'
+import PaginationBar from '../components/PaginationBar.vue'
 import { announceTheme } from '../theme'
 import type { ModelCatalog, SkillSource, ThemePreference, Workspace } from '../types'
 
@@ -10,14 +11,17 @@ const basePrompt = ref(''), theme = ref<ThemePreference>('system'), saving = ref
 const defaultModel = ref(''), defaultReasoningEffort = ref(''), modelFallbackEnabled = ref(true)
 const threadProfileRefreshIntervalSeconds = ref(5), threadProfileBatchSize = ref(20)
 const catalog = ref<ModelCatalog>({ items: [], defaultModel: '', defaultReasoningEffort: '' })
-const sources = ref<SkillSource[]>([]), workspaces = ref<Workspace[]>([]), dialogOpen = ref(false), syncingId = ref('')
+const pageSize = 20
+const sources = ref<SkillSource[]>([]), sourceTotal = ref(0), sourceOffset = ref(0), workspaces = ref<Workspace[]>([]), dialogOpen = ref(false), syncingId = ref('')
 const form = reactive({ id: '', name: '', repositoryUrl: '', branch: 'main', workspaceId: '', skillRoots: 'skills\n.codex/skills\n.agents/skills', knowledgeRoots: '', autoInstall: false })
 
 const showError = (value: unknown) => { error.value = value instanceof Error ? value.message : '操作失败' }
 const load = async () => {
-  const [settings, preferences, sourceItems, workspaceItems, models] = await Promise.all([api.settings(), api.preferences(), api.skillSources(), api.workspaces(), api.models()])
-  basePrompt.value = settings.basePrompt; defaultModel.value = settings.defaultModel; defaultReasoningEffort.value = settings.defaultReasoningEffort; modelFallbackEnabled.value = settings.modelFallbackEnabled; threadProfileRefreshIntervalSeconds.value = settings.threadProfileRefreshIntervalSeconds; threadProfileBatchSize.value = settings.threadProfileBatchSize; theme.value = preferences.theme; sources.value = sourceItems; workspaces.value = workspaceItems; catalog.value = models
+  const [settings, preferences, sourceItems, workspaceItems, models] = await Promise.all([api.settings(), api.preferences(), api.skillSourcesPage(pageSize, sourceOffset.value), api.workspaces(), api.models()])
+  basePrompt.value = settings.basePrompt; defaultModel.value = settings.defaultModel; defaultReasoningEffort.value = settings.defaultReasoningEffort; modelFallbackEnabled.value = settings.modelFallbackEnabled; threadProfileRefreshIntervalSeconds.value = settings.threadProfileRefreshIntervalSeconds; threadProfileBatchSize.value = settings.threadProfileBatchSize; theme.value = preferences.theme; sources.value = sourceItems.items; sourceTotal.value = sourceItems.total; workspaces.value = workspaceItems; catalog.value = models
 }
+const loadSources = async () => { const result = await api.skillSourcesPage(pageSize, sourceOffset.value); sources.value = result.items; sourceTotal.value = result.total }
+const moveSources = async (value: number) => { sourceOffset.value = value; await loadSources() }
 onMounted(() => { void load().catch(showError) })
 const save = async () => {
   saving.value = true; saved.value = false; error.value = ''
@@ -33,16 +37,16 @@ const saveSource = async () => {
   error.value = ''
   try {
     await api.saveSkillSource({ ...(form.id ? { id: form.id } : {}), name: form.name, repositoryUrl: form.repositoryUrl, branch: form.branch, workspaceId: form.workspaceId, skillRoots: lines(form.skillRoots), knowledgeRoots: lines(form.knowledgeRoots), autoInstall: form.autoInstall })
-    dialogOpen.value = false; sources.value = await api.skillSources()
+    dialogOpen.value = false; await loadSources()
   } catch (value) { showError(value) }
 }
 const sync = async (source: SkillSource) => {
   syncingId.value = source.id; error.value = ''
-  try { await api.syncSkillSource(source.id); sources.value = await api.skillSources() } catch (value) { showError(value) } finally { syncingId.value = '' }
+  try { await api.syncSkillSource(source.id); await loadSources() } catch (value) { showError(value) } finally { syncingId.value = '' }
 }
 const remove = async (source: SkillSource) => {
   if (!window.confirm(`删除技能源“${source.name}”及其同步缓存？已安装到工作区的 Skill 文件会保留。`)) return
-  try { await api.deleteSkillSource(source.id); sources.value = await api.skillSources() } catch (value) { showError(value) }
+  try { await api.deleteSkillSource(source.id); await loadSources() } catch (value) { showError(value) }
 }
 </script>
 
@@ -75,6 +79,7 @@ const remove = async (source: SkillSource) => {
             <div class="actions"><button class="ghost-button compact" :disabled="syncingId === source.id" @click="sync(source)"><RefreshCw :size="14" :class="{ spinning: syncingId === source.id }" />{{ syncingId === source.id ? '同步中' : '同步' }}</button><button class="icon-button" title="编辑" @click="openSource(source)"><Edit3 :size="16" /></button><button class="icon-button danger-icon" title="删除" @click="remove(source)"><Trash2 :size="16" /></button></div>
           </article>
         </div>
+        <PaginationBar :total="sourceTotal" :offset="sourceOffset" :page-size="pageSize" @change="moveSources" />
       </section>
     </div>
 

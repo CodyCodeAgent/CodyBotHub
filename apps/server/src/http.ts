@@ -48,6 +48,13 @@ const optional = (body: Json, key: string): string => typeof body[key] === 'stri
 const stringList = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean) : []
 const bool = (value: unknown, fallback = false): boolean => typeof value === 'boolean' ? value : fallback
 const number = (value: unknown, fallback: number): number => typeof value === 'number' && Number.isFinite(value) ? value : fallback
+const page = <T>(items: T[], url: URL, fallback = 20): { items: T[]; total: number } => {
+  const requestedLimit = Number(url.searchParams.get('limit') ?? fallback)
+  const requestedOffset = Number(url.searchParams.get('offset') ?? 0)
+  const limit = Math.min(100, Math.max(1, Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : fallback))
+  const offset = Math.max(0, Number.isFinite(requestedOffset) ? Math.trunc(requestedOffset) : 0)
+  return { items: items.slice(offset, offset + limit), total: items.length }
+}
 
 export interface HubServerOptions {
   store: HubStore
@@ -98,6 +105,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           return sendJson(response, 200, { theme: account.theme })
         }
 
+        if (method === 'GET' && url.pathname === '/api/accounts/page') return sendJson(response, 200, page(store.listAdminAccounts(), url))
         if (method === 'GET' && url.pathname === '/api/accounts') return sendJson(response, 200, store.listAdminAccounts())
         if (method === 'POST' && url.pathname === '/api/accounts') {
           const body = await readJson(request)
@@ -131,6 +139,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         }
         if (method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, await runtime.listModels())
 
+        if (method === 'GET' && url.pathname === '/api/skill-sources/page') return sendJson(response, 200, page(store.listSkillSources(), url))
         if (method === 'GET' && url.pathname === '/api/skill-sources') return sendJson(response, 200, store.listSkillSources())
         if (method === 'POST' && url.pathname === '/api/skill-sources') {
           const body = await readJson(request), result = store.createSkillSource(skillSourceInput(body))
@@ -159,11 +168,18 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           }
         }
         if (method === 'GET' && url.pathname === '/api/skill-catalog') {
-          return sendJson(response, 200, await skills.catalog({ workspaceId: url.searchParams.get('workspaceId') ?? '', sourceId: url.searchParams.get('sourceId') ?? '', status: url.searchParams.get('status') ?? '', query: url.searchParams.get('query') ?? '' }))
+          const catalog = await skills.catalog({ workspaceId: url.searchParams.get('workspaceId') ?? '', sourceId: url.searchParams.get('sourceId') ?? '', status: url.searchParams.get('status') ?? '', query: url.searchParams.get('query') ?? '' })
+          if (url.searchParams.has('limit') || url.searchParams.has('offset')) {
+            const result = page(catalog, url)
+            return sendJson(response, 200, { ...result, statusCounts: catalog.reduce<Record<string, number>>((counts, item) => ({ ...counts, [item.status]: (counts[item.status] ?? 0) + 1 }), {}) })
+          }
+          return sendJson(response, 200, catalog)
         }
         if (method === 'GET' && url.pathname === '/api/workspace-resources') {
           const workspace = store.getWorkspace(url.searchParams.get('workspaceId') ?? '')
-          return sendJson(response, 200, await runtime.workspaceResources(workspace.path, url.searchParams.get('query') ?? ''))
+          const resources = await runtime.workspaceResources(workspace.path, url.searchParams.get('query') ?? '')
+          const knowledge = page(resources.knowledge, url)
+          return sendJson(response, 200, { ...resources, knowledge: knowledge.items, knowledgeTotal: knowledge.total })
         }
         if (method === 'POST' && url.pathname === '/api/skill-catalog/install') {
           const body = await readJson(request)
@@ -203,19 +219,30 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         }
         if (method === 'GET' && url.pathname === '/api/thread-routing-profiles') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 100
-          return sendJson(response, 200, store.listThreadProfiles(number(limit, 100)))
+          const profiles = store.listThreadProfiles(url.searchParams.has('paged') ? 500 : number(limit, 100))
+          const sceneId = url.searchParams.get('sceneId') ?? '', query = (url.searchParams.get('query') ?? '').trim().toLocaleLowerCase()
+          const filtered = profiles.filter(item => (!sceneId || item.sceneId === sceneId) && (!query || [item.title, item.normalizedText, item.experienceSummary, ...Object.values(item.fields)].join(' ').toLocaleLowerCase().includes(query)))
+          return sendJson(response, 200, url.searchParams.has('paged') ? page(filtered, url) : filtered.slice(0, number(limit, 100)))
         }
         if (method === 'GET' && url.pathname === '/api/thread-routing-decisions') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
-          return sendJson(response, 200, store.listThreadRoutingDecisions(number(limit, 50)))
+          const items = store.listThreadRoutingDecisions(url.searchParams.has('paged') ? 500 : number(limit, 50))
+          if (url.searchParams.has('paged')) {
+            const result = page(items, url), typeCounts: Record<string, number> = {}
+            for (const item of items) typeCounts[item.type] = (typeCounts[item.type] ?? 0) + 1
+            return sendJson(response, 200, { ...result, typeCounts })
+          }
+          return sendJson(response, 200, items)
         }
         if (method === 'GET' && url.pathname === '/api/thread-channels') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 200
-          return sendJson(response, 200, store.listThreadChannels(number(limit, 200)))
+          const items = store.listThreadChannels(url.searchParams.has('paged') ? 500 : number(limit, 200))
+          return sendJson(response, 200, url.searchParams.has('paged') ? page(items, url) : items)
         }
         if (method === 'GET' && url.pathname === '/api/thread-jobs') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 100
-          return sendJson(response, 200, store.listThreadJobs(number(limit, 100)))
+          const items = store.listThreadJobs(url.searchParams.has('paged') ? 500 : number(limit, 100))
+          return sendJson(response, 200, url.searchParams.has('paged') ? page(items, url) : items)
         }
         if (method === 'GET' && url.pathname === '/api/message-logs') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
@@ -269,6 +296,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           audit('bot.provision_cancel', 'provisioning', provisioningId, '取消飞书 Bot 自动注册')
           return sendJson(response, 200, job)
         }
+        if (method === 'GET' && url.pathname === '/api/workspaces/page') return sendJson(response, 200, page(store.listWorkspaces(), url))
         if (method === 'GET' && url.pathname === '/api/workspaces') return sendJson(response, 200, store.listWorkspaces())
         if (method === 'POST' && url.pathname === '/api/workspaces') {
           const body = await readJson(request)
@@ -288,6 +316,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         }
         if (workspaceId && method === 'DELETE') { const item = store.listWorkspaces().find(value => value.id === workspaceId); store.deleteWorkspace(workspaceId); audit('workspace.delete', 'workspace', workspaceId, `删除工作区 ${item?.name ?? workspaceId}`); response.statusCode = 204; return response.end() }
 
+        if (method === 'GET' && url.pathname === '/api/bots/page') return sendJson(response, 200, page(store.listBots(), url))
         if (method === 'GET' && url.pathname === '/api/bots') return sendJson(response, 200, store.listBots())
         if (method === 'POST' && url.pathname === '/api/bots') {
           const body = await readJson(request), secret = optional(body, 'appSecret')
@@ -308,6 +337,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         }
         if (botId && method === 'DELETE') { const item = store.listBots().find(value => value.id === botId); store.deleteBot(botId); await onConfigurationChanged?.(); audit('bot.delete', 'bot', botId, `删除飞书 Bot ${item?.name ?? botId}`); response.statusCode = 204; return response.end() }
 
+        if (method === 'GET' && url.pathname === '/api/scenes/page') return sendJson(response, 200, page(store.listScenes(), url))
         if (method === 'GET' && url.pathname === '/api/scenes') return sendJson(response, 200, store.listScenes())
         if (method === 'POST' && url.pathname === '/api/scenes') {
           const body = await readJson(request)
@@ -320,6 +350,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (sceneId && method === 'PUT') { const body = await readJson(request); await runtime.validateModelSelection(optional(body, 'model'), optional(body, 'reasoningEffort')); const result = store.updateScene(sceneId, sceneInput(body)); audit('scene.update', 'scene', result.id, `更新场景 ${result.name}`); return sendJson(response, 200, result) }
         if (sceneId && method === 'DELETE') { const item = store.listScenes().find(value => value.id === sceneId); store.deleteScene(sceneId); audit('scene.delete', 'scene', sceneId, `删除场景 ${item?.name ?? sceneId}`); response.statusCode = 204; return response.end() }
 
+        if (method === 'GET' && url.pathname === '/api/skill-packages/page') return sendJson(response, 200, page(store.listSkillPackages(), url))
         if (method === 'GET' && url.pathname === '/api/skill-packages') return sendJson(response, 200, store.listSkillPackages())
         if (method === 'POST' && url.pathname === '/api/skill-packages') { const result = store.createSkillPackage(skillPackageInput(await readJson(request))); audit('skill_package.create', 'skill_package', result.id, `创建技能包 ${result.name}`); return sendJson(response, 201, result) }
         const packageId = matchId(url.pathname, '/api/skill-packages/')

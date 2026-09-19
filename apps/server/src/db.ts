@@ -1460,10 +1460,10 @@ export class HubStore {
     return (this.db.prepare('SELECT * FROM thread_profiles ORDER BY last_active_at DESC LIMIT ?').all(Math.min(500, Math.max(1, limit))) as Row[]).map(this.threadProfile)
   }
 
-  listThreadRoutingDecisions(limit = 50): Array<{ logId: string; messageId: string; sceneName: string; type: ThreadRoutingDecision['type']; threadChannelId: string; coreThreadId: string; matchedThreadId: string; score: number; reason: string; receivedAt: string }> {
-    return (this.db.prepare(`SELECT id, message_id, scene_name, thread_route_type, thread_channel_id, core_thread_id, matched_thread_id, thread_match_score, thread_match_reason, received_at
+  listThreadRoutingDecisions(limit = 50): Array<{ logId: string; messageId: string; inboundContent: string; sceneName: string; type: ThreadRoutingDecision['type']; threadChannelId: string; coreThreadId: string; matchedThreadId: string; score: number; reason: string; receivedAt: string }> {
+    return (this.db.prepare(`SELECT id, message_id, inbound_content, scene_name, thread_route_type, thread_channel_id, core_thread_id, matched_thread_id, thread_match_score, thread_match_reason, received_at
       FROM message_logs WHERE scene_id <> '' ORDER BY received_at DESC LIMIT ?`).all(Math.min(200, Math.max(1, limit))) as Row[]).map(row => ({
-      logId: String(row.id), messageId: String(row.message_id), sceneName: String(row.scene_name), type: String(row.thread_route_type) as ThreadRoutingDecision['type'], threadChannelId: String(row.thread_channel_id), coreThreadId: String(row.core_thread_id), matchedThreadId: String(row.matched_thread_id), score: Number(row.thread_match_score), reason: String(row.thread_match_reason), receivedAt: String(row.received_at),
+      logId: String(row.id), messageId: String(row.message_id), inboundContent: String(row.inbound_content), sceneName: String(row.scene_name), type: String(row.thread_route_type) as ThreadRoutingDecision['type'], threadChannelId: String(row.thread_channel_id), coreThreadId: String(row.core_thread_id), matchedThreadId: String(row.matched_thread_id), score: Number(row.thread_match_score), reason: String(row.thread_match_reason), receivedAt: String(row.received_at),
     }))
   }
 
