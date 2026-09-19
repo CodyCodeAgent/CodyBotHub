@@ -41,12 +41,13 @@ onMounted(async () => { const status = await api.authStatus().catch(() => null);
 <template>
   <RouterView v-if="isAuth" />
   <div v-else class="app-shell">
+    <div class="app-atmosphere" aria-hidden="true"><span class="ambient-orb orb-a" /><span class="ambient-orb orb-b" /><span class="scan-beam" /></div>
     <a class="skip-link" href="#main-content">跳到主要内容</a>
     <button class="mobile-menu icon-button" aria-label="打开导航" @click="mobileOpen = true"><Menu :size="20" /></button>
     <div v-if="mobileOpen" class="nav-scrim" @click="mobileOpen = false" />
     <aside class="sidebar" :class="{ open: mobileOpen }">
       <div class="brand">
-        <div class="brand-mark"><Bot :size="22" /></div>
+        <div class="brand-mark"><span class="brand-orbit" aria-hidden="true" /><Bot :size="22" /></div>
         <div><strong>CodyBotHub</strong><span>Feishu Agent Control</span></div>
         <button class="close-nav icon-button" aria-label="关闭导航" @click="mobileOpen = false"><X :size="20" /></button>
       </div>
