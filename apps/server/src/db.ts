@@ -426,6 +426,7 @@ export class HubStore {
     ) INSERT OR IGNORE INTO thread_conversation_aliases (source_key, target_key, bot_id, chat_id, topic_id, created_at, updated_at)
       SELECT c.id, canonical.conversation_key, c.bot_id, c.chat_id, c.topic_id, ?, ?
       FROM conversation_threads c JOIN canonical ON canonical.core_thread_id = c.core_thread_id
+      JOIN conversation_threads target ON target.id = canonical.conversation_key
       WHERE c.id <> canonical.conversation_key`).run(now(), now())
     this.db.exec(`INSERT OR IGNORE INTO thread_channels (id, bot_id, core_thread_id, created_at, updated_at)
       SELECT 'channel:thread:' || core_thread_id, MIN(bot_id), core_thread_id, MIN(created_at), MAX(updated_at)

@@ -230,7 +230,9 @@ describe('HubStore invariants', () => {
   })
 
   it('builds Thread profiles asynchronously and reuses a matching Thread inside the same Scene', () => {
-    const store = new HubStore(':memory:')
+    const directory = mkdtempSync(path.join(tmpdir(), 'codybothub-thread-profile-'))
+    const filename = path.join(directory, 'hub.sqlite')
+    const store = new HubStore(filename)
     const linked = workspace(store, 'Thread intelligence')
     const bot = store.createBot({ name: 'Thread Bot', defaultWorkspaceId: linked.id, conversationMode: 'topic' })
     const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Alert', prompt: '', priority: 10, enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
@@ -262,6 +264,10 @@ describe('HubStore invariants', () => {
       expect.objectContaining({ id: routed.conversationKey, threadChannelId: historicalRoute.threadChannelId, coreThreadId: 'thread-history' }),
     ]) })
     store.close()
+    const reopened = new HubStore(filename)
+    expect(reopened.listThreadProfiles()).toMatchObject([{ coreThreadId: 'thread-history', threadChannelId: historicalRoute.threadChannelId }])
+    reopened.close()
+    rmSync(directory, { recursive: true, force: true })
   })
 
   it('persists Thread Channel jobs and keeps queued work across restart boundaries', () => {
