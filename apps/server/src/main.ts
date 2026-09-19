@@ -15,12 +15,11 @@ const dataDir = process.env.CODY_BOT_HUB_DATA_DIR ?? path.join(repositoryRoot, '
 const webDist = process.env.CODY_BOT_HUB_WEB_DIST ?? path.join(repositoryRoot, 'apps/web/dist')
 const host = process.env.CODY_BOT_HUB_HOST ?? '127.0.0.1'
 const port = Number(process.env.CODY_BOT_HUB_PORT ?? 4310)
+const startedAt = new Date()
 
 const store = new HubStore(path.join(dataDir, 'cody-bot-hub.sqlite'))
-const interruptedThreadJobs = store.recoverThreadJobs()
-if (interruptedThreadJobs) console.warn(`[startup] marked ${interruptedThreadJobs} in-flight Thread job(s) as failed; queued jobs will resume`)
-const interruptedMessages = store.failProcessingMessageLogs()
-if (interruptedMessages) console.warn(`[startup] marked ${interruptedMessages} interrupted message(s) as failed`)
+const interrupted = store.recoverInterruptedWork()
+if (interrupted.jobs || interrupted.messages) console.warn(`[startup] recovered interrupted work: jobs=${interrupted.jobs} messages=${interrupted.messages}; queued jobs will resume`)
 const vault = await SecretVault.open(dataDir)
 const runtimeDirectory = path.join(dataDir, 'runtime')
 mkdirSync(runtimeDirectory, { recursive: true })
@@ -30,7 +29,19 @@ const runtime = new CodyBotRuntime(store, runtimeDirectory, codexCommand, Number
 const feishu = new FeishuBotManager(store, vault, runtime, path.join(dataDir, 'attachments'))
 const provisioning = new FeishuProvisioningService(store, vault, () => feishu.reload())
 const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))
-const server = createHubServer({ store, vault, runtime, webDist, provisioning, skills, onConfigurationChanged: () => feishu.reload(), onMessageRetry: () => feishu.resumeQueuedJobs() })
+const server = createHubServer({
+  store, vault, runtime, webDist, provisioning, skills,
+  onConfigurationChanged: () => feishu.reload(),
+  onMessageRetry: () => feishu.resumeQueuedJobs(),
+  getSystemHealth: () => {
+    const checkedAt = new Date(), storeHealth = store.systemHealth(), feishuHealth = feishu.health(), runtimeHealth = runtime.health()
+    const attention = !storeHealth.database.ok || storeHealth.queue.staleProcessing > 0 || feishuHealth.connectedProviders < feishuHealth.configuredBots
+    return {
+      status: attention ? 'attention' : 'healthy', checkedAt: checkedAt.toISOString(), startedAt: startedAt.toISOString(),
+      uptimeSeconds: Math.max(0, Math.floor((checkedAt.getTime() - startedAt.getTime()) / 1_000)), store: storeHealth, feishu: feishuHealth, runtime: runtimeHealth,
+    }
+  },
+})
 
 let nextThreadProfileRefreshAt = 0
 const refreshThreadProfiles = () => {
@@ -50,7 +61,7 @@ setImmediate(refreshThreadProfiles)
 
 server.listen(port, host, () => {
   console.log(`CodyBotHub listening on http://${host}:${port}`)
-  void feishu.reload()
+  void feishu.start()
 })
 
 const shutdown = () => {

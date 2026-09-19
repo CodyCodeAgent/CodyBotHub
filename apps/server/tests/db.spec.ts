@@ -330,10 +330,13 @@ describe('HubStore invariants', () => {
     const queuedJob = store.enqueueThreadJob(bot.id, queuedRoute.threadChannelId, queuedMessage, queuedLog.id)
     expect(store.listThreadChannels()).toMatchObject([{ id: route.threadChannelId, coreThreadId: 'thread-queue', bindingCount: 1, queuedJobs: 1, processingJobs: 1 }])
 
-    expect(store.recoverThreadJobs()).toBe(1)
+    expect(store.systemHealth()).toMatchObject({
+      database: { ok: true, result: 'ok' },
+      queue: { queued: 1, processing: 1, staleProcessing: 0 },
+    })
+    expect(store.recoverInterruptedWork()).toEqual({ jobs: 1, messages: 1 })
     expect(store.getThreadJob(runningJob.id)).toMatchObject({ status: 'failed', attempts: 1 })
     expect(store.listQueuedThreadJobs()).toMatchObject([{ job: { id: queuedJob.id, status: 'queued' }, message: { messageId: 'message-waiting' } }])
-    expect(store.failProcessingMessageLogs()).toBe(1)
     expect(store.getMessageLog(runningLog.id)).toMatchObject({ status: 'failed' })
     expect(store.getMessageLog(queuedLog.id)).toMatchObject({ status: 'processing' })
 
@@ -366,13 +369,44 @@ describe('HubStore invariants', () => {
     store.close()
   })
 
-  it('deduplicates Feishu retries by stable message id even when event ids change', () => {
+  it('atomically accepts an inbound message and permanently deduplicates Feishu retries by message id', () => {
     const store = new HubStore(':memory:')
     const linked = workspace(store, 'Dedupe')
     const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id })
-    expect(store.claimInboundEvent(bot.id, 'event-1', 'message-1')).toBe(true)
-    expect(store.claimInboundEvent(bot.id, 'event-2', 'message-1')).toBe(false)
-    expect(store.claimInboundEvent(bot.id, 'event-2', 'message-2')).toBe(true)
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-1', messageId: 'message-1',
+      conversation: { id: 'oc_dedupe', scope: 'group' as const }, sender: { id: 'ou_user', type: 'user' as const },
+      content: { type: 'text' as const }, text: '只处理一次', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+    const accepted = store.acceptInboundMessage(bot.id, route, message)
+    expect(accepted).toMatchObject({
+      log: { messageId: 'message-1', status: 'processing' },
+      job: { messageId: 'message-1', status: 'queued', threadChannelId: route.threadChannelId },
+    })
+    expect(store.acceptInboundMessage(bot.id, route, { ...message, eventId: 'event-2' })).toBeNull()
+    expect(store.listMessageLogs()).toMatchObject({ total: 1 })
+    expect(store.listThreadJobs()).toHaveLength(1)
+    expect(store.systemHealth()).toMatchObject({ database: { ok: true }, queue: { queued: 1, processing: 0 } })
+    store.close()
+  })
+
+  it('rolls back the inbox claim and message log when queue persistence fails', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Atomic rollback')
+    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id })
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-rollback', messageId: 'message-rollback',
+      conversation: { id: 'oc_rollback', scope: 'group' as const }, sender: { id: 'ou_user', type: 'user' as const },
+      content: { type: 'text' as const }, text: '事务回滚', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+    expect(() => store.acceptInboundMessage(bot.id, { ...route, threadChannelId: 'missing-channel' }, message)).toThrow()
+    expect(store.listMessageLogs()).toMatchObject({ total: 0 })
+    expect(store.listThreadJobs()).toHaveLength(0)
+    expect(store.acceptInboundMessage(bot.id, route, message)).not.toBeNull()
     store.close()
   })
 
@@ -402,7 +436,7 @@ describe('HubStore invariants', () => {
     expect(store.listMessageLogs({ query: '01a0-test-thread' })).toMatchObject({ total: 1, items: [{ id: log.id }] })
     const interruptedMessage = { ...message, eventId: 'event-interrupted', messageId: 'message-interrupted' }
     const interrupted = store.createMessageLog(bot.id, route, interruptedMessage)
-    expect(store.failProcessingMessageLogs()).toBe(1)
+    expect(store.recoverInterruptedWork()).toEqual({ jobs: 0, messages: 1 })
     expect(store.getMessageLog(interrupted.id)).toMatchObject({ status: 'failed', error: '服务在任务完成前重启，执行已中断' })
     expect(store.getMessageLog(interrupted.id).completedAt).not.toBe('')
     expect(store.stats()).toMatchObject({

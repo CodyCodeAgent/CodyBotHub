@@ -1,4 +1,4 @@
-import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Workspace, WorkspaceResources } from './types'
+import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, SystemHealth, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -33,6 +33,7 @@ export const api = {
   },
   auditLog: (id: string) => request<AuditLog>(`/audit-logs/${encodeURIComponent(id)}`),
   dashboard: () => request<DashboardOverview>('/dashboard'),
+  systemHealth: () => request<SystemHealth>('/system-health'),
   chats: (filters: { botId?: string; query?: string; limit?: number } = {}) => {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))

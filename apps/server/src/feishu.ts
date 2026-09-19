@@ -5,15 +5,19 @@ import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel
 import type { SecretVault } from './crypto.js'
 import type { HubStore } from './db.js'
 import type { CodyBotRuntime, RuntimeAttachment, RuntimeProgress } from './runtime.js'
-import type { ResolvedRoute } from './types.js'
+import type { FeishuManagerHealthRecord, ResolvedRoute } from './types.js'
 
-type ManagedProvider = { provider: FeishuProvider; fingerprint: string }
+type ManagedProvider = { provider: FeishuProvider; fingerprint: string; botName: string; state: string; error: string }
 
 export class FeishuBotManager {
   private readonly providers = new Map<string, ManagedProvider>()
   private readonly channelQueues = new Map<string, Promise<void>>()
   private readonly scheduledJobs = new Set<string>()
+  private readonly pendingReceipts = new Set<string>()
   private reloadTail = Promise.resolve()
+  private queueTimer: ReturnType<typeof setInterval> | null = null
+  private lastQueueScanAt = ''
+  private lastError = ''
 
   constructor(
     private readonly store: HubStore,
@@ -23,13 +27,44 @@ export class FeishuBotManager {
   ) {}
 
   reload(): Promise<void> {
-    this.reloadTail = this.reloadTail.then(() => this.reloadNow()).catch(error => console.error('[feishu] reload failed:', error))
+    this.reloadTail = this.reloadTail.then(() => this.reloadNow()).catch(error => {
+      this.lastError = error instanceof Error ? error.message : String(error)
+      console.error('[feishu] reload failed:', error)
+    })
     return this.reloadTail
   }
 
+  start(): Promise<void> {
+    if (!this.queueTimer) {
+      this.queueTimer = setInterval(() => this.resumeQueuedJobs(3_000), 2_000)
+      this.queueTimer.unref?.()
+    }
+    return this.reload()
+  }
+
   stop(): void {
+    if (this.queueTimer) clearInterval(this.queueTimer)
+    this.queueTimer = null
     for (const managed of this.providers.values()) managed.provider.stop()
     this.providers.clear()
+  }
+
+  health(): FeishuManagerHealthRecord {
+    const configured = this.store.listBots().filter(bot => bot.appId && bot.hasAppSecret)
+    const providers = configured.map(bot => {
+      const managed = this.providers.get(bot.id)
+      return { botId: bot.id, botName: bot.name, state: managed?.state ?? 'disconnected', error: managed?.error ?? '' }
+    })
+    return {
+      configuredBots: configured.length,
+      activeProviders: this.providers.size,
+      connectedProviders: providers.filter(item => !['failed', 'disconnected', 'stopped'].includes(item.state)).length,
+      scheduledJobs: this.scheduledJobs.size + this.pendingReceipts.size,
+      activeChannels: this.channelQueues.size,
+      lastQueueScanAt: this.lastQueueScanAt,
+      lastError: this.lastError,
+      providers,
+    }
   }
 
   private async reloadNow(): Promise<void> {
@@ -43,16 +78,26 @@ export class FeishuBotManager {
       if (this.providers.has(botId)) continue
       const encrypted = this.store.getBotSecret(botId)
       const provider = new FeishuProvider({ accountId: botId, appId: bot.appId, appSecret: this.vault.decrypt(encrypted), privateConversationMode: 'chat' })
-      this.providers.set(botId, { provider, fingerprint: `${bot.appId}:${bot.updatedAt}` })
+      const managed: ManagedProvider = { provider, fingerprint: `${bot.appId}:${bot.updatedAt}`, botName: bot.name, state: 'starting', error: '' }
+      this.providers.set(botId, managed)
       try {
         await provider.identity()
         await provider.start({
           onMessage: message => this.acceptMessage(botId, provider, message),
           onAction: action => this.onAction(botId, provider, action),
-          onState: (state, error) => console[state === 'failed' ? 'error' : 'info'](`[feishu:${bot.name}] ${state}${error ? `: ${error.message}` : ''}`),
+          onState: (state, error) => {
+            managed.state = String(state)
+            managed.error = error?.message ?? ''
+            if (state === 'failed') this.lastError = managed.error || `${bot.name} connection failed`
+            console[state === 'failed' ? 'error' : 'info'](`[feishu:${bot.name}] ${state}${error ? `: ${error.message}` : ''}`)
+          },
         })
+        if (managed.state === 'starting') managed.state = 'connected'
         void this.refreshKnownChats(botId, provider).catch(error => console.warn(`[feishu:${bot.name}] chat metadata refresh failed:`, error))
       } catch (error) {
+        managed.state = 'failed'
+        managed.error = error instanceof Error ? error.message : String(error)
+        this.lastError = managed.error
         this.providers.delete(botId)
         provider.stop()
         console.error(`[feishu:${bot.name}] start failed:`, error)
@@ -67,15 +112,19 @@ export class FeishuBotManager {
       name: message.conversation.name,
       mode: message.conversation.scope === 'topic' ? 'topic' : message.conversation.scope === 'private' ? 'p2p' : 'group',
     })
-    if (!this.store.claimInboundEvent(botId, message.eventId, message.messageId)) return
     const route = this.prepareRoute(botId, provider, message)
     if (!route) return
+    const accepted = this.store.acceptInboundMessage(botId, route, message)
+    if (!accepted) return
+    this.pendingReceipts.add(accepted.job.id)
     let receiptReactionId = ''
-    try { receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo') }
+    try {
+      receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo')
+      this.store.setThreadJobReceiptReaction(accepted.job.id, receiptReactionId)
+    }
     catch (error) { console.warn('[feishu] failed to add receipt reaction:', provider.classifyError(error).message) }
-    const log = this.store.createMessageLog(botId, route, message)
-    const job = this.store.enqueueThreadJob(botId, route.threadChannelId, message, log.id, receiptReactionId)
-    return this.scheduleJob(job.id, log.id, botId, provider, route, message, receiptReactionId)
+    finally { this.pendingReceipts.delete(accepted.job.id) }
+    return this.scheduleJob(accepted.job.id, accepted.log.id, botId, provider, route, message, receiptReactionId)
   }
 
   private prepareRoute(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): ResolvedRoute | null {
@@ -88,10 +137,12 @@ export class FeishuBotManager {
     return this.store.resolveThreadRouting(baseRoute, message)
   }
 
-  resumeQueuedJobs(): void {
+  resumeQueuedJobs(minimumAgeMs = 0): void {
+    this.lastQueueScanAt = new Date().toISOString()
     for (const { job, message } of this.store.listQueuedThreadJobs()) {
       const provider = this.providers.get(job.botId)?.provider
-      if (!provider || this.scheduledJobs.has(job.id)) continue
+      if (!provider || this.scheduledJobs.has(job.id) || this.pendingReceipts.has(job.id)) continue
+      if (minimumAgeMs > 0 && Date.now() - Date.parse(job.createdAt) < minimumAgeMs) continue
       try {
         const baseRoute = this.store.resolveRoute(job.botId, message)
         const route = job.attempts > 0
@@ -99,6 +150,11 @@ export class FeishuBotManager {
           : this.store.resolveThreadRouting(baseRoute, message)
         void this.scheduleJob(job.id, job.logId, job.botId, provider, route, message, job.receiptReactionId)
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error)
+        this.lastError = detail
+        try { this.store.failThreadJob(job.id, detail) }
+        catch (persistError) { console.error(`[feishu] failed to persist restore error for Thread job ${job.id}:`, persistError) }
+        void this.finishReaction(provider, message.messageId, job.receiptReactionId, 'ERROR')
         console.error(`[feishu] failed to restore Thread job ${job.id}:`, error)
       }
     }
@@ -116,8 +172,7 @@ export class FeishuBotManager {
         this.store.finishThreadJob(jobId, result.ok ? 'completed' : 'failed', result.error)
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
-        this.store.finishThreadJob(jobId, 'failed', detail)
-        try { this.store.finishMessageLog(logId, { error: detail }) } catch { /* log may already be terminal */ }
+        this.store.failThreadJob(jobId, detail)
         await this.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
       }
     })

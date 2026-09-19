@@ -39,3 +39,12 @@ export interface DashboardOverview {
     routes: Array<{ type: string; count: number }>
   }
 }
+export interface SystemHealth {
+  status: 'healthy'|'attention'
+  checkedAt: string
+  startedAt: string
+  uptimeSeconds: number
+  store: { database: { ok: boolean; result: string }; queue: { queued: number; processing: number; staleProcessing: number; oldestQueuedAt: string }; profiles: { queued: number; failed: number } }
+  feishu: { configuredBots: number; activeProviders: number; connectedProviders: number; scheduledJobs: number; activeChannels: number; lastQueueScanAt: string; lastError: string; providers: Array<{ botId: string; botName: string; state: string; error: string }> }
+  runtime: { initialized: boolean; attachedChannels: number }
+}

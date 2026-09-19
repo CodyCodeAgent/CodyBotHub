@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, StoreHealthRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
@@ -923,6 +923,32 @@ export class HubStore {
     }
   }
 
+  systemHealth(staleAfterMs = 20 * 60_000): StoreHealthRecord {
+    let database = { ok: false, result: 'unknown' }
+    try {
+      const row = this.db.prepare('PRAGMA quick_check(1)').get() as Row | undefined
+      const result = String(row ? Object.values(row)[0] : 'no result')
+      database = { ok: result === 'ok', result }
+    } catch (error) {
+      database = { ok: false, result: error instanceof Error ? error.message : String(error) }
+    }
+    const staleBefore = new Date(Date.now() - Math.max(60_000, staleAfterMs)).toISOString()
+    const queue = this.db.prepare(`SELECT
+      SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
+      SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing,
+      SUM(CASE WHEN status = 'processing' AND started_at <> '' AND started_at < ? THEN 1 ELSE 0 END) AS stale_processing,
+      MIN(CASE WHEN status = 'queued' THEN created_at END) AS oldest_queued_at
+      FROM thread_jobs`).get(staleBefore) as Row
+    const profiles = this.db.prepare(`SELECT COUNT(*) AS queued, SUM(CASE WHEN error <> '' THEN 1 ELSE 0 END) AS failed FROM thread_profile_jobs`).get() as Row
+    return {
+      database,
+      queue: {
+        queued: Number(queue.queued || 0), processing: Number(queue.processing || 0), staleProcessing: Number(queue.stale_processing || 0), oldestQueuedAt: String(queue.oldest_queued_at || ''),
+      },
+      profiles: { queued: Number(profiles.queued || 0), failed: Number(profiles.failed || 0) },
+    }
+  }
+
   createMessageLog(botId: string, route: ResolvedRoute, message: ChannelInboundMessage): MessageLogRecord {
     const id = randomUUID()
     const startedAt = now()
@@ -948,6 +974,21 @@ export class HubStore {
     return this.getMessageLog(id)
   }
 
+  acceptInboundMessage(botId: string, route: ResolvedRoute, message: ChannelInboundMessage): { log: MessageLogRecord; job: ThreadJobRecord } | null {
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare('DELETE FROM inbound_events WHERE received_at < ?').run(new Date(Date.now() - 8 * 60 * 60_000).toISOString())
+      const duplicate = this.db.prepare('SELECT 1 FROM message_logs WHERE bot_id = ? AND message_id = ?').get(botId, message.messageId)
+      if (duplicate) { this.db.exec('ROLLBACK'); return null }
+      const claim = this.db.prepare('INSERT OR IGNORE INTO inbound_events (bot_id, event_id, message_id, received_at) VALUES (?, ?, ?, ?)').run(botId, message.eventId, message.messageId, now())
+      if (!claim.changes) { this.db.exec('ROLLBACK'); return null }
+      const log = this.createMessageLog(botId, route, message)
+      const job = this.enqueueThreadJob(botId, route.threadChannelId, message, log.id)
+      this.db.exec('COMMIT')
+      return { log, job }
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
   finishMessageLog(id: string, update: { responseContent?: string; error?: string }): MessageLogRecord {
     const current = this.getMessageLog(id)
     const completedAt = now()
@@ -962,20 +1003,6 @@ export class HubStore {
     if (!error) this.db.prepare(`INSERT INTO thread_profile_jobs (log_id, created_at, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(log_id) DO UPDATE SET error = '', updated_at = excluded.updated_at`).run(id, completedAt, completedAt)
     return this.getMessageLog(id)
-  }
-
-  failProcessingMessageLogs(error = '服务在任务完成前重启，执行已中断'): number {
-    const pending = this.db.prepare(`SELECT m.id, m.started_at FROM message_logs m WHERE m.status = 'processing' AND NOT EXISTS (
-      SELECT 1 FROM thread_jobs tj WHERE tj.log_id = m.id AND tj.status IN ('queued', 'processing')
-    )`).all() as Row[]
-    if (!pending.length) return 0
-    const completedAt = now()
-    const update = this.db.prepare("UPDATE message_logs SET status = 'failed', error = ?, completed_at = ?, duration_ms = ? WHERE id = ? AND status = 'processing'")
-    for (const row of pending) {
-      const durationMs = Math.max(0, Date.parse(completedAt) - Date.parse(String(row.started_at)))
-      update.run(error, completedAt, durationMs, String(row.id))
-    }
-    return pending.length
   }
 
   setMessageLogModel(id: string, update: { model: string; reasoningEffort: string; modelSource: ModelConfigSource; reasoningEffortSource: ModelConfigSource; fallback: boolean }): MessageLogRecord {
@@ -1013,10 +1040,27 @@ export class HubStore {
     return this.getThreadJob(id)
   }
 
-  recoverThreadJobs(): number {
+  recoverInterruptedWork(error = '服务在任务完成前重启，执行已中断'): { jobs: number; messages: number } {
     const timestamp = now()
-    return Number(this.db.prepare(`UPDATE thread_jobs SET status = 'failed', error = '服务重启时任务仍在执行，已停止以避免重复执行', completed_at = ?, updated_at = ? WHERE status = 'processing'`)
-      .run(timestamp, timestamp).changes)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      const jobs = Number(this.db.prepare(`UPDATE thread_jobs SET status = 'failed', error = ?, completed_at = ?, updated_at = ? WHERE status = 'processing'`)
+        .run(error, timestamp, timestamp).changes)
+      const pending = this.db.prepare(`SELECT m.id, m.started_at FROM message_logs m WHERE m.status = 'processing' AND NOT EXISTS (
+        SELECT 1 FROM thread_jobs tj WHERE tj.log_id = m.id AND tj.status IN ('queued', 'processing')
+      )`).all() as Row[]
+      const updateLog = this.db.prepare("UPDATE message_logs SET status = 'failed', error = ?, completed_at = ?, duration_ms = ? WHERE id = ? AND status = 'processing'")
+      const updateAttempt = this.db.prepare(`UPDATE message_attempts SET status = 'failed', error = ?, completed_at = ?, duration_ms = ?, updated_at = ?
+        WHERE log_id = ? AND attempt_number = (SELECT attempts FROM thread_jobs WHERE log_id = ?)`)
+      let messages = 0
+      for (const row of pending) {
+        const id = String(row.id), durationMs = Math.max(0, Date.parse(timestamp) - Date.parse(String(row.started_at)))
+        messages += Number(updateLog.run(error, timestamp, durationMs, id).changes)
+        updateAttempt.run(error, timestamp, durationMs, timestamp, id, id)
+      }
+      this.db.exec('COMMIT')
+      return { jobs, messages }
+    } catch (cause) { this.db.exec('ROLLBACK'); throw cause }
   }
 
   listQueuedThreadJobs(limit = 200): Array<{ job: ThreadJobRecord; message: ChannelInboundMessage }> {
@@ -1041,6 +1085,21 @@ export class HubStore {
     const timestamp = now()
     this.db.prepare('UPDATE thread_jobs SET status = ?, error = ?, completed_at = ?, updated_at = ? WHERE id = ?')
       .run(status, error.slice(0, 20_000), timestamp, timestamp, id)
+  }
+
+  failThreadJob(id: string, error: string): void {
+    const job = this.getThreadJob(id)
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.finishThreadJob(id, 'failed', error)
+      if (this.getMessageLog(job.logId).status === 'processing') this.finishMessageLog(job.logId, { error })
+      this.db.exec('COMMIT')
+    } catch (cause) { this.db.exec('ROLLBACK'); throw cause }
+  }
+
+  setThreadJobReceiptReaction(id: string, receiptReactionId: string): void {
+    const result = this.db.prepare('UPDATE thread_jobs SET receipt_reaction_id = ?, updated_at = ? WHERE id = ?').run(receiptReactionId, now(), id)
+    if (!result.changes) throw new Error('Thread Job not found')
   }
 
   getThreadJob(id: string): ThreadJobRecord {
@@ -1516,12 +1575,6 @@ export class HubStore {
     chatId: String(row.chat_id), chatName: String(row.chat_name), chatMode: String(row.chat_mode) as ConversationThreadRecord['chatMode'], topicId: String(row.topic_id),
     coreThreadId: String(row.core_thread_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   })
-
-  claimInboundEvent(botId: string, eventId: string, messageId: string): boolean {
-    this.db.prepare('DELETE FROM inbound_events WHERE received_at < ?').run(new Date(Date.now() - 8 * 60 * 60_000).toISOString())
-    const result = this.db.prepare('INSERT OR IGNORE INTO inbound_events (bot_id, event_id, message_id, received_at) VALUES (?, ?, ?, ?)').run(botId, eventId, messageId, now())
-    return result.changes > 0
-  }
 
   createProvisioningJob(request: Record<string, unknown>): ProvisioningJobRecord {
     const id = randomUUID(), timestamp = now()

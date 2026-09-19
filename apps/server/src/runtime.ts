@@ -203,6 +203,10 @@ export class CodyBotRuntime {
     this.attached.clear()
   }
 
+  health(): { initialized: boolean; attachedChannels: number } {
+    return { initialized: Boolean(this.manager && this.host), attachedChannels: this.attached.size }
+  }
+
   async listSkills(workspacePath: string): Promise<CodexSkillOption[]> {
     const manager = await this.ensureManager()
     return manager.listSkills([realpathSync.native(workspacePath)], true)

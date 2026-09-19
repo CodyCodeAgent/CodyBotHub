@@ -61,7 +61,11 @@ Each conversation key is permanently bound to one Thread Channel after its first
 
 Scene, Workspace and Skill Package never become part of the Channel identity. They are resolved again for every message, so one Channel can process turns through different Scenes while retaining one native Codex history. Scene scope is used only when selecting a historical Channel for a previously unbound conversation. A topic routing context may remember the most recent specifically matched Scene for later follow-ups, but it does not own or split the Channel.
 
-`thread_jobs` persists queue state. Queued jobs survive a service restart and resume after the Bot provider connects. A job that was already running is marked failed on restart instead of being replayed, because its Codex turn may already have invoked external tools.
+Inbound acceptance is one SQLite transaction: the deduplication claim, message audit record and `thread_jobs` row either commit together or all roll back. A permanent `message_logs(bot_id, message_id)` check prevents a delayed Feishu retry from being executed again after the short-lived inbox claim expires.
+
+`thread_jobs` persists queue state. A periodic dispatcher scans queued rows, so work resumes after the Bot provider connects and also self-heals if an in-process scheduling handoff is interrupted. A job that was already running is atomically marked failed together with its message record on restart instead of being replayed, because its Codex turn may already have invoked external tools.
+
+`GET /api/system-health` reports SQLite `quick_check`, queue depth and stale work, profile jobs, Feishu provider state, process uptime and runtime attachment counts. The management overview uses this independently from historical message statistics, so an idle healthy system is not mistaken for an unhealthy one.
 
 ## Unknown groups
 

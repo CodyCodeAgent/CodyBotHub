@@ -6,7 +6,7 @@ import { FEISHU_MESSAGE_TYPES } from '@codycodeagent/cody-web-core/feishu'
 import { AuthService } from './auth.js'
 import { SecretVault } from './crypto.js'
 import { HubStore } from './db.js'
-import type { SceneRecord, SkillPackageRecord } from './types.js'
+import type { SceneRecord, SkillPackageRecord, SystemHealthRecord } from './types.js'
 import type { FeishuProvisioningService, ProvisioningRequest } from './provisioning.js'
 import { listBrowsableDirectories } from './directories.js'
 import type { CodyBotRuntime } from './runtime.js'
@@ -56,11 +56,12 @@ export interface HubServerOptions {
   webDist?: string
   onConfigurationChanged?: () => void | Promise<void>
   onMessageRetry?: () => void | Promise<void>
+  getSystemHealth?: () => SystemHealthRecord
   provisioning: FeishuProvisioningService
   skills: SkillSyncService
 }
 
-export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, provisioning, skills }: HubServerOptions) => {
+export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, getSystemHealth, provisioning, skills }: HubServerOptions) => {
   const auth = new AuthService(store)
 
   return createServer(async (request, response) => {
@@ -85,6 +86,8 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (!auth.isAuthenticated(request)) throw new HttpError(401, 'Authentication required')
         const actor = auth.currentAccount(request)!
         const audit = (action: string, targetType: string, targetId: string, summary: string, details: Record<string, unknown> = {}) => store.createAuditLog({ actor, action, targetType, targetId, summary, details, ipAddress: requestIp(request) })
+
+        if (method === 'GET' && url.pathname === '/api/system-health') return sendJson(response, 200, getSystemHealth?.() ?? null)
 
         if (method === 'GET' && url.pathname === '/api/preferences') return sendJson(response, 200, { theme: actor.theme })
         if (method === 'PUT' && url.pathname === '/api/preferences') {
