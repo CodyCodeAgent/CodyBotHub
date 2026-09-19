@@ -208,6 +208,25 @@ export interface MessageLogRecord {
   durationMs: number | null
 }
 
+export interface MessageAttemptRecord {
+  id: string
+  logId: string
+  attemptNumber: number
+  status: 'queued' | 'processing' | 'completed' | 'failed'
+  requestedByAccountId: string
+  requestedByLoginName: string
+  requestedByDisplayName: string
+  responseContent: string
+  error: string
+  model: string
+  reasoningEffort: string
+  startedAt: string
+  completedAt: string
+  durationMs: number | null
+  createdAt: string
+  updatedAt: string
+}
+
 export interface AdminAccountRecord {
   id: string
   loginName: string

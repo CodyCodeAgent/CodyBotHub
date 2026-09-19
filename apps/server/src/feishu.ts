@@ -88,12 +88,15 @@ export class FeishuBotManager {
     return this.store.resolveThreadRouting(baseRoute, message)
   }
 
-  private resumeQueuedJobs(): void {
+  resumeQueuedJobs(): void {
     for (const { job, message } of this.store.listQueuedThreadJobs()) {
       const provider = this.providers.get(job.botId)?.provider
       if (!provider || this.scheduledJobs.has(job.id)) continue
       try {
-        const route = this.store.resolveThreadRouting(this.store.resolveRoute(job.botId, message), message)
+        const baseRoute = this.store.resolveRoute(job.botId, message)
+        const route = job.attempts > 0
+          ? { ...baseRoute, threadChannelId: job.threadChannelId, threadRouting: { type: 'fixed' as const, matchedThreadId: this.store.getThreadChannel(job.threadChannelId).threadId, score: 1, reason: '管理员手动重试，沿用原 Thread Channel' } }
+          : this.store.resolveThreadRouting(baseRoute, message)
         void this.scheduleJob(job.id, job.logId, job.botId, provider, route, message, job.receiptReactionId)
       } catch (error) {
         console.error(`[feishu] failed to restore Thread job ${job.id}:`, error)

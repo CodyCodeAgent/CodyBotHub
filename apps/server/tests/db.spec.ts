@@ -53,6 +53,44 @@ describe('HubStore invariants', () => {
     store.close()
   })
 
+  it('retries a failed message on its original Thread Channel and preserves every attempt', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Retry')
+    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id })
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-retry', messageId: 'message-retry',
+      conversation: { id: 'oc_retry', scope: 'group' as const }, sender: { id: 'ou_retry', type: 'user' as const },
+      content: { type: 'text' }, text: 'retry this investigation', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+    store.setThreadChannelCoreThread(route.threadChannelId, 'core-thread-retry')
+    const log = store.createMessageLog(bot.id, route, message)
+    const job = store.enqueueThreadJob(bot.id, route.threadChannelId, message, log.id)
+    expect(store.startThreadJob(job.id)).toBe(true)
+    store.finishMessageLog(log.id, { responseContent: 'partial answer', error: 'temporary failure' })
+    store.finishThreadJob(job.id, 'failed', 'temporary failure')
+
+    const retried = store.retryMessageLog(log.id, { id: 'admin-1', loginName: 'admin', displayName: '管理员' })
+    expect(retried.log).toMatchObject({ status: 'processing', threadChannelId: route.threadChannelId, coreThreadId: 'core-thread-retry' })
+    expect(retried.job).toMatchObject({ status: 'queued', attempts: 1, threadChannelId: route.threadChannelId })
+    expect(retried.attempts).toMatchObject([
+      { attemptNumber: 1, status: 'failed', error: 'temporary failure' },
+      { attemptNumber: 2, status: 'queued', requestedByDisplayName: '管理员' },
+    ])
+
+    expect(store.startThreadJob(job.id)).toBe(true)
+    expect(store.listMessageAttempts(log.id).at(-1)).toMatchObject({ attemptNumber: 2, status: 'processing', requestedByLoginName: 'admin' })
+    store.finishMessageLog(log.id, { responseContent: 'recovered' })
+    store.finishThreadJob(job.id, 'completed')
+    expect(store.listMessageAttempts(log.id)).toMatchObject([
+      { attemptNumber: 1, status: 'failed', responseContent: 'partial answer' },
+      { attemptNumber: 2, status: 'completed', responseContent: 'recovered', requestedByDisplayName: '管理员' },
+    ])
+    expect(() => store.retryMessageLog(log.id, { id: 'admin-1', loginName: 'admin', displayName: '管理员' })).toThrow('Only failed messages')
+    store.close()
+  })
+
   it('rejects a Scene Workspace outside its Bot', () => {
     const store = new HubStore(':memory:')
     const attached = workspace(store, 'Attached')

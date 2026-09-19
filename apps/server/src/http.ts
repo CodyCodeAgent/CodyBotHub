@@ -55,11 +55,12 @@ export interface HubServerOptions {
   runtime: CodyBotRuntime
   webDist?: string
   onConfigurationChanged?: () => void | Promise<void>
+  onMessageRetry?: () => void | Promise<void>
   provisioning: FeishuProvisioningService
   skills: SkillSyncService
 }
 
-export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, provisioning, skills }: HubServerOptions) => {
+export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, provisioning, skills }: HubServerOptions) => {
   const auth = new AuthService(store)
 
   return createServer(async (request, response) => {
@@ -225,6 +226,17 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
             query: url.searchParams.get('query') ?? '',
           }))
         }
+        const messageLogAction = url.pathname.match(/^\/api\/message-logs\/([^/]+)\/(attempts|retry)$/u)
+        if (messageLogAction) {
+          const logId = decodeURIComponent(messageLogAction[1]!), action = messageLogAction[2]
+          if (method === 'GET' && action === 'attempts') return sendJson(response, 200, store.listMessageAttempts(logId))
+          if (method === 'POST' && action === 'retry') {
+            const result = store.retryMessageLog(logId, actor)
+            audit('message.retry', 'message_log', logId, `重试失败消息 ${result.log.messageId}`, { attemptNumber: result.attempts.at(-1)?.attemptNumber, threadChannelId: result.log.threadChannelId, coreThreadId: result.log.coreThreadId })
+            await onMessageRetry?.()
+            return sendJson(response, 202, result)
+          }
+        }
         const messageLogId = matchId(url.pathname, '/api/message-logs/')
         if (messageLogId && method === 'GET') return sendJson(response, 200, store.getMessageLog(messageLogId))
         if (method === 'GET' && url.pathname === '/api/settings') return sendJson(response, 200, store.getPlatformSettings())
@@ -362,7 +374,7 @@ const messageStatus = (error: unknown): number => {
   if (message.includes('not found')) return 404
   if (message.includes('Invalid account or password')) return 401
   if (message.includes('Too many login')) return 429
-  if (message.includes('required') || message.includes('must') || message.includes('still use') || message.includes('different Workspace') || message.includes('Cannot delete') || message.includes('contain') || message.includes('unavailable') || message.includes('unsupported')) return 400
+  if (message.includes('required') || message.includes('must') || message.includes('still use') || message.includes('different Workspace') || message.includes('Cannot delete') || message.includes('contain') || message.includes('unavailable') || message.includes('unsupported') || message.includes('can be retried')) return 400
   return 500
 }
 

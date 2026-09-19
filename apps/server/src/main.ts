@@ -30,7 +30,7 @@ const runtime = new CodyBotRuntime(store, runtimeDirectory, codexCommand, Number
 const feishu = new FeishuBotManager(store, vault, runtime, path.join(dataDir, 'attachments'))
 const provisioning = new FeishuProvisioningService(store, vault, () => feishu.reload())
 const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))
-const server = createHubServer({ store, vault, runtime, webDist, provisioning, skills, onConfigurationChanged: () => feishu.reload() })
+const server = createHubServer({ store, vault, runtime, webDist, provisioning, skills, onConfigurationChanged: () => feishu.reload(), onMessageRetry: () => feishu.resumeQueuedJobs() })
 
 let nextThreadProfileRefreshAt = 0
 const refreshThreadProfiles = () => {

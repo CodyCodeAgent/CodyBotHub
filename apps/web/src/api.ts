@@ -1,4 +1,4 @@
-import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, DashboardOverview, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Workspace, WorkspaceResources } from './types'
+import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -56,6 +56,8 @@ export const api = {
     return request<{ items: MessageLog[]; total: number }>(`/message-logs${params.size ? `?${params.toString()}` : ''}`)
   },
   messageLog: (id: string) => request<MessageLog>(`/message-logs/${encodeURIComponent(id)}`),
+  messageAttempts: (id: string) => request<MessageAttempt[]>(`/message-logs/${encodeURIComponent(id)}/attempts`),
+  retryMessage: (id: string) => request<{ log: MessageLog; job: ThreadJob; attempts: MessageAttempt[] }>(`/message-logs/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
   models: () => request<ModelCatalog>('/models'),
   settings: () => request<PlatformSettings>('/settings'),
   saveSettings: (value: PlatformSettings) => request<PlatformSettings>('/settings', { method: 'PUT', body: JSON.stringify(value) }),

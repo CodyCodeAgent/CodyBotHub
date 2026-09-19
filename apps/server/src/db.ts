@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
@@ -324,6 +324,25 @@ export class HubStore {
         updated_at TEXT NOT NULL,
         UNIQUE (bot_id, message_id)
       );
+      CREATE TABLE IF NOT EXISTS message_attempts (
+        id TEXT PRIMARY KEY,
+        log_id TEXT NOT NULL REFERENCES message_logs(id) ON DELETE CASCADE,
+        attempt_number INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'processing', 'completed', 'failed')),
+        requested_by_account_id TEXT NOT NULL DEFAULT '',
+        requested_by_login_name TEXT NOT NULL DEFAULT '',
+        requested_by_display_name TEXT NOT NULL DEFAULT '',
+        response_content TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        model TEXT NOT NULL DEFAULT '',
+        reasoning_effort TEXT NOT NULL DEFAULT '',
+        started_at TEXT NOT NULL DEFAULT '',
+        completed_at TEXT NOT NULL DEFAULT '',
+        duration_ms INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (log_id, attempt_number)
+      );
       CREATE TABLE IF NOT EXISTS skill_sources (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -360,6 +379,7 @@ export class HubStore {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_channels_core ON thread_channels(core_thread_id) WHERE core_thread_id <> '';
       CREATE INDEX IF NOT EXISTS idx_conversation_bindings_channel ON conversation_bindings(thread_channel_id);
       CREATE INDEX IF NOT EXISTS idx_thread_jobs_channel ON thread_jobs(thread_channel_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_message_attempts_log ON message_attempts(log_id, attempt_number);
       CREATE INDEX IF NOT EXISTS idx_thread_profiles_scope ON thread_profiles(bot_id, workspace_id, scene_id, last_active_at DESC);
       CREATE INDEX IF NOT EXISTS idx_thread_profile_jobs_created ON thread_profile_jobs(created_at);
       CREATE INDEX IF NOT EXISTS idx_topic_context_scene ON topic_route_contexts(scene_id);
@@ -935,6 +955,10 @@ export class HubStore {
     const error = update.error?.slice(0, 20_000) ?? ''
     this.db.prepare(`UPDATE message_logs SET response_content = ?, status = ?, error = ?, completed_at = ?, duration_ms = ? WHERE id = ?`)
       .run((update.responseContent ?? '').slice(0, 500_000), error ? 'failed' : 'completed', error, completedAt, durationMs, id)
+    this.db.prepare(`UPDATE message_attempts SET status = ?, response_content = ?, error = ?, model = (SELECT model FROM message_logs WHERE id = ?),
+      reasoning_effort = (SELECT reasoning_effort FROM message_logs WHERE id = ?), completed_at = ?, duration_ms = ?, updated_at = ?
+      WHERE log_id = ? AND attempt_number = (SELECT attempts FROM thread_jobs WHERE log_id = ?)`)
+      .run(error ? 'failed' : 'completed', (update.responseContent ?? '').slice(0, 500_000), error, id, id, completedAt, durationMs, completedAt, id, id)
     if (!error) this.db.prepare(`INSERT INTO thread_profile_jobs (log_id, created_at, updated_at) VALUES (?, ?, ?)
       ON CONFLICT(log_id) DO UPDATE SET error = '', updated_at = excluded.updated_at`).run(id, completedAt, completedAt)
     return this.getMessageLog(id)
@@ -1005,8 +1029,12 @@ export class HubStore {
 
   startThreadJob(id: string): boolean {
     const timestamp = now()
-    return this.db.prepare("UPDATE thread_jobs SET status = 'processing', attempts = attempts + 1, started_at = ?, error = '', updated_at = ? WHERE id = ? AND status = 'queued'")
+    const changed = this.db.prepare("UPDATE thread_jobs SET status = 'processing', attempts = attempts + 1, started_at = ?, completed_at = '', error = '', updated_at = ? WHERE id = ? AND status = 'queued'")
       .run(timestamp, timestamp, id).changes > 0
+    if (changed) this.db.prepare(`UPDATE message_attempts SET status = 'processing', started_at = ?, updated_at = ?
+      WHERE log_id = (SELECT log_id FROM thread_jobs WHERE id = ?) AND attempt_number = (SELECT attempts FROM thread_jobs WHERE id = ?)`)
+      .run(timestamp, timestamp, id, id)
+    return changed
   }
 
   finishThreadJob(id: string, status: 'completed' | 'failed', error = ''): void {
@@ -1029,6 +1057,87 @@ export class HubStore {
     id: String(row.id), botId: String(row.bot_id), threadChannelId: String(row.thread_channel_id), eventId: String(row.event_id), messageId: String(row.message_id),
     status: String(row.status) as ThreadJobRecord['status'], attempts: Number(row.attempts), logId: String(row.log_id), receiptReactionId: String(row.receipt_reaction_id), error: String(row.error),
     createdAt: String(row.created_at), startedAt: String(row.started_at), completedAt: String(row.completed_at), updatedAt: String(row.updated_at),
+  })
+
+  retryMessageLog(id: string, actor: Pick<AdminAccountRecord, 'id' | 'loginName' | 'displayName'>): { log: MessageLogRecord; job: ThreadJobRecord; attempts: MessageAttemptRecord[] } {
+    const logRow = this.db.prepare('SELECT * FROM message_logs WHERE id = ?').get(id) as Row | undefined
+    if (!logRow) throw new Error('Message log not found')
+    if (String(logRow.status) !== 'failed') throw new Error('Only failed messages can be retried')
+    const jobRow = this.db.prepare('SELECT * FROM thread_jobs WHERE log_id = ?').get(id) as Row | undefined
+    if (!jobRow) throw new Error('Thread Job not found')
+    if (String(jobRow.status) !== 'failed') throw new Error('Only failed Thread Jobs can be retried')
+    let message: ChannelInboundMessage
+    try { message = JSON.parse(String(jobRow.message_json)) as ChannelInboundMessage }
+    catch { throw new Error('Queued message payload is unavailable') }
+    const baseRoute = this.resolveRoute(String(jobRow.bot_id), message)
+    const channel = this.db.prepare('SELECT core_thread_id FROM thread_channels WHERE id = ?').get(String(jobRow.thread_channel_id)) as Row | undefined
+    if (!channel) throw new Error('Thread Channel not found')
+    const previousAttempt = Math.max(1, Number(jobRow.attempts) || 0)
+    const nextAttempt = previousAttempt + 1
+    const timestamp = now()
+    this.db.exec('BEGIN IMMEDIATE')
+    try {
+      this.db.prepare(`INSERT INTO message_attempts (
+        id, log_id, attempt_number, status, response_content, error, model, reasoning_effort,
+        started_at, completed_at, duration_ms, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(log_id, attempt_number) DO UPDATE SET status = excluded.status, response_content = excluded.response_content,
+        error = excluded.error, model = excluded.model, reasoning_effort = excluded.reasoning_effort,
+        started_at = excluded.started_at, completed_at = excluded.completed_at, duration_ms = excluded.duration_ms, updated_at = excluded.updated_at`)
+        .run(randomUUID(), id, previousAttempt, String(logRow.status), String(logRow.response_content), String(logRow.error), String(logRow.model), String(logRow.reasoning_effort), String(logRow.started_at), String(logRow.completed_at), logRow.duration_ms === null || logRow.duration_ms === undefined ? null : Number(logRow.duration_ms), timestamp, timestamp)
+      this.db.prepare(`INSERT INTO message_attempts (
+        id, log_id, attempt_number, status, requested_by_account_id, requested_by_login_name, requested_by_display_name,
+        model, reasoning_effort, created_at, updated_at
+      ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`)
+        .run(randomUUID(), id, nextAttempt, actor.id, actor.loginName, actor.displayName, baseRoute.modelConfig.model, baseRoute.modelConfig.reasoningEffort, timestamp, timestamp)
+      this.db.prepare(`UPDATE message_logs SET bot_name = ?, workspace_id = ?, workspace_name = ?, scene_id = ?, scene_name = ?,
+        skill_packages_json = ?, investigation_json = '{}', model = ?, reasoning_effort = ?, model_source = ?, reasoning_effort_source = ?,
+        model_fallback = 0, core_thread_id = ?, thread_route_type = 'fixed', matched_thread_id = ?, thread_match_score = 1,
+        thread_match_reason = '管理员手动重试，沿用原 Thread Channel', response_content = '', status = 'processing', error = '',
+        started_at = ?, completed_at = '', duration_ms = NULL WHERE id = ?`)
+        .run(baseRoute.bot.name, baseRoute.workspace.id, baseRoute.workspace.name, baseRoute.scene?.id ?? '', baseRoute.scene?.name ?? '',
+          JSON.stringify(baseRoute.skillPackages.map(item => ({ id: item.id, name: item.name }))), baseRoute.modelConfig.model,
+          baseRoute.modelConfig.reasoningEffort, baseRoute.modelConfig.modelSource, baseRoute.modelConfig.reasoningEffortSource,
+          String(channel.core_thread_id), String(channel.core_thread_id), timestamp, id)
+      this.db.prepare(`UPDATE thread_jobs SET status = 'queued', receipt_reaction_id = '', error = '', started_at = '', completed_at = '', updated_at = ? WHERE id = ?`)
+        .run(timestamp, String(jobRow.id))
+      this.db.exec('COMMIT')
+    } catch (error) { this.db.exec('ROLLBACK'); throw error }
+    return { log: this.getMessageLog(id), job: this.getThreadJob(String(jobRow.id)), attempts: this.listMessageAttempts(id) }
+  }
+
+  listMessageAttempts(logId: string): MessageAttemptRecord[] {
+    const log = this.getMessageLog(logId)
+    const jobRow = this.db.prepare('SELECT * FROM thread_jobs WHERE log_id = ?').get(logId) as Row | undefined
+    if (!jobRow) return []
+    const rows = this.db.prepare('SELECT * FROM message_attempts WHERE log_id = ? ORDER BY attempt_number').all(logId) as Row[]
+    const attempts = rows.map(this.messageAttempt)
+    const currentNumber = String(jobRow.status) === 'queued' ? Number(jobRow.attempts) + 1 : Math.max(1, Number(jobRow.attempts))
+    const currentStatus = String(jobRow.status) as MessageAttemptRecord['status']
+    const current: MessageAttemptRecord = {
+      id: attempts.find(item => item.attemptNumber === currentNumber)?.id ?? `current:${logId}:${currentNumber}`,
+      logId, attemptNumber: currentNumber, status: currentStatus,
+      requestedByAccountId: attempts.find(item => item.attemptNumber === currentNumber)?.requestedByAccountId ?? '',
+      requestedByLoginName: attempts.find(item => item.attemptNumber === currentNumber)?.requestedByLoginName ?? '',
+      requestedByDisplayName: attempts.find(item => item.attemptNumber === currentNumber)?.requestedByDisplayName ?? '',
+      responseContent: log.responseContent, error: log.error, model: log.model, reasoningEffort: log.reasoningEffort,
+      startedAt: currentStatus === 'queued' ? '' : log.startedAt, completedAt: ['completed', 'failed'].includes(currentStatus) ? log.completedAt : '',
+      durationMs: ['completed', 'failed'].includes(currentStatus) ? log.durationMs : null,
+      createdAt: attempts.find(item => item.attemptNumber === currentNumber)?.createdAt ?? log.receivedAt,
+      updatedAt: attempts.find(item => item.attemptNumber === currentNumber)?.updatedAt ?? (log.completedAt || log.startedAt),
+    }
+    const index = attempts.findIndex(item => item.attemptNumber === currentNumber)
+    if (index >= 0) attempts[index] = current
+    else attempts.push(current)
+    return attempts.sort((left, right) => left.attemptNumber - right.attemptNumber)
+  }
+
+  private messageAttempt = (row: Row): MessageAttemptRecord => ({
+    id: String(row.id), logId: String(row.log_id), attemptNumber: Number(row.attempt_number), status: String(row.status) as MessageAttemptRecord['status'],
+    requestedByAccountId: String(row.requested_by_account_id), requestedByLoginName: String(row.requested_by_login_name), requestedByDisplayName: String(row.requested_by_display_name),
+    responseContent: String(row.response_content), error: String(row.error), model: String(row.model), reasoningEffort: String(row.reasoning_effort),
+    startedAt: String(row.started_at), completedAt: String(row.completed_at), durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   })
 
   listThreadChannels(limit = 200): ThreadChannelRecord[] {
