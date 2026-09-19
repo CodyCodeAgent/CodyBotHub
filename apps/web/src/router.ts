@@ -13,12 +13,14 @@ import AuditLogsView from './views/AuditLogsView.vue'
 import ConversationThreadsView from './views/ConversationThreadsView.vue'
 import SkillsView from './views/SkillsView.vue'
 import ThreadRoutingView from './views/ThreadRoutingView.vue'
+import GuideView from './views/GuideView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/auth', name: 'auth', component: AuthView, meta: { public: true } },
     { path: '/', name: 'dashboard', component: DashboardView },
+    { path: '/guide', name: 'guide', component: GuideView },
     { path: '/workspaces', name: 'workspaces', component: WorkspacesView },
     { path: '/bots', name: 'bots', component: BotsView },
     { path: '/scenes', name: 'scenes', component: ScenesView },

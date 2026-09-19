@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Bot, Boxes, ClipboardList, GitBranch, LayoutDashboard, LibraryBig, LogOut, Menu, MessageSquareText, Puzzle, Route, Settings, Users, Workflow, X } from 'lucide-vue-next'
+import { BookOpenCheck, Bot, Boxes, ClipboardList, GitBranch, LayoutDashboard, LibraryBig, LogOut, Menu, MessageSquareText, Puzzle, Route, Settings, Users, Workflow, X } from 'lucide-vue-next'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from './api'
@@ -10,7 +10,10 @@ const router = useRouter()
 const mobileOpen = ref(false)
 const isAuth = computed(() => route.name === 'auth')
 const groups = [
-  { label: '', items: [{ to: '/', label: '运行总览', icon: LayoutDashboard }] },
+  { label: '', items: [
+    { to: '/', label: '运行总览', icon: LayoutDashboard },
+    { to: '/guide', label: '系统介绍', icon: BookOpenCheck },
+  ] },
   { label: '编排', items: [
     { to: '/workspaces', label: '工作区', icon: Boxes },
     { to: '/bots', label: '飞书 Bot', icon: Bot },
