@@ -826,10 +826,31 @@ export class HubStore {
   }
   private skillPackage = (row: Row): SkillPackageRecord => ({ id: String(row.id), workspaceId: String(row.workspace_id), name: String(row.name), description: String(row.description), prompt: String(row.prompt), skills: list(row.skills_json), fallbackMode: String(row.fallback_mode) as SkillPackageRecord['fallbackMode'], createdAt: String(row.created_at), updatedAt: String(row.updated_at) })
 
-  stats(): { workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number } {
+  stats(): {
+    workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number
+    today: { received: number; completed: number; failed: number; processing: number; reused: number; experience: number; created: number; averageDurationMs: number }
+    threads: { channels: number; bindings: number; profiles: number; queuedJobs: number; processingJobs: number }
+  } {
     const count = (table: string) => Number((this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as Row).count)
     const enabledScenes = Number((this.db.prepare('SELECT COUNT(*) AS count FROM scenes WHERE enabled = 1').get() as Row).count)
-    return { workspaces: count('workspaces'), bots: count('bots'), scenes: enabledScenes, skillPackages: count('skill_packages'), messageLogs: count('message_logs') }
+    const start = new Date(); start.setHours(0, 0, 0, 0)
+    const activity = this.db.prepare(`SELECT COUNT(*) AS received,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing,
+      SUM(CASE WHEN thread_route_type = 'reused' THEN 1 ELSE 0 END) AS reused,
+      SUM(CASE WHEN thread_route_type = 'experience' THEN 1 ELSE 0 END) AS experience,
+      SUM(CASE WHEN thread_route_type = 'new' THEN 1 ELSE 0 END) AS created,
+      AVG(CASE WHEN status = 'completed' AND duration_ms IS NOT NULL THEN duration_ms END) AS average_duration_ms
+      FROM message_logs WHERE received_at >= ?`).get(start.toISOString()) as Row
+    const queue = this.db.prepare(`SELECT
+      SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued_jobs,
+      SUM(CASE WHEN status = 'processing' THEN 1 ELSE 0 END) AS processing_jobs FROM thread_jobs`).get() as Row
+    return {
+      workspaces: count('workspaces'), bots: count('bots'), scenes: enabledScenes, skillPackages: count('skill_packages'), messageLogs: count('message_logs'),
+      today: { received: Number(activity.received), completed: Number(activity.completed), failed: Number(activity.failed), processing: Number(activity.processing), reused: Number(activity.reused), experience: Number(activity.experience), created: Number(activity.created), averageDurationMs: Number(activity.average_duration_ms || 0) },
+      threads: { channels: count('thread_channels'), bindings: count('conversation_bindings'), profiles: count('thread_profiles'), queuedJobs: Number(queue.queued_jobs), processingJobs: Number(queue.processing_jobs) },
+    }
   }
 
   createMessageLog(botId: string, route: ResolvedRoute, message: ChannelInboundMessage): MessageLogRecord {

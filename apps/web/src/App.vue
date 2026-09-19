@@ -22,7 +22,7 @@ const groups = [
   ] },
   { label: '可观测性', items: [
     { to: '/conversation-threads', label: '会话线程', icon: GitBranch },
-    { to: '/thread-routing', label: 'Thread 路由', icon: Route },
+    { to: '/thread-routing', label: '经验复用', icon: Route },
     { to: '/messages', label: '消息记录', icon: MessageSquareText },
   ] },
   { label: '系统', items: [

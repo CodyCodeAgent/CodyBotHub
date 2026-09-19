@@ -1,4 +1,4 @@
-import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Workspace, WorkspaceResources } from './types'
+import type { AdminAccount, AuditLog, Bot, ChatMetadata, ConversationThread, DashboardOverview, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -32,7 +32,7 @@ export const api = {
     return request<{ items: AuditLog[]; total: number }>(`/audit-logs${params.size ? `?${params.toString()}` : ''}`)
   },
   auditLog: (id: string) => request<AuditLog>(`/audit-logs/${encodeURIComponent(id)}`),
-  dashboard: () => request<{ workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number }>('/dashboard'),
+  dashboard: () => request<DashboardOverview>('/dashboard'),
   chats: (filters: { botId?: string; query?: string; limit?: number } = {}) => {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))

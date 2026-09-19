@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ChevronLeft, ChevronRight, MessageSquareText, RefreshCw, Search, X } from 'lucide-vue-next'
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { api } from '../api'
 import type { Bot, MessageLog, Scene } from '../types'
 
@@ -13,7 +14,8 @@ const offset = ref(0)
 const loading = ref(false)
 const error = ref('')
 const selected = ref<MessageLog | null>(null)
-const filters = reactive({ botId: '', sceneId: '', status: '', query: '' })
+const route = useRoute()
+const filters = reactive({ botId: '', sceneId: '', status: '', query: typeof route.query.query === 'string' ? route.query.query : '' })
 const page = computed(() => Math.floor(offset.value / pageSize) + 1)
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
 

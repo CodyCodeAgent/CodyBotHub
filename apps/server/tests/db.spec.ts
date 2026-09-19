@@ -361,7 +361,11 @@ describe('HubStore invariants', () => {
     expect(store.failProcessingMessageLogs()).toBe(1)
     expect(store.getMessageLog(interrupted.id)).toMatchObject({ status: 'failed', error: '服务在任务完成前重启，执行已中断' })
     expect(store.getMessageLog(interrupted.id).completedAt).not.toBe('')
-    expect(store.stats().messageLogs).toBe(2)
+    expect(store.stats()).toMatchObject({
+      messageLogs: 2,
+      today: { received: 2, completed: 1, failed: 1, processing: 0 },
+      threads: { queuedJobs: 0, processingJobs: 0 },
+    })
     store.close()
   })
 })
