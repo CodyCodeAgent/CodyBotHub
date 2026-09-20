@@ -345,6 +345,7 @@ export class FeishuBotManager {
     return [
       `工作区：${route.workspace.name}`,
       `场景：${route.scene?.name ?? '默认路由'}`,
+      `引擎：${route.bot.runtimeKind === 'traex' ? 'TraeX' : 'Codex'}`,
       `技能包：${route.skillPackages.map(item => item.name).join('、') || '无'}`,
       `模型：${modelLabel}`,
       '权限：YOLO · 允许网络与工具',

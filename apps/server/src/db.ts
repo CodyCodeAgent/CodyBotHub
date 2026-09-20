@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, StoreHealthRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AgentRuntimeKind, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, StoreHealthRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
@@ -95,6 +95,7 @@ export class HubStore {
         prompt TEXT NOT NULL DEFAULT '',
         permissions_json TEXT NOT NULL DEFAULT '[]',
         conversation_mode TEXT NOT NULL DEFAULT 'chat' CHECK (conversation_mode IN ('chat', 'topic')),
+        runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex')),
         model TEXT NOT NULL DEFAULT '',
         reasoning_effort TEXT NOT NULL DEFAULT '',
         default_workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
@@ -194,6 +195,7 @@ export class HubStore {
       CREATE TABLE IF NOT EXISTS thread_channels (
         id TEXT PRIMARY KEY,
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex')),
         core_thread_id TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
@@ -227,6 +229,7 @@ export class HubStore {
         bot_id TEXT NOT NULL,
         workspace_id TEXT NOT NULL,
         scene_id TEXT NOT NULL,
+        runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex')),
         title TEXT NOT NULL DEFAULT '',
         fields_json TEXT NOT NULL DEFAULT '{}',
         normalized_text TEXT NOT NULL DEFAULT '',
@@ -274,6 +277,7 @@ export class HubStore {
         message_id TEXT NOT NULL,
         bot_id TEXT NOT NULL,
         bot_name TEXT NOT NULL,
+        runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex')),
         chat_id TEXT NOT NULL,
         topic_id TEXT NOT NULL DEFAULT '',
         sender_id TEXT NOT NULL DEFAULT '',
@@ -404,6 +408,7 @@ export class HubStore {
     }
     if (!botColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE bots ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if (!botColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE bots ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
+    if (!botColumns.some(column => String(column.name) === 'runtime_kind')) this.db.exec("ALTER TABLE bots ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex'))")
     const settingsColumns = this.db.prepare('PRAGMA table_info(platform_settings)').all() as Row[]
     if (!settingsColumns.some(column => String(column.name) === 'default_model')) this.db.exec("ALTER TABLE platform_settings ADD COLUMN default_model TEXT NOT NULL DEFAULT ''")
     if (!settingsColumns.some(column => String(column.name) === 'default_reasoning_effort')) this.db.exec("ALTER TABLE platform_settings ADD COLUMN default_reasoning_effort TEXT NOT NULL DEFAULT ''")
@@ -435,8 +440,12 @@ export class HubStore {
     if (!messageLogColumns.some(column => String(column.name) === 'thread_match_score')) this.db.exec('ALTER TABLE message_logs ADD COLUMN thread_match_score REAL NOT NULL DEFAULT 0')
     if (!messageLogColumns.some(column => String(column.name) === 'thread_match_reason')) this.db.exec("ALTER TABLE message_logs ADD COLUMN thread_match_reason TEXT NOT NULL DEFAULT ''")
     if (!messageLogColumns.some(column => String(column.name) === 'thread_channel_id')) this.db.exec("ALTER TABLE message_logs ADD COLUMN thread_channel_id TEXT NOT NULL DEFAULT ''")
+    if (!messageLogColumns.some(column => String(column.name) === 'runtime_kind')) this.db.exec("ALTER TABLE message_logs ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex'))")
     const threadProfileColumns = this.db.prepare('PRAGMA table_info(thread_profiles)').all() as Row[]
     if (!threadProfileColumns.some(column => String(column.name) === 'thread_channel_id')) this.db.exec("ALTER TABLE thread_profiles ADD COLUMN thread_channel_id TEXT NOT NULL DEFAULT ''")
+    if (!threadProfileColumns.some(column => String(column.name) === 'runtime_kind')) this.db.exec("ALTER TABLE thread_profiles ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex'))")
+    const threadChannelColumns = this.db.prepare('PRAGMA table_info(thread_channels)').all() as Row[]
+    if (!threadChannelColumns.some(column => String(column.name) === 'runtime_kind')) this.db.exec("ALTER TABLE thread_channels ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex'))")
     const threadJobColumns = this.db.prepare('PRAGMA table_info(thread_jobs)').all() as Row[]
     if (!threadJobColumns.some(column => String(column.name) === 'receipt_reaction_id')) this.db.exec("ALTER TABLE thread_jobs ADD COLUMN receipt_reaction_id TEXT NOT NULL DEFAULT ''")
     this.db.prepare(`WITH canonical AS (
@@ -693,14 +702,14 @@ export class HubStore {
   listBots(): BotRecord[] {
     return (this.db.prepare('SELECT * FROM bots ORDER BY name COLLATE NOCASE').all() as Row[]).map(row => this.bot(row))
   }
-  createBot(input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+  createBot(input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; runtimeKind?: AgentRuntimeKind; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
     const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
     this.assertWorkspaces(workspaceIds)
     const id = randomUUID(), timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO bots (id, name, description, app_id, app_secret_encrypted, prompt, permissions_json, conversation_mode, model, reasoning_effort, default_workspace_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.description ?? '', input.appId ?? '', input.appSecretEncrypted ?? '', input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, timestamp, timestamp)
+      this.db.prepare(`INSERT INTO bots (id, name, description, app_id, app_secret_encrypted, prompt, permissions_json, conversation_mode, runtime_kind, model, reasoning_effort, default_workspace_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.description ?? '', input.appId ?? '', input.appSecretEncrypted ?? '', input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.runtimeKind ?? 'codex', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, timestamp, timestamp)
       const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
       for (const workspaceId of workspaceIds) add.run(id, workspaceId)
       this.setBotOperators(id, input.operatorIds ?? [])
@@ -708,7 +717,7 @@ export class HubStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getBot(id)
   }
-  updateBot(id: string, input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string | null; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+  updateBot(id: string, input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string | null; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; runtimeKind?: AgentRuntimeKind; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
     const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
     this.assertWorkspaces(workspaceIds)
     const current = this.db.prepare('SELECT app_secret_encrypted FROM bots WHERE id = ?').get(id) as Row | undefined
@@ -718,8 +727,8 @@ export class HubStore {
     const secret = input.appSecretEncrypted === null || input.appSecretEncrypted === undefined ? String(current.app_secret_encrypted) : input.appSecretEncrypted
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`UPDATE bots SET name = ?, description = ?, app_id = ?, app_secret_encrypted = ?, prompt = ?, permissions_json = ?, conversation_mode = ?, model = ?, reasoning_effort = ?, default_workspace_id = ?, updated_at = ? WHERE id = ?`)
-        .run(input.name, input.description ?? '', input.appId ?? '', secret, input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, now(), id)
+      this.db.prepare(`UPDATE bots SET name = ?, description = ?, app_id = ?, app_secret_encrypted = ?, prompt = ?, permissions_json = ?, conversation_mode = ?, runtime_kind = ?, model = ?, reasoning_effort = ?, default_workspace_id = ?, updated_at = ? WHERE id = ?`)
+        .run(input.name, input.description ?? '', input.appId ?? '', secret, input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.runtimeKind ?? 'codex', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, now(), id)
       this.db.prepare('DELETE FROM bot_workspaces WHERE bot_id = ?').run(id)
       const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
       for (const workspaceId of workspaceIds) add.run(id, workspaceId)
@@ -740,7 +749,7 @@ export class HubStore {
   private bot(row: Row): BotRecord {
     const workspaceIds = (this.db.prepare('SELECT workspace_id FROM bot_workspaces WHERE bot_id = ? ORDER BY workspace_id').all(String(row.id)) as Row[]).map(item => String(item.workspace_id))
     const operatorIds = (this.db.prepare('SELECT feishu_open_id FROM bot_operators WHERE bot_id = ? ORDER BY feishu_open_id').all(String(row.id)) as Row[]).map(item => String(item.feishu_open_id))
-    return { id: String(row.id), name: String(row.name), description: String(row.description), appId: String(row.app_id), hasAppSecret: Boolean(row.app_secret_encrypted), prompt: String(row.prompt), permissions: list(row.permissions_json), operatorIds, conversationMode: String(row.conversation_mode) as BotRecord['conversationMode'], model: String(row.model), reasoningEffort: String(row.reasoning_effort), defaultWorkspaceId: String(row.default_workspace_id), workspaceIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { id: String(row.id), name: String(row.name), description: String(row.description), appId: String(row.app_id), hasAppSecret: Boolean(row.app_secret_encrypted), prompt: String(row.prompt), permissions: list(row.permissions_json), operatorIds, conversationMode: String(row.conversation_mode) as BotRecord['conversationMode'], runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, model: String(row.model), reasoningEffort: String(row.reasoning_effort), defaultWorkspaceId: String(row.default_workspace_id), workspaceIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
   }
   private setBotOperators(botId: string, ids: string[]): void {
     const add = this.db.prepare('INSERT OR IGNORE INTO bot_operators (bot_id, feishu_open_id) VALUES (?, ?)')
@@ -955,14 +964,14 @@ export class HubStore {
     const channel = this.db.prepare('SELECT core_thread_id FROM thread_channels WHERE id = ?').get(route.threadChannelId) as Row | undefined
     const coreThreadId = String(channel?.core_thread_id ?? '')
     this.db.prepare(`INSERT INTO message_logs (
-      id, event_id, message_id, bot_id, bot_name, chat_id, topic_id, sender_id,
+      id, event_id, message_id, bot_id, bot_name, runtime_kind, chat_id, topic_id, sender_id,
       message_type, inbound_content, inbound_raw_json, status, workspace_id, workspace_name,
       scene_id, scene_name, skill_packages_json, investigation_json, model, reasoning_effort, model_source,
       reasoning_effort_source, model_fallback, core_thread_id, thread_route_type, matched_thread_id,
       thread_match_score, thread_match_reason, thread_channel_id, received_at, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
-        id, message.eventId, message.messageId, botId, route.bot.name,
+        id, message.eventId, message.messageId, botId, route.bot.name, route.bot.runtimeKind,
         message.conversation.id, route.topicId, message.sender.id,
         message.content?.type ?? 'unknown', message.text.slice(0, 200_000), JSON.stringify(message.content?.raw ?? null).slice(0, 500_000),
         route.workspace.id, route.workspace.name, route.scene?.id ?? '', route.scene?.name ?? '',
@@ -1021,10 +1030,10 @@ export class HubStore {
     return this.getMessageLog(id)
   }
 
-  getThreadChannel(id: string): { id: string; threadId: string } {
-    const row = this.db.prepare('SELECT id, core_thread_id FROM thread_channels WHERE id = ?').get(id) as Row | undefined
+  getThreadChannel(id: string): { id: string; threadId: string; runtimeKind: AgentRuntimeKind } {
+    const row = this.db.prepare('SELECT id, core_thread_id, runtime_kind FROM thread_channels WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new Error('Thread Channel not found')
-    return { id: String(row.id), threadId: String(row.core_thread_id) }
+    return { id: String(row.id), threadId: String(row.core_thread_id), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind }
   }
 
   setThreadChannelCoreThread(id: string, coreThreadId: string): void {
@@ -1205,7 +1214,7 @@ export class HubStore {
       (SELECT COUNT(*) FROM thread_jobs tj WHERE tj.thread_channel_id = tc.id AND tj.status = 'queued') AS queued_jobs,
       (SELECT COUNT(*) FROM thread_jobs tj WHERE tj.thread_channel_id = tc.id AND tj.status = 'processing') AS processing_jobs
       FROM thread_channels tc JOIN bots b ON b.id = tc.bot_id ORDER BY tc.updated_at DESC LIMIT ?`).all(Math.min(500, Math.max(1, limit))) as Row[]
-    return rows.map(row => ({ id: String(row.id), botId: String(row.bot_id), botName: String(row.bot_name), coreThreadId: String(row.core_thread_id), bindingCount: Number(row.binding_count), queuedJobs: Number(row.queued_jobs), processingJobs: Number(row.processing_jobs), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }))
+    return rows.map(row => ({ id: String(row.id), botId: String(row.bot_id), botName: String(row.bot_name), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, coreThreadId: String(row.core_thread_id), bindingCount: Number(row.binding_count), queuedJobs: Number(row.queued_jobs), processingJobs: Number(row.processing_jobs), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }))
   }
 
   listMessageLogs(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}): { items: MessageLogRecord[]; total: number } {
@@ -1235,7 +1244,7 @@ export class HubStore {
 
   private messageLog = (row: Row): MessageLogRecord => ({
     id: String(row.id), eventId: String(row.event_id), messageId: String(row.message_id),
-    botId: String(row.bot_id), botName: String(row.bot_name), chatId: String(row.chat_id), topicId: String(row.topic_id), senderId: String(row.sender_id),
+    botId: String(row.bot_id), botName: String(row.bot_name), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, chatId: String(row.chat_id), topicId: String(row.topic_id), senderId: String(row.sender_id),
     messageType: String(row.message_type), inboundContent: String(row.inbound_content),
     inboundRaw: (() => { try { return JSON.parse(String(row.inbound_raw_json)) as unknown } catch { return null } })(),
     responseContent: String(row.response_content),
@@ -1308,13 +1317,15 @@ export class HubStore {
     const skillPolicy = packages.some(item => item.fallbackMode === 'package_only')
       ? '本轮只允许使用技能包中列出的 Skill。'
       : packages.some(item => item.fallbackMode === 'mixed')
-        ? '本轮同时检索技能包和当前 Codex 环境中的其他 Skill。'
-        : skillNames.length ? '本轮优先使用技能包中的 Skill；无法满足时再检索当前 Codex 环境中的其他 Skill。' : ''
+        ? '本轮同时检索技能包和当前 Agent 运行环境中的其他 Skill。'
+        : skillNames.length ? '本轮优先使用技能包中的 Skill；无法满足时再检索当前 Agent 运行环境中的其他 Skill。' : ''
     const settings = this.getPlatformSettings()
-    const model = scene?.model || bot.model || settings.defaultModel
-    const reasoningEffort = scene?.reasoningEffort || bot.reasoningEffort || settings.defaultReasoningEffort
-    const modelSource: ModelConfigSource = scene?.model ? 'scene' : bot.model ? 'bot' : settings.defaultModel ? 'platform' : 'codex'
-    const reasoningEffortSource: ModelConfigSource = scene?.reasoningEffort ? 'scene' : bot.reasoningEffort ? 'bot' : settings.defaultReasoningEffort ? 'platform' : 'codex'
+    const platformModel = bot.runtimeKind === 'codex' ? settings.defaultModel : ''
+    const platformEffort = bot.runtimeKind === 'codex' ? settings.defaultReasoningEffort : ''
+    const model = scene?.model || bot.model || platformModel
+    const reasoningEffort = scene?.reasoningEffort || bot.reasoningEffort || platformEffort
+    const modelSource: ModelConfigSource = scene?.model ? 'scene' : bot.model ? 'bot' : platformModel ? 'platform' : bot.runtimeKind === 'traex' ? 'runtime' : 'codex'
+    const reasoningEffortSource: ModelConfigSource = scene?.reasoningEffort ? 'scene' : bot.reasoningEffort ? 'bot' : platformEffort ? 'platform' : bot.runtimeKind === 'traex' ? 'runtime' : 'codex'
     const layers = [settings.basePrompt, workspace.prompt, bot.prompt, scene?.prompt ?? '', ...packages.map(item => item.prompt)]
       .map(value => value.trim()).filter(Boolean)
     if (skillNames.length) layers.push(`当前场景技能包：${skillNames.join('、')}。${skillPolicy}`)
@@ -1322,9 +1333,9 @@ export class HubStore {
   }
 
   resolveThreadRouting(route: ResolvedRoute, message: ChannelInboundMessage): ResolvedRoute {
-    const existing = this.db.prepare(`SELECT cb.thread_channel_id, tc.core_thread_id FROM conversation_bindings cb
+    const existing = this.db.prepare(`SELECT cb.thread_channel_id, tc.core_thread_id, tc.runtime_kind FROM conversation_bindings cb
       JOIN thread_channels tc ON tc.id = cb.thread_channel_id WHERE cb.conversation_key = ?`).get(route.conversationKey) as Row | undefined
-    if (existing) {
+    if (existing && String(existing.runtime_kind || 'codex') === route.bot.runtimeKind) {
       const timestamp = now()
       this.db.prepare('UPDATE conversation_bindings SET updated_at = ? WHERE conversation_key = ?').run(timestamp, route.conversationKey)
       this.db.prepare('UPDATE thread_channels SET updated_at = ? WHERE id = ?').run(timestamp, String(existing.thread_channel_id))
@@ -1340,8 +1351,8 @@ export class HubStore {
       return { ...route, threadChannelId: channel.id, threadRouting: { type: 'new', matchedThreadId: channel.coreThreadId, score: 0, reason: '当前场景未启用智能 Thread 路由' } }
     }
     const cutoff = new Date(Date.now() - rule.timeWindowHours * 60 * 60_000).toISOString()
-    const rows = this.db.prepare(`SELECT * FROM thread_profiles WHERE bot_id = ? AND workspace_id = ? AND scene_id = ? AND last_active_at >= ?
-      ORDER BY last_active_at DESC LIMIT ?`).all(route.bot.id, route.workspace.id, route.scene.id, cutoff, rule.maxCandidates) as Row[]
+    const rows = this.db.prepare(`SELECT * FROM thread_profiles WHERE bot_id = ? AND workspace_id = ? AND scene_id = ? AND runtime_kind = ? AND last_active_at >= ?
+      ORDER BY last_active_at DESC LIMIT ?`).all(route.bot.id, route.workspace.id, route.scene.id, route.bot.runtimeKind, cutoff, rule.maxCandidates) as Row[]
     const current = extractThreadFeatures(message.text, message.content?.raw)
     let best: { row: Row; score: number; reason: string } | null = null
     for (const row of rows) {
@@ -1376,22 +1387,24 @@ export class HubStore {
   }
 
   private bindConversationToChannel(route: ResolvedRoute, message: ChannelInboundMessage, preferredChannelId = ''): { id: string; coreThreadId: string } {
-    const current = this.db.prepare(`SELECT tc.id, tc.core_thread_id FROM conversation_bindings cb JOIN thread_channels tc ON tc.id = cb.thread_channel_id
+    const current = this.db.prepare(`SELECT tc.id, tc.core_thread_id, tc.runtime_kind FROM conversation_bindings cb JOIN thread_channels tc ON tc.id = cb.thread_channel_id
       WHERE cb.conversation_key = ?`).get(route.conversationKey) as Row | undefined
-    if (current) return { id: String(current.id), coreThreadId: String(current.core_thread_id) }
+    if (current && String(current.runtime_kind || 'codex') === route.bot.runtimeKind) return { id: String(current.id), coreThreadId: String(current.core_thread_id) }
     const timestamp = now()
     const createdChannelId = preferredChannelId || randomUUID()
     this.db.exec('BEGIN IMMEDIATE')
     try {
       if (preferredChannelId) {
-        const target = this.db.prepare('SELECT id FROM thread_channels WHERE id = ? AND bot_id = ?').get(preferredChannelId, route.bot.id)
+        const target = this.db.prepare('SELECT id FROM thread_channels WHERE id = ? AND bot_id = ? AND runtime_kind = ?').get(preferredChannelId, route.bot.id, route.bot.runtimeKind)
         if (!target) throw new Error('Thread Channel not found')
       } else {
-        this.db.prepare(`INSERT INTO thread_channels (id, bot_id, core_thread_id, created_at, updated_at) VALUES (?, ?, '', ?, ?)`)
-          .run(createdChannelId, route.bot.id, timestamp, timestamp)
+        this.db.prepare(`INSERT INTO thread_channels (id, bot_id, runtime_kind, core_thread_id, created_at, updated_at) VALUES (?, ?, ?, '', ?, ?)`)
+          .run(createdChannelId, route.bot.id, route.bot.runtimeKind, timestamp, timestamp)
       }
-      this.db.prepare(`INSERT OR IGNORE INTO conversation_bindings (conversation_key, thread_channel_id, bot_id, conversation_mode, chat_id, topic_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(route.conversationKey, createdChannelId, route.bot.id, route.conversationMode, message.conversation.id, route.topicId, timestamp, timestamp)
+      this.db.prepare(`INSERT INTO conversation_bindings (conversation_key, thread_channel_id, bot_id, conversation_mode, chat_id, topic_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(conversation_key) DO UPDATE SET thread_channel_id = excluded.thread_channel_id, conversation_mode = excluded.conversation_mode, chat_id = excluded.chat_id, topic_id = excluded.topic_id, updated_at = excluded.updated_at`)
+        .run(route.conversationKey, createdChannelId, route.bot.id, route.conversationMode, message.conversation.id, route.topicId, timestamp, timestamp)
       const bound = this.db.prepare(`SELECT tc.id, tc.core_thread_id FROM conversation_bindings cb JOIN thread_channels tc ON tc.id = cb.thread_channel_id
         WHERE cb.conversation_key = ?`).get(route.conversationKey) as Row
       if (!preferredChannelId && String(bound.id) !== createdChannelId) this.db.prepare("DELETE FROM thread_channels WHERE id = ? AND core_thread_id = ''").run(createdChannelId)
@@ -1473,9 +1486,10 @@ export class HubStore {
     const coreThreadId = String(log.core_thread_id)
     const sceneId = String(log.scene_id)
     if (!sceneId) return
-    const logs = this.db.prepare(`SELECT * FROM message_logs WHERE core_thread_id = ? AND scene_id = ? AND status = 'completed' ORDER BY received_at DESC LIMIT 50`).all(coreThreadId, sceneId) as Row[]
+    const runtimeKind = String(log.runtime_kind || 'codex') as AgentRuntimeKind
+    const logs = this.db.prepare(`SELECT * FROM message_logs WHERE core_thread_id = ? AND scene_id = ? AND runtime_kind = ? AND status = 'completed' ORDER BY received_at DESC LIMIT 50`).all(coreThreadId, sceneId, runtimeKind) as Row[]
     if (!logs.length) return
-    const total = Number((this.db.prepare("SELECT COUNT(*) AS count FROM message_logs WHERE core_thread_id = ? AND scene_id = ? AND status = 'completed'").get(coreThreadId, sceneId) as Row).count)
+    const total = Number((this.db.prepare("SELECT COUNT(*) AS count FROM message_logs WHERE core_thread_id = ? AND scene_id = ? AND runtime_kind = ? AND status = 'completed'").get(coreThreadId, sceneId, runtimeKind) as Row).count)
     const fieldMap: Record<string, string> = {}
     const normalized: string[] = []
     for (const item of [...logs].reverse()) {
@@ -1491,13 +1505,13 @@ export class HubStore {
     const title = String(latest.inbound_content).split('\n').map(value => value.trim()).find(Boolean)?.slice(0, 300) ?? ''
     const summary = String(latest.response_content).trim().slice(0, 8_000)
     const timestamp = now()
-    this.db.prepare(`INSERT INTO thread_profiles (core_thread_id, conversation_key, thread_channel_id, bot_id, workspace_id, scene_id, title, fields_json, normalized_text,
-      experience_summary, message_count, last_message_log_id, last_active_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    this.db.prepare(`INSERT INTO thread_profiles (core_thread_id, conversation_key, thread_channel_id, bot_id, workspace_id, scene_id, runtime_kind, title, fields_json, normalized_text,
+      experience_summary, message_count, last_message_log_id, last_active_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(core_thread_id, scene_id) DO UPDATE SET conversation_key = excluded.conversation_key, thread_channel_id = excluded.thread_channel_id, bot_id = excluded.bot_id, workspace_id = excluded.workspace_id,
-      scene_id = excluded.scene_id, title = excluded.title, fields_json = excluded.fields_json, normalized_text = excluded.normalized_text,
+      scene_id = excluded.scene_id, runtime_kind = excluded.runtime_kind, title = excluded.title, fields_json = excluded.fields_json, normalized_text = excluded.normalized_text,
       experience_summary = excluded.experience_summary, message_count = excluded.message_count, last_message_log_id = excluded.last_message_log_id,
       last_active_at = excluded.last_active_at, updated_at = excluded.updated_at`)
-      .run(coreThreadId, threadChannelId, threadChannelId, String(latest.bot_id), String(latest.workspace_id), String(latest.scene_id), title, JSON.stringify(fieldMap), normalized.join('\n').slice(-50_000), summary, total, String(latest.id), String(latest.received_at), timestamp)
+      .run(coreThreadId, threadChannelId, threadChannelId, String(latest.bot_id), String(latest.workspace_id), String(latest.scene_id), runtimeKind, title, JSON.stringify(fieldMap), normalized.join('\n').slice(-50_000), summary, total, String(latest.id), String(latest.received_at), timestamp)
   }
 
   private threadRoutingRule = (row: Row): ThreadRoutingRuleRecord => ({
@@ -1505,7 +1519,7 @@ export class HubStore {
   })
 
   private threadProfile = (row: Row): ThreadProfileRecord => ({
-    coreThreadId: String(row.core_thread_id), threadChannelId: String(row.thread_channel_id || row.conversation_key), botId: String(row.bot_id), workspaceId: String(row.workspace_id), sceneId: String(row.scene_id), title: String(row.title), fields: (() => { try { return JSON.parse(String(row.fields_json)) as Record<string, string> } catch { return {} } })(), normalizedText: String(row.normalized_text), experienceSummary: String(row.experience_summary), messageCount: Number(row.message_count), lastMessageLogId: String(row.last_message_log_id), lastActiveAt: String(row.last_active_at), updatedAt: String(row.updated_at),
+    coreThreadId: String(row.core_thread_id), threadChannelId: String(row.thread_channel_id || row.conversation_key), botId: String(row.bot_id), workspaceId: String(row.workspace_id), sceneId: String(row.scene_id), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, title: String(row.title), fields: (() => { try { return JSON.parse(String(row.fields_json)) as Record<string, string> } catch { return {} } })(), normalizedText: String(row.normalized_text), experienceSummary: String(row.experience_summary), messageCount: Number(row.message_count), lastMessageLogId: String(row.last_message_log_id), lastActiveAt: String(row.last_active_at), updatedAt: String(row.updated_at),
   })
 
   messageMatchesScene(sceneId: string, message: ChannelInboundMessage): boolean {
@@ -1554,7 +1568,7 @@ export class HubStore {
     const total = Number((this.db.prepare(`SELECT COUNT(*) AS count ${from} ${where}`).get(...params) as Row).count)
     const limit = Math.min(200, Math.max(1, Math.trunc(input.limit ?? 50))), offset = Math.max(0, Math.trunc(input.offset ?? 0))
     const rows = this.db.prepare(`SELECT cb.conversation_key AS id, cb.thread_channel_id, cb.bot_id, cb.conversation_mode, cb.chat_id, cb.topic_id,
-      cb.created_at, MAX(cb.updated_at, tc.updated_at) AS updated_at, tc.core_thread_id, b.name AS bot_name,
+      cb.created_at, MAX(cb.updated_at, tc.updated_at) AS updated_at, tc.core_thread_id, tc.runtime_kind, b.name AS bot_name,
       COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode ${from} ${where}
       ORDER BY updated_at DESC, cb.conversation_key DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
     return { items: rows.map(this.conversationThread), total }
@@ -1562,7 +1576,7 @@ export class HubStore {
 
   getConversationThread(id: string): ConversationThreadRecord {
     const row = this.db.prepare(`SELECT cb.conversation_key AS id, cb.thread_channel_id, cb.bot_id, cb.conversation_mode, cb.chat_id, cb.topic_id,
-      cb.created_at, MAX(cb.updated_at, tc.updated_at) AS updated_at, tc.core_thread_id, b.name AS bot_name,
+      cb.created_at, MAX(cb.updated_at, tc.updated_at) AS updated_at, tc.core_thread_id, tc.runtime_kind, b.name AS bot_name,
       COALESCE(cm.name, '') AS chat_name, COALESCE(cm.mode, '') AS chat_mode
       FROM conversation_bindings cb JOIN thread_channels tc ON tc.id = cb.thread_channel_id JOIN bots b ON b.id = cb.bot_id
       LEFT JOIN chat_metadata cm ON cm.bot_id = cb.bot_id AND cm.chat_id = cb.chat_id WHERE cb.conversation_key = ?`).get(id) as Row | undefined
@@ -1571,7 +1585,7 @@ export class HubStore {
   }
 
   private conversationThread = (row: Row): ConversationThreadRecord => ({
-    id: String(row.id), threadChannelId: String(row.thread_channel_id), botId: String(row.bot_id), botName: String(row.bot_name), conversationMode: String(row.conversation_mode) as ConversationThreadRecord['conversationMode'],
+    id: String(row.id), threadChannelId: String(row.thread_channel_id), botId: String(row.bot_id), botName: String(row.bot_name), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, conversationMode: String(row.conversation_mode) as ConversationThreadRecord['conversationMode'],
     chatId: String(row.chat_id), chatName: String(row.chat_name), chatMode: String(row.chat_mode) as ConversationThreadRecord['chatMode'], topicId: String(row.topic_id),
     coreThreadId: String(row.core_thread_id), createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   })

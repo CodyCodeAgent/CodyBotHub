@@ -1,7 +1,7 @@
 import { registerApp } from '@larksuiteoapi/node-sdk'
 import type { SecretVault } from './crypto.js'
 import type { HubStore } from './db.js'
-import type { ProvisioningJobRecord } from './types.js'
+import type { AgentRuntimeKind, ProvisioningJobRecord } from './types.js'
 
 export interface ProvisioningRequest {
   name: string
@@ -10,6 +10,7 @@ export interface ProvisioningRequest {
   permissions: string[]
   operatorIds: string[]
   conversationMode: 'chat' | 'topic'
+  runtimeKind: AgentRuntimeKind
   model: string
   reasoningEffort: string
   defaultWorkspaceId: string

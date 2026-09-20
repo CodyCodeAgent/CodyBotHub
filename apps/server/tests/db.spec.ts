@@ -53,6 +53,30 @@ describe('HubStore invariants', () => {
     store.close()
   })
 
+  it('keeps Codex and TraeX thread identities isolated when a Bot changes engine', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Runtime switch')
+    const bot = store.createBot({ name: 'Assistant', runtimeKind: 'codex', defaultWorkspaceId: linked.id })
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-runtime-1', messageId: 'message-runtime-1',
+      conversation: { id: 'oc_runtime', scope: 'group' as const }, sender: { id: 'ou_runtime', type: 'user' as const },
+      content: { type: 'text' as const }, text: 'investigate', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const codexRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+    store.setThreadChannelCoreThread(codexRoute.threadChannelId, 'codex-thread')
+    expect(store.getThreadChannel(codexRoute.threadChannelId)).toMatchObject({ runtimeKind: 'codex', threadId: 'codex-thread' })
+
+    store.updateBot(bot.id, { name: bot.name, runtimeKind: 'traex', defaultWorkspaceId: linked.id })
+    const traexRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, { ...message, eventId: 'event-runtime-2', messageId: 'message-runtime-2' }), message)
+    expect(traexRoute.threadChannelId).not.toBe(codexRoute.threadChannelId)
+    expect(store.getThreadChannel(traexRoute.threadChannelId)).toMatchObject({ runtimeKind: 'traex', threadId: '' })
+    const log = store.createMessageLog(bot.id, traexRoute, { ...message, eventId: 'event-runtime-2', messageId: 'message-runtime-2' })
+    expect(log.runtimeKind).toBe('traex')
+    expect(store.listConversationThreads().items[0]).toMatchObject({ runtimeKind: 'traex', threadChannelId: traexRoute.threadChannelId })
+    store.close()
+  })
+
   it('retries a failed message on its original Thread Channel and preserves every attempt', () => {
     const store = new HubStore(':memory:')
     const linked = workspace(store, 'Retry')

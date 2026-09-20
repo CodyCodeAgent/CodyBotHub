@@ -15,7 +15,7 @@ const emptyHealth: SystemHealth = {
   status: 'healthy', checkedAt: '', startedAt: '', uptimeSeconds: 0,
   store: { database: { ok: true, result: 'ok' }, queue: { queued: 0, processing: 0, staleProcessing: 0, oldestQueuedAt: '' }, profiles: { queued: 0, failed: 0 } },
   feishu: { draining: false, drainStartedAt: '', activeJobs: 0, pendingReceipts: 0, configuredBots: 0, activeProviders: 0, connectedProviders: 0, scheduledJobs: 0, activeChannels: 0, lastQueueScanAt: '', lastError: '', providers: [] },
-  runtime: { initialized: false, attachedChannels: 0 },
+  runtime: { initialized: false, attachedChannels: 0, engines: [] },
 }
 const health = ref<SystemHealth>(emptyHealth)
 const loading = ref(false)

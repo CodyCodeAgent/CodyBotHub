@@ -25,7 +25,8 @@ const runtimeDirectory = path.join(dataDir, 'runtime')
 mkdirSync(runtimeDirectory, { recursive: true })
 const bundledCodex = '/Applications/ChatGPT.app/Contents/Resources/codex'
 const codexCommand = process.env.CODY_BOT_HUB_CODEX_COMMAND ?? process.env.CODEX_CLI_PATH ?? (process.platform === 'darwin' && existsSync(bundledCodex) ? bundledCodex : 'codex')
-const runtime = new CodyBotRuntime(store, runtimeDirectory, codexCommand, Number(process.env.CODY_BOT_HUB_TURN_TIMEOUT_MS ?? 15 * 60 * 1000))
+const traexCommand = process.env.CODY_BOT_HUB_TRAEX_COMMAND ?? 'traex'
+const runtime = new CodyBotRuntime(store, runtimeDirectory, { codex: codexCommand, traex: traexCommand }, Number(process.env.CODY_BOT_HUB_TURN_TIMEOUT_MS ?? 15 * 60 * 1000))
 const feishu = new FeishuBotManager(store, vault, runtime, path.join(dataDir, 'attachments'))
 const provisioning = new FeishuProvisioningService(store, vault, () => feishu.reload())
 const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))

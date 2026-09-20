@@ -7,6 +7,8 @@ export interface WorkspaceRecord {
   updatedAt: string
 }
 
+export type AgentRuntimeKind = 'codex' | 'traex'
+
 export interface BotRecord {
   id: string
   name: string
@@ -17,6 +19,7 @@ export interface BotRecord {
   permissions: string[]
   operatorIds: string[]
   conversationMode: 'chat' | 'topic'
+  runtimeKind: AgentRuntimeKind
   model: string
   reasoningEffort: string
   defaultWorkspaceId: string
@@ -73,6 +76,7 @@ export interface ThreadProfileRecord {
   botId: string
   workspaceId: string
   sceneId: string
+  runtimeKind: AgentRuntimeKind
   title: string
   fields: Record<string, string>
   normalizedText: string
@@ -83,7 +87,7 @@ export interface ThreadProfileRecord {
   updatedAt: string
 }
 
-export type ModelConfigSource = 'scene' | 'bot' | 'platform' | 'codex'
+export type ModelConfigSource = 'scene' | 'bot' | 'platform' | 'codex' | 'runtime'
 export interface ResolvedModelConfig {
   model: string
   reasoningEffort: string
@@ -179,6 +183,7 @@ export interface MessageLogRecord {
   messageId: string
   botId: string
   botName: string
+  runtimeKind: AgentRuntimeKind
   chatId: string
   topicId: string
   senderId: string
@@ -311,6 +316,7 @@ export interface ConversationThreadRecord {
   threadChannelId: string
   botId: string
   botName: string
+  runtimeKind: AgentRuntimeKind
   conversationMode: 'chat' | 'topic'
   chatId: string
   chatName: string
@@ -325,6 +331,7 @@ export interface ThreadChannelRecord {
   id: string
   botId: string
   botName: string
+  runtimeKind: AgentRuntimeKind
   coreThreadId: string
   bindingCount: number
   queuedJobs: number
@@ -392,5 +399,5 @@ export interface SystemHealthRecord {
   uptimeSeconds: number
   store: StoreHealthRecord
   feishu: FeishuManagerHealthRecord
-  runtime: { initialized: boolean; attachedChannels: number }
+  runtime: { initialized: boolean; attachedChannels: number; engines: Array<{ kind: AgentRuntimeKind; label: string; initialized: boolean; attachedChannels: number; state: string; error: string }> }
 }

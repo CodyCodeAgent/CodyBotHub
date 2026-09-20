@@ -6,7 +6,7 @@ import { FEISHU_MESSAGE_TYPES } from '@codycodeagent/cody-web-core/feishu'
 import { AuthService } from './auth.js'
 import { SecretVault } from './crypto.js'
 import { HubStore } from './db.js'
-import type { DeploymentStatusRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord } from './types.js'
+import type { AgentRuntimeKind, DeploymentStatusRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord } from './types.js'
 import type { FeishuProvisioningService, ProvisioningRequest } from './provisioning.js'
 import { listBrowsableDirectories } from './directories.js'
 import type { CodyBotRuntime } from './runtime.js'
@@ -48,6 +48,7 @@ const optional = (body: Json, key: string): string => typeof body[key] === 'stri
 const stringList = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean) : []
 const bool = (value: unknown, fallback = false): boolean => typeof value === 'boolean' ? value : fallback
 const number = (value: unknown, fallback: number): number => typeof value === 'number' && Number.isFinite(value) ? value : fallback
+const runtimeKind = (value: unknown): AgentRuntimeKind => value === 'traex' ? 'traex' : 'codex'
 const page = <T>(items: T[], url: URL, fallback = 20): { items: T[]; total: number } => {
   const requestedLimit = Number(url.searchParams.get('limit') ?? fallback)
   const requestedOffset = Number(url.searchParams.get('offset') ?? 0)
@@ -137,9 +138,9 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (method === 'GET' && url.pathname === '/api/skills') {
           const workspace = store.listWorkspaces().find(item => item.id === url.searchParams.get('workspaceId'))
           if (!workspace) throw new HttpError(404, 'Workspace not found')
-          return sendJson(response, 200, (await runtime.listSkills(workspace.path)).filter(skill => skill.enabled))
+          return sendJson(response, 200, (await runtime.listSkills(workspace.path, runtimeKind(url.searchParams.get('runtimeKind')))).filter(skill => skill.enabled))
         }
-        if (method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, await runtime.listModels())
+        if (method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, await runtime.listModels(runtimeKind(url.searchParams.get('runtimeKind'))))
 
         if (method === 'GET' && url.pathname === '/api/skill-sources/page') return sendJson(response, 200, page(store.listSkillSources(), url))
         if (method === 'GET' && url.pathname === '/api/skill-sources') return sendJson(response, 200, store.listSkillSources())
@@ -179,7 +180,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         }
         if (method === 'GET' && url.pathname === '/api/workspace-resources') {
           const workspace = store.getWorkspace(url.searchParams.get('workspaceId') ?? '')
-          const resources = await runtime.workspaceResources(workspace.path, url.searchParams.get('query') ?? '')
+          const resources = await runtime.workspaceResources(workspace.path, url.searchParams.get('query') ?? '', runtimeKind(url.searchParams.get('runtimeKind')))
           const knowledge = page(resources.knowledge, url)
           return sendJson(response, 200, { ...resources, knowledge: knowledge.items, knowledgeTotal: knowledge.total })
         }
@@ -275,7 +276,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (method === 'PUT' && url.pathname === '/api/settings') {
           const body = await readJson(request)
           const input = { basePrompt: optional(body, 'basePrompt'), defaultModel: optional(body, 'defaultModel'), defaultReasoningEffort: optional(body, 'defaultReasoningEffort'), modelFallbackEnabled: bool(body.modelFallbackEnabled, true), threadProfileRefreshIntervalSeconds: number(body.threadProfileRefreshIntervalSeconds, 5), threadProfileBatchSize: number(body.threadProfileBatchSize, 20) }
-          await runtime.validateModelSelection(input.defaultModel, input.defaultReasoningEffort)
+          await runtime.validateModelSelection('codex', input.defaultModel, input.defaultReasoningEffort)
           const result = store.setPlatformSettings(input)
           audit('settings.update', 'settings', 'platform', '更新平台设置', { defaultModel: result.defaultModel, defaultReasoningEffort: result.defaultReasoningEffort, modelFallbackEnabled: result.modelFallbackEnabled, threadProfileRefreshIntervalSeconds: result.threadProfileRefreshIntervalSeconds, threadProfileBatchSize: result.threadProfileBatchSize })
           return sendJson(response, 200, result)
@@ -285,8 +286,9 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           const body = await readJson(request)
           const defaultWorkspaceId = required(body, 'defaultWorkspaceId')
           if (!store.listWorkspaces().some(item => item.id === defaultWorkspaceId)) throw new HttpError(400, 'Workspace not found')
-          await runtime.validateModelSelection(optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const input: ProvisioningRequest = { name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId, workspaceIds: stringList(body.workspaceIds) }
+          const kind = runtimeKind(body.runtimeKind)
+          await runtime.validateModelSelection(kind, optional(body, 'model'), optional(body, 'reasoningEffort'))
+          const input: ProvisioningRequest = { name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId, workspaceIds: stringList(body.workspaceIds) }
           const job = provisioning.start(input)
           audit('bot.provision', 'provisioning', job.id, `发起飞书 Bot 自动注册：${input.name}`)
           return sendJson(response, 202, job)
@@ -322,8 +324,9 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (method === 'GET' && url.pathname === '/api/bots') return sendJson(response, 200, store.listBots())
         if (method === 'POST' && url.pathname === '/api/bots') {
           const body = await readJson(request), secret = optional(body, 'appSecret')
-          await runtime.validateModelSelection(optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const result = store.createBot({ name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
+          const kind = runtimeKind(body.runtimeKind)
+          await runtime.validateModelSelection(kind, optional(body, 'model'), optional(body, 'reasoningEffort'))
+          const result = store.createBot({ name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
           await onConfigurationChanged?.()
           audit('bot.create', 'bot', result.id, `创建飞书 Bot ${result.name}`, { appId: result.appId })
           return sendJson(response, 201, result)
@@ -331,8 +334,9 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         const botId = matchId(url.pathname, '/api/bots/')
         if (botId && method === 'PUT') {
           const body = await readJson(request), secret = optional(body, 'appSecret')
-          await runtime.validateModelSelection(optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const result = store.updateBot(botId, { name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
+          const kind = runtimeKind(body.runtimeKind)
+          await runtime.validateModelSelection(kind, optional(body, 'model'), optional(body, 'reasoningEffort'))
+          const result = store.updateBot(botId, { name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
           await onConfigurationChanged?.()
           audit('bot.update', 'bot', result.id, `更新飞书 Bot ${result.name}`, { appId: result.appId, secretChanged: Boolean(secret) })
           return sendJson(response, 200, result)
@@ -343,13 +347,15 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (method === 'GET' && url.pathname === '/api/scenes') return sendJson(response, 200, store.listScenes())
         if (method === 'POST' && url.pathname === '/api/scenes') {
           const body = await readJson(request)
-          await runtime.validateModelSelection(optional(body, 'model'), optional(body, 'reasoningEffort'))
+          const bot = store.listBots().find(item => item.id === required(body, 'botId'))
+          if (!bot) throw new HttpError(404, 'Bot not found')
+          await runtime.validateModelSelection(bot.runtimeKind, optional(body, 'model'), optional(body, 'reasoningEffort'))
           const result = store.createScene(sceneInput(body))
           audit('scene.create', 'scene', result.id, `创建场景 ${result.name}`)
           return sendJson(response, 201, result)
         }
         const sceneId = matchId(url.pathname, '/api/scenes/')
-        if (sceneId && method === 'PUT') { const body = await readJson(request); await runtime.validateModelSelection(optional(body, 'model'), optional(body, 'reasoningEffort')); const result = store.updateScene(sceneId, sceneInput(body)); audit('scene.update', 'scene', result.id, `更新场景 ${result.name}`); return sendJson(response, 200, result) }
+        if (sceneId && method === 'PUT') { const body = await readJson(request); const bot = store.listBots().find(item => item.id === required(body, 'botId')); if (!bot) throw new HttpError(404, 'Bot not found'); await runtime.validateModelSelection(bot.runtimeKind, optional(body, 'model'), optional(body, 'reasoningEffort')); const result = store.updateScene(sceneId, sceneInput(body)); audit('scene.update', 'scene', result.id, `更新场景 ${result.name}`); return sendJson(response, 200, result) }
         if (sceneId && method === 'DELETE') { const item = store.listScenes().find(value => value.id === sceneId); store.deleteScene(sceneId); audit('scene.delete', 'scene', sceneId, `删除场景 ${item?.name ?? sceneId}`); response.statusCode = 204; return response.end() }
 
         if (method === 'GET' && url.pathname === '/api/skill-packages/page') return sendJson(response, 200, page(store.listSkillPackages(), url))

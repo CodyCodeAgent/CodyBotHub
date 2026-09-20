@@ -2,11 +2,11 @@ import { existsSync, realpathSync } from 'node:fs'
 import path from 'node:path'
 import { channelCommandId, type ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import type { CodexEvent } from '@codycodeagent/cody-web-core/conversation'
-import { createAppServerHost, type AppServerHost } from '@codycodeagent/cody-web-core/runtime'
+import { createRuntimeAppServerHost, type AppServerHost } from '@codycodeagent/cody-web-core/runtime'
 import { buildTurnUserInput, CodexSessionManager, type CodexModelOption, type CodexSkillOption, type ExecutionContext, type ExecutionPolicyProvider, type TurnInput, type TurnInputSkill, type TurnOutcome } from '@codycodeagent/cody-web-core/session'
 import type { HubStore } from './db.js'
 import { readSkillSearchTags, relevance, WorkspaceResourceIndex, type KnowledgeResource } from './resources.js'
-import type { InvestigationSkillRecord, InvestigationTraceRecord, InvestigationToolRecord, ModelConfigSource, ResolvedModelConfig, ResolvedRoute } from './types.js'
+import type { AgentRuntimeKind, InvestigationSkillRecord, InvestigationTraceRecord, InvestigationToolRecord, ModelConfigSource, ResolvedModelConfig, ResolvedRoute } from './types.js'
 
 export type RuntimeAttachment = {
   path: string
@@ -48,7 +48,15 @@ type RuntimeSkillPlan = {
   trace: InvestigationTraceRecord
 }
 
-export const resolveRuntimeModel = (requested: ResolvedModelConfig, models: CodexModelOption[], configuredModel = '', configuredEffort = ''): RuntimeResolvedModel => {
+type EngineState = {
+  kind: AgentRuntimeKind
+  host: AppServerHost
+  manager: CodexSessionManager
+  attached: Set<string>
+  attaching: Map<string, Promise<void>>
+}
+
+export const resolveRuntimeModel = (requested: ResolvedModelConfig, models: CodexModelOption[], configuredModel = '', configuredEffort = '', runtimeDefaultSource: ModelConfigSource = 'codex'): RuntimeResolvedModel => {
   const visible = models.filter(item => !item.hidden)
   const findModel = (value: string) => models.find(item => item.id === value || item.model === value)
   const accountDefault = findModel(configuredModel) ?? models.find(item => item.isDefault) ?? visible[0] ?? models[0]
@@ -58,16 +66,16 @@ export const resolveRuntimeModel = (requested: ResolvedModelConfig, models: Code
   if (requested.model && !selected) {
     if (!requested.fallbackEnabled) throw new Error(`Model ${requested.model} is unavailable for the current Codex account`)
     fallback = true
-    modelSource = 'codex'
+    modelSource = runtimeDefaultSource
   }
   const actual = selected ?? accountDefault
   const model = actual?.id || actual?.model || requested.model || configuredModel
   let reasoningEffort = requested.reasoningEffort || configuredEffort || actual?.defaultReasoningEffort || ''
-  let reasoningEffortSource = requested.reasoningEffort ? requested.reasoningEffortSource : 'codex'
+  let reasoningEffortSource: ModelConfigSource = requested.reasoningEffort ? requested.reasoningEffortSource : runtimeDefaultSource
   if (reasoningEffort && actual?.supportedReasoningEfforts.length && !actual.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort'])) {
     if (!requested.fallbackEnabled) throw new Error(`Reasoning effort ${reasoningEffort} is unsupported by model ${model}`)
     reasoningEffort = actual.defaultReasoningEffort || ''
-    reasoningEffortSource = 'codex'
+    reasoningEffortSource = runtimeDefaultSource
     fallback = true
   }
   return { model, reasoningEffort, modelSource, reasoningEffortSource, fallback }
@@ -106,27 +114,26 @@ const isWithin = (root: string, filename: string): boolean => {
 }
 
 export class CodyBotRuntime {
-  private host: AppServerHost | null = null
-  private manager: CodexSessionManager | null = null
-  private readonly attached = new Set<string>()
-  private readonly attaching = new Map<string, Promise<void>>()
+  private readonly engines = new Map<AgentRuntimeKind, EngineState>()
   private readonly resources = new WorkspaceResourceIndex()
 
   constructor(
     private readonly store: HubStore,
     private readonly runtimeDirectory: string,
-    private readonly codexCommand = 'codex',
+    private readonly commands: Partial<Record<AgentRuntimeKind, string>> = { codex: 'codex', traex: 'traex' },
     private readonly turnTimeoutMs = 15 * 60 * 1000,
   ) {}
 
   async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void): Promise<string> {
     const channel = this.store.getThreadChannel(route.threadChannelId)
-    const manager = await this.ensureManager()
-    const model = await this.resolveModel(manager, route.modelConfig)
+    if (channel.runtimeKind !== route.bot.runtimeKind) throw new Error(`Thread Channel runtime mismatch: ${channel.runtimeKind} != ${route.bot.runtimeKind}`)
+    const engine = await this.ensureEngine(route.bot.runtimeKind)
+    const manager = engine.manager
+    const model = await this.resolveModel(manager, route.modelConfig, route.bot.runtimeKind)
     onModelResolved?.(model)
     const skillPlan = await this.resolveSkills(manager, route, message)
     onInvestigation?.(skillPlan.trace)
-    await this.ensureThreadChannel(manager, channel, route, skillPlan.instructions)
+    await this.ensureThreadChannel(engine, channel, route, skillPlan.instructions)
     const activeThreadId = manager.snapshot(channel.id)?.threadId ?? channel.threadId
     if (activeThreadId) onThreadResolved?.(activeThreadId)
     manager.setContext(channel.id, this.context(route, skillPlan.instructions))
@@ -175,20 +182,20 @@ export class CodyBotRuntime {
     try {
       const submission = manager.submit(channel.id, turn, 'queue', channelCommandId(message))
       turnId = (await submission.started).turnId
-      const outcome = await this.waitForCompletion(manager, channel.id, submission.completed)
-      if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || 'Codex Turn failed'))
+      const outcome = await this.waitForCompletion(manager, channel.id, submission.completed, route.bot.runtimeKind)
+      if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || `${route.bot.runtimeKind === 'traex' ? 'TraeX' : 'Codex'} Turn failed`))
       return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
     } finally {
       unsubscribe()
     }
   }
 
-  private waitForCompletion(manager: CodexSessionManager, bindingId: string, completed: Promise<TurnOutcome>): Promise<TurnOutcome> {
+  private waitForCompletion(manager: CodexSessionManager, bindingId: string, completed: Promise<TurnOutcome>, kind: AgentRuntimeKind): Promise<TurnOutcome> {
     const timeoutMs = Number.isFinite(this.turnTimeoutMs) && this.turnTimeoutMs > 0 ? this.turnTimeoutMs : 15 * 60 * 1000
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         void manager.interrupt(bindingId).catch(error => console.warn('[runtime] failed to interrupt timed out turn:', error))
-        reject(new Error(`Codex 执行超过 ${Math.ceil(timeoutMs / 60_000)} 分钟，已自动中断`))
+        reject(new Error(`${kind === 'traex' ? 'TraeX' : 'Codex'} 执行超过 ${Math.ceil(timeoutMs / 60_000)} 分钟，已自动中断`))
       }, timeoutMs)
       timer.unref?.()
       void completed.then(resolve, reject).finally(() => clearTimeout(timer))
@@ -196,25 +203,31 @@ export class CodyBotRuntime {
   }
 
   async dispose(): Promise<void> {
-    await this.manager?.dispose()
-    await this.host?.dispose()
-    this.manager = null
-    this.host = null
-    this.attached.clear()
+    await Promise.all([...this.engines.values()].map(async engine => {
+      await engine.manager.dispose()
+      await engine.host.dispose()
+    }))
+    this.engines.clear()
   }
 
-  health(): { initialized: boolean; attachedChannels: number } {
-    return { initialized: Boolean(this.manager && this.host), attachedChannels: this.attached.size }
+  health(): { initialized: boolean; attachedChannels: number; engines: Array<{ kind: AgentRuntimeKind; label: string; initialized: boolean; attachedChannels: number; state: string; error: string }> } {
+    const engines: AgentRuntimeKind[] = ['codex', 'traex']
+    const rows = engines.map(kind => {
+      const engine = this.engines.get(kind)
+      const diagnostics = engine?.host.diagnostics()
+      return { kind, label: kind === 'traex' ? 'TraeX' : 'Codex', initialized: Boolean(engine && diagnostics?.initialized), attachedChannels: engine?.attached.size ?? 0, state: diagnostics?.lifecycle ?? 'not_started', error: diagnostics?.unavailableReason ?? '' }
+    })
+    return { initialized: rows.some(item => item.initialized), attachedChannels: rows.reduce((sum, item) => sum + item.attachedChannels, 0), engines: rows }
   }
 
-  async listSkills(workspacePath: string): Promise<CodexSkillOption[]> {
-    const manager = await this.ensureManager()
+  async listSkills(workspacePath: string, kind: AgentRuntimeKind = 'codex'): Promise<CodexSkillOption[]> {
+    const manager = (await this.ensureEngine(kind)).manager
     return manager.listSkills([realpathSync.native(workspacePath)], true)
   }
 
-  async workspaceResources(workspacePath: string, query = ''): Promise<RuntimeWorkspaceResources> {
+  async workspaceResources(workspacePath: string, query = '', kind: AgentRuntimeKind = 'codex'): Promise<RuntimeWorkspaceResources> {
     const codeRoot = realpathSync.native(workspacePath)
-    const manager = await this.ensureManager()
+    const manager = (await this.ensureEngine(kind)).manager
     const [skills, knowledge, knowledgeRoots] = await Promise.all([
       manager.listSkills([codeRoot], true),
       this.resources.listKnowledge(codeRoot, query),
@@ -223,8 +236,8 @@ export class CodyBotRuntime {
     return { codeRoot, skills, knowledge, knowledgeRoots }
   }
 
-  async listModels(): Promise<RuntimeModelCatalog> {
-    const manager = await this.ensureManager()
+  async listModels(kind: AgentRuntimeKind = 'codex'): Promise<RuntimeModelCatalog> {
+    const manager = (await this.ensureEngine(kind)).manager
     const [models, config] = await Promise.all([manager.listModels(), manager.readConfig()])
     const configuredModel = config.config.model ?? ''
     const selected = models.find(item => item.id === configuredModel || item.model === configuredModel) ?? models.find(item => item.isDefault) ?? models.find(item => !item.hidden) ?? models[0]
@@ -232,8 +245,9 @@ export class CodyBotRuntime {
     return { items, defaultModel: selected?.id || selected?.model || configuredModel, defaultReasoningEffort: config.config.model_reasoning_effort ?? selected?.defaultReasoningEffort ?? '' }
   }
 
-  async validateModelSelection(model: string, reasoningEffort: string): Promise<void> {
-    const catalog = await this.listModels()
+  async validateModelSelection(kind: AgentRuntimeKind, model: string, reasoningEffort: string): Promise<void> {
+    if (!model && !reasoningEffort) return
+    const catalog = await this.listModels(kind)
     const selected = model ? catalog.items.find(item => item.id === model || item.model === model) : undefined
     if (model && !selected) throw new Error(`Model ${model} is unavailable for the current Codex account`)
     if (reasoningEffort && selected?.supportedReasoningEfforts.length && !selected.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort'])) {
@@ -242,31 +256,42 @@ export class CodyBotRuntime {
     if (reasoningEffort && !selected && !catalog.items.some(item => item.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort']))) throw new Error(`Reasoning effort ${reasoningEffort} is unavailable for the current Codex account`)
   }
 
-  private async ensureManager(): Promise<CodexSessionManager> {
-    if (this.manager) return this.manager
+  private async ensureEngine(kind: AgentRuntimeKind): Promise<EngineState> {
+    const existing = this.engines.get(kind)
+    if (existing) {
+      await existing.host.ensureInitialized()
+      return existing
+    }
     const policy: ExecutionPolicyProvider = {
       evaluate: operation => /approval/iu.test(operation.method)
         ? ({ action: 'allow', reason: 'CodyBotHub YOLO mode automatically approves tool execution.' })
         : ({ action: 'deny', reason: 'CodyBotHub cannot answer interactive questions without a user response.' }),
     }
-    this.host = createAppServerHost({
-      command: /(?:^|\s)app-server(?:\s|$)/u.test(this.codexCommand) ? this.codexCommand : `"${this.codexCommand}" app-server --stdio`,
+    const host = createRuntimeAppServerHost(kind, {
+      command: this.commands[kind] || kind,
       cwd: this.runtimeDirectory,
       initializeParams: { clientInfo: { name: 'cody-bot-hub', title: 'CodyBotHub', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } },
     })
-    this.manager = new CodexSessionManager({ host: this.host, policy })
-    await this.host.ensureInitialized()
-    return this.manager
+    const manager = new CodexSessionManager({ host, policy })
+    const state: EngineState = { kind, host, manager, attached: new Set(), attaching: new Map() }
+    this.engines.set(kind, state)
+    try {
+      await host.ensureInitialized()
+      return state
+    } catch (error) {
+      throw new Error(`${kind === 'traex' ? 'TraeX' : 'Codex'} App Server 初始化失败：${error instanceof Error ? error.message : String(error)}`)
+    }
   }
 
-  private async resolveModel(manager: CodexSessionManager, requested: ResolvedModelConfig): Promise<RuntimeResolvedModel> {
+  private async resolveModel(manager: CodexSessionManager, requested: ResolvedModelConfig, kind: AgentRuntimeKind): Promise<RuntimeResolvedModel> {
     const [models, config] = await Promise.all([manager.listModels(), manager.readConfig()])
-    return resolveRuntimeModel(requested, models, config.config.model ?? '', config.config.model_reasoning_effort ?? '')
+    return resolveRuntimeModel(requested, models, config.config.model ?? '', config.config.model_reasoning_effort ?? '', kind === 'traex' ? 'runtime' : 'codex')
   }
 
-  private async ensureThreadChannel(manager: CodexSessionManager, channel: { id: string; threadId: string }, route: ResolvedRoute, resourceInstructions: string): Promise<void> {
-    if (this.attached.has(channel.id)) return
-    const pending = this.attaching.get(channel.id)
+  private async ensureThreadChannel(engine: EngineState, channel: { id: string; threadId: string }, route: ResolvedRoute, resourceInstructions: string): Promise<void> {
+    const manager = engine.manager
+    if (engine.attached.has(channel.id)) return
+    const pending = engine.attaching.get(channel.id)
     if (pending) return pending
     const attach = (async () => {
       if (channel.threadId) await manager.resume({ id: channel.id, threadId: channel.threadId }, this.context(route, resourceInstructions))
@@ -274,9 +299,9 @@ export class CodyBotRuntime {
         const binding = await manager.create(channel.id, this.context(route, resourceInstructions))
         this.store.setThreadChannelCoreThread(channel.id, binding.threadId)
       }
-      this.attached.add(channel.id)
-    })().finally(() => this.attaching.delete(channel.id))
-    this.attaching.set(channel.id, attach)
+      engine.attached.add(channel.id)
+    })().finally(() => engine.attaching.delete(channel.id))
+    engine.attaching.set(channel.id, attach)
     return attach
   }
 
