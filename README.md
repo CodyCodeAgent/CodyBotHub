@@ -2,6 +2,20 @@
 
 CodyBotHub 是一个独立的飞书 Bot 管理平台。它以工作区为运行边界，统一管理 Bot、场景、技能包、路由，以及 Codex/TraeX Agent 会话。
 
+## 让 AI 完成安装与运维
+
+仓库内置了 [CodyBotHub Setup Skill](skills/codybothub-setup/SKILL.md)。把下面这句话交给 Codex、TraeX 或其他能读取仓库文件的 Agent：
+
+> 请读取 `skills/codybothub-setup/SKILL.md`，检查当前环境，安装缺少的依赖，完成所需 CLI 登录，部署 CodyBotHub，并用真实 App Server Turn 验证。
+
+也可以把 Skill 安装到当前用户的 Codex Skill 目录：
+
+```bash
+./skills/codybothub-setup/scripts/install-skill.sh
+```
+
+重新加载 Agent 后使用 `$codybothub-setup`。Skill 会先运行只读环境诊断，只安装缺少的 Node、pnpm、Codex 或 TraeX 组件；遇到浏览器或设备授权会把登录步骤交给用户，成功后继续构建、部署和验证，不会擅自切换已有生产 Bot 的运行引擎。
+
 ## 当前能力
 
 - 首次启动创建管理员账号；之后可管理多个“账号名 + 用户名 + 密码”的平台管理员，密码使用 Argon2id 哈希保存
