@@ -6,7 +6,7 @@ import { FEISHU_MESSAGE_TYPES } from '@codycodeagent/cody-web-core/feishu'
 import { AuthService } from './auth.js'
 import { SecretVault } from './crypto.js'
 import { HubStore } from './db.js'
-import type { SceneRecord, SkillPackageRecord, SystemHealthRecord } from './types.js'
+import type { DeploymentStatusRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord } from './types.js'
 import type { FeishuProvisioningService, ProvisioningRequest } from './provisioning.js'
 import { listBrowsableDirectories } from './directories.js'
 import type { CodyBotRuntime } from './runtime.js'
@@ -64,11 +64,12 @@ export interface HubServerOptions {
   onConfigurationChanged?: () => void | Promise<void>
   onMessageRetry?: () => void | Promise<void>
   getSystemHealth?: () => SystemHealthRecord
+  getDeploymentStatus?: () => DeploymentStatusRecord
   provisioning: FeishuProvisioningService
   skills: SkillSyncService
 }
 
-export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, getSystemHealth, provisioning, skills }: HubServerOptions) => {
+export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, getSystemHealth, getDeploymentStatus, provisioning, skills }: HubServerOptions) => {
   const auth = new AuthService(store)
 
   return createServer(async (request, response) => {
@@ -82,6 +83,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           if (origin && host && new URL(origin).host !== host) throw new HttpError(403, 'Cross-origin write rejected')
         }
         if (method === 'GET' && url.pathname === '/api/health') return sendJson(response, 200, { ok: true, product: 'CodyBotHub', core: 'CodyWebCore' })
+        if (method === 'GET' && url.pathname === '/api/deployment-status') return sendJson(response, 200, getDeploymentStatus?.() ?? null)
         if (method === 'GET' && url.pathname === '/api/auth/status') return sendJson(response, 200, auth.status(request))
         if (method === 'POST' && url.pathname === '/api/auth/setup') {
           const body = await readJson(request); await auth.setup(optional(body, 'loginName') || 'admin', optional(body, 'displayName') || '管理员', required(body, 'password'), request, response); return sendJson(response, 201, auth.status(request))

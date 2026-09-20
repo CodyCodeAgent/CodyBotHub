@@ -14,7 +14,7 @@ const stats = ref<DashboardOverview>(emptyStats)
 const emptyHealth: SystemHealth = {
   status: 'healthy', checkedAt: '', startedAt: '', uptimeSeconds: 0,
   store: { database: { ok: true, result: 'ok' }, queue: { queued: 0, processing: 0, staleProcessing: 0, oldestQueuedAt: '' }, profiles: { queued: 0, failed: 0 } },
-  feishu: { configuredBots: 0, activeProviders: 0, connectedProviders: 0, scheduledJobs: 0, activeChannels: 0, lastQueueScanAt: '', lastError: '', providers: [] },
+  feishu: { draining: false, drainStartedAt: '', activeJobs: 0, pendingReceipts: 0, configuredBots: 0, activeProviders: 0, connectedProviders: 0, scheduledJobs: 0, activeChannels: 0, lastQueueScanAt: '', lastError: '', providers: [] },
   runtime: { initialized: false, attachedChannels: 0 },
 }
 const health = ref<SystemHealth>(emptyHealth)
@@ -48,9 +48,10 @@ onUnmounted(() => {
 })
 
 const activeJobs = computed(() => health.value.store.queue.queued + health.value.store.queue.processing)
-const needsAttention = computed(() => health.value.status === 'attention' || stats.value.today.failed > 0)
+const needsAttention = computed(() => health.value.feishu.draining || health.value.status === 'attention' || stats.value.today.failed > 0)
 const healthReason = computed(() => {
   const reasons: string[] = []
+  if (health.value.feishu.draining) reasons.push(`正在等待 ${health.value.feishu.activeJobs} 个运行任务完成，新消息将暂存队列`)
   if (!health.value.store.database.ok) reasons.push('数据库检查异常')
   if (health.value.feishu.connectedProviders < health.value.feishu.configuredBots) reasons.push('Bot 连接不完整')
   if (health.value.store.queue.staleProcessing) reasons.push(`${health.value.store.queue.staleProcessing} 个任务疑似卡住`)
@@ -103,7 +104,7 @@ const routeClass = (value: string) => value === 'reused' ? 'green' : value === '
     <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
 
     <section class="health-strip" :class="{ attention: needsAttention }">
-      <div class="health-summary"><span class="health-pulse" /><div><strong>{{ needsAttention ? '有运行项需要留意' : '系统运行正常' }}</strong><p>{{ healthReason }}</p></div></div>
+      <div class="health-summary"><span class="health-pulse" /><div><strong>{{ health.feishu.draining ? '服务正在排空' : needsAttention ? '有运行项需要留意' : '系统运行正常' }}</strong><p>{{ healthReason }}</p></div></div>
       <div class="health-stat"><span>持久队列</span><strong>{{ activeJobs }}</strong><small>排队 {{ health.store.queue.queued }} · 执行 {{ health.store.queue.processing }}</small></div>
       <div class="health-stat"><span>飞书 Bot 连接</span><strong>{{ health.feishu.connectedProviders }}/{{ health.feishu.configuredBots }}</strong><small>{{ health.feishu.activeChannels }} 个 Channel 正在执行</small></div>
       <div class="health-stat"><span>SQLite</span><strong>{{ health.store.database.ok ? '正常' : '异常' }}</strong><small>{{ health.store.database.ok ? 'quick_check 已通过' : health.store.database.result }}</small></div>

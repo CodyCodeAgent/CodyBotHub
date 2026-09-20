@@ -18,6 +18,8 @@ export class FeishuBotManager {
   private queueTimer: ReturnType<typeof setInterval> | null = null
   private lastQueueScanAt = ''
   private lastError = ''
+  private draining = false
+  private drainStartedAt = ''
 
   constructor(
     private readonly store: HubStore,
@@ -49,6 +51,35 @@ export class FeishuBotManager {
     this.providers.clear()
   }
 
+  beginDrain(): void {
+    if (this.draining) return
+    this.draining = true
+    this.drainStartedAt = new Date().toISOString()
+    console.info(`[feishu] drain started; active=${this.scheduledJobs.size} pendingReceipts=${this.pendingReceipts.size}`)
+  }
+
+  cancelDrain(): void {
+    if (!this.draining) return
+    this.draining = false
+    this.drainStartedAt = ''
+    console.info('[feishu] drain cancelled; queued jobs will resume')
+    this.resumeQueuedJobs()
+  }
+
+  deploymentStatus(): { draining: boolean; drainStartedAt: string; activeJobs: number; pendingReceipts: number; activeChannels: number } {
+    return {
+      draining: this.draining,
+      drainStartedAt: this.drainStartedAt,
+      activeJobs: this.scheduledJobs.size,
+      pendingReceipts: this.pendingReceipts.size,
+      activeChannels: this.channelQueues.size,
+    }
+  }
+
+  async waitForIdle(): Promise<void> {
+    while (this.scheduledJobs.size || this.pendingReceipts.size) await new Promise(resolve => setTimeout(resolve, 200))
+  }
+
   health(): FeishuManagerHealthRecord {
     const configured = this.store.listBots().filter(bot => bot.appId && bot.hasAppSecret)
     const providers = configured.map(bot => {
@@ -56,6 +87,7 @@ export class FeishuBotManager {
       return { botId: bot.id, botName: bot.name, state: managed?.state ?? 'disconnected', error: managed?.error ?? '' }
     })
     return {
+      ...this.deploymentStatus(),
       configuredBots: configured.length,
       activeProviders: this.providers.size,
       connectedProviders: providers.filter(item => !['failed', 'disconnected', 'stopped'].includes(item.state)).length,
@@ -138,6 +170,7 @@ export class FeishuBotManager {
   }
 
   resumeQueuedJobs(minimumAgeMs = 0): void {
+    if (this.draining) return
     this.lastQueueScanAt = new Date().toISOString()
     for (const { job, message } of this.store.listQueuedThreadJobs()) {
       const provider = this.providers.get(job.botId)?.provider
@@ -161,6 +194,7 @@ export class FeishuBotManager {
   }
 
   private scheduleJob(jobId: string, logId: string, botId: string, provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage, receiptReactionId: string): Promise<void> {
+    if (this.draining) return Promise.resolve()
     if (this.scheduledJobs.has(jobId)) return Promise.resolve()
     this.scheduledJobs.add(jobId)
     const channelId = route.threadChannelId

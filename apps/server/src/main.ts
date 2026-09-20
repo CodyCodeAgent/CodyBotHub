@@ -33,9 +33,10 @@ const server = createHubServer({
   store, vault, runtime, webDist, provisioning, skills,
   onConfigurationChanged: () => feishu.reload(),
   onMessageRetry: () => feishu.resumeQueuedJobs(),
+  getDeploymentStatus: () => ({ ...feishu.deploymentStatus(), queuedJobs: store.systemHealth().queue.queued }),
   getSystemHealth: () => {
     const checkedAt = new Date(), storeHealth = store.systemHealth(), feishuHealth = feishu.health(), runtimeHealth = runtime.health()
-    const attention = !storeHealth.database.ok || storeHealth.queue.staleProcessing > 0 || feishuHealth.connectedProviders < feishuHealth.configuredBots
+    const attention = feishuHealth.draining || !storeHealth.database.ok || storeHealth.queue.staleProcessing > 0 || feishuHealth.connectedProviders < feishuHealth.configuredBots
     return {
       status: attention ? 'attention' : 'healthy', checkedAt: checkedAt.toISOString(), startedAt: startedAt.toISOString(),
       uptimeSeconds: Math.max(0, Math.floor((checkedAt.getTime() - startedAt.getTime()) / 1_000)), store: storeHealth, feishu: feishuHealth, runtime: runtimeHealth,
@@ -64,10 +65,22 @@ server.listen(port, host, () => {
   void feishu.start()
 })
 
-const shutdown = () => {
+let shuttingDown = false
+const shutdown = async (signal: string) => {
+  if (shuttingDown) return
+  shuttingDown = true
   clearInterval(threadProfileTimer)
+  feishu.beginDrain()
+  console.info(`[shutdown] ${signal} received; waiting for ${feishu.deploymentStatus().activeJobs} active jobs`)
+  await feishu.waitForIdle()
+  console.info('[shutdown] active jobs completed; stopping providers and runtime')
   feishu.stop()
-  server.close(() => { void runtime.dispose().finally(() => { store.close(); process.exit(0) }) })
+  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  await runtime.dispose()
+  store.close()
+  process.exit(0)
 }
-process.on('SIGINT', shutdown)
-process.on('SIGTERM', shutdown)
+process.on('SIGUSR2', () => feishu.beginDrain())
+process.on('SIGUSR1', () => { if (!shuttingDown) feishu.cancelDrain() })
+process.on('SIGINT', () => { void shutdown('SIGINT').catch(error => { console.error('[shutdown] failed:', error); process.exit(1) }) })
+process.on('SIGTERM', () => { void shutdown('SIGTERM').catch(error => { console.error('[shutdown] failed:', error); process.exit(1) }) })

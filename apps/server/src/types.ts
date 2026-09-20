@@ -362,6 +362,10 @@ export interface StoreHealthRecord {
 }
 
 export interface FeishuManagerHealthRecord {
+  draining: boolean
+  drainStartedAt: string
+  activeJobs: number
+  pendingReceipts: number
   configuredBots: number
   activeProviders: number
   connectedProviders: number
@@ -370,6 +374,15 @@ export interface FeishuManagerHealthRecord {
   lastQueueScanAt: string
   lastError: string
   providers: Array<{ botId: string; botName: string; state: string; error: string }>
+}
+
+export interface DeploymentStatusRecord {
+  draining: boolean
+  drainStartedAt: string
+  activeJobs: number
+  pendingReceipts: number
+  activeChannels: number
+  queuedJobs: number
 }
 
 export interface SystemHealthRecord {
