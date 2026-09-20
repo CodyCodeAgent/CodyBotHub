@@ -1555,6 +1555,13 @@ export class HubStore {
     return [...ids]
   }
 
+  latestSenderIdForChat(botId: string, chatId: string): string {
+    const row = this.db.prepare(`SELECT sender_id FROM message_logs
+      WHERE bot_id = ? AND chat_id = ? AND sender_id <> ''
+      ORDER BY received_at DESC LIMIT 1`).get(botId, chatId) as Row | undefined
+    return String(row?.sender_id ?? '')
+  }
+
   listConversationThreads(input: { limit?: number; offset?: number; botId?: string; query?: string } = {}): { items: ConversationThreadRecord[]; total: number } {
     const filters: string[] = [], params: Array<string | number> = []
     if (input.botId) { filters.push('cb.bot_id = ?'); params.push(input.botId) }

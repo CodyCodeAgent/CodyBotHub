@@ -148,9 +148,14 @@ export class FeishuBotManager {
   }
 
   private async acceptMessage(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
-    if (message.conversation.name) this.store.upsertChatMetadata(botId, {
+    let conversationName = message.conversation.name ?? ''
+    if (!conversationName && message.conversation.scope === 'private' && message.sender.type === 'user') {
+      try { conversationName = (await provider.userMetadata(message.sender.id)).name }
+      catch (error) { console.warn(`[feishu] failed to resolve user ${message.sender.id}:`, provider.classifyError(error).message) }
+    }
+    if (conversationName || message.conversation.scope === 'private') this.store.upsertChatMetadata(botId, {
       chatId: message.conversation.id,
-      name: message.conversation.name,
+      name: conversationName,
       mode: message.conversation.scope === 'topic' ? 'topic' : message.conversation.scope === 'private' ? 'p2p' : 'group',
     })
     const route = this.prepareRoute(botId, provider, message)
@@ -237,7 +242,12 @@ export class FeishuBotManager {
       await Promise.all(batch.map(async chatId => {
         try {
           const metadata = await provider.chatMetadata(chatId)
-          this.store.upsertChatMetadata(botId, { chatId, name: metadata.name, mode: metadata.mode })
+          let name = metadata.name
+          if (!name && metadata.mode === 'p2p') {
+            const senderId = this.store.latestSenderIdForChat(botId, chatId)
+            if (senderId) name = (await provider.userMetadata(senderId)).name
+          }
+          this.store.upsertChatMetadata(botId, { chatId, name, mode: metadata.mode })
         } catch (error) {
           console.warn(`[feishu] failed to resolve chat ${chatId}:`, provider.classifyError(error).message)
         }

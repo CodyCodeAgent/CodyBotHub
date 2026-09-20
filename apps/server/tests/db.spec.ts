@@ -280,9 +280,11 @@ describe('HubStore invariants', () => {
     } as const
     const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
     store.setThreadChannelCoreThread(route.threadChannelId, '01-thread-id')
+    store.createMessageLog(bot.id, route, message)
     store.upsertChatMetadata(bot.id, { chatId: 'oc_thread', name: '告警排查群', mode: 'group' })
     expect(store.listChatMetadata({ botId: bot.id, query: '告警' })).toMatchObject([{ chatId: 'oc_thread', name: '告警排查群' }])
     expect(store.listChatIdsForMetadataSync(bot.id)).toContain('oc_thread')
+    expect(store.latestSenderIdForChat(bot.id, 'oc_thread')).toBe('ou_1')
     expect(store.listConversationThreads({ query: '01-thread-id' })).toMatchObject({
       total: 1,
       items: [{ id: route.conversationKey, botName: 'Thread Bot', conversationMode: 'chat', chatId: 'oc_thread', chatName: '告警排查群', chatMode: 'group', topicId: '', coreThreadId: '01-thread-id' }],
