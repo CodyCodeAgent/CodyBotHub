@@ -58,6 +58,8 @@ pnpm dev
 
 服务器必须先安装所选 CLI，并确保服务账号能直接执行对应命令。TraeX 未安装时，现有 Codex Bot 继续正常运行；TraeX Bot 在首次读取模型或处理消息时会返回明确的 App Server 初始化错误。可以在运行总览的 Runtime 状态和服务日志中查看各引擎状态。
 
+Linux systemd 模板默认使用 `/home/gouchao/.local/bin/traex`，并将 `~/.local/bin` 加入服务 PATH。TraeX 安装完成后，应以运行 CodyBotHub 的同一系统账号执行 `traex login status`；IDE Remote Server 的登录态不会自动等同于 TraeX CLI 登录态。
+
 ## Core 依赖
 
 `@codycodeagent/cody-web-core` 固定到经过验证的 Git Tag，确保不同机器安装到相同的 Feishu 与 Agent 会话底座。Core 提供 Codex/TraeX Runtime Profile、App Server 生命周期、协议归一化与 Session Manager；Hub 负责 Bot 选择、持久路由、队列和管理界面。

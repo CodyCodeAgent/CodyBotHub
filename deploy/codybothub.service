@@ -13,7 +13,8 @@ Environment=CODY_BOT_HUB_PORT=3003
 Environment=CODY_BOT_HUB_DATA_DIR=/home/gouchao/code/github/CodyBotHub/.data
 Environment=CODY_BOT_HUB_WEB_DIST=/home/gouchao/code/github/CodyBotHub/apps/web/dist
 Environment=CODY_BOT_HUB_CODEX_COMMAND=/usr/bin/codex
-Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=CODY_BOT_HUB_TRAEX_COMMAND=/home/gouchao/.local/bin/traex
+Environment=PATH=/home/gouchao/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/node /home/gouchao/code/github/CodyBotHub/apps/server/dist/main.js
 KillSignal=SIGTERM
 TimeoutStopSec=20min
