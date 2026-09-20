@@ -4,7 +4,7 @@ import { FeishuProvider, feishuMarkdownCards, feishuSelectionCard, feishuStreami
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import type { SecretVault } from './crypto.js'
 import type { HubStore } from './db.js'
-import type { CodyBotRuntime, RuntimeAttachment, RuntimeProgress } from './runtime.js'
+import type { CodyBotRuntime, RuntimeAttachment, RuntimeProgress, RuntimeResolvedModel } from './runtime.js'
 import type { FeishuManagerHealthRecord, ResolvedRoute } from './types.js'
 
 type ManagedProvider = { provider: FeishuProvider; fingerprint: string; botName: string; state: string; error: string }
@@ -208,7 +208,7 @@ export class FeishuBotManager {
       catch (error) { console.warn('[feishu] failed to add receipt reaction:', provider.classifyError(error).message) }
     }
     if (!route.scene && message.conversation.scope !== 'private' && this.store.claimScenePicker(botId, message.conversation.id)) await this.sendScenePicker(botId, provider, message).catch(error => console.warn('[feishu] failed to send scene picker:', provider.classifyError(error).message))
-    const note = this.responseNote(route)
+    let note = this.responseNote(route)
     let streamMessageId = ''
     try {
       streamMessageId = await this.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', note }), route.replyInTopic, `${message.eventId}:answer`)
@@ -240,7 +240,10 @@ export class FeishuBotManager {
         message,
         attachments,
         schedulePatch,
-        model => this.store.setMessageLogModel(log.id, model),
+        model => {
+          this.store.setMessageLogModel(log.id, model)
+          note = this.responseNote(route, model)
+        },
         trace => this.store.setMessageLogInvestigation(log.id, trace),
         threadId => this.store.setMessageLogThread(log.id, threadId),
       )
@@ -290,11 +293,15 @@ export class FeishuBotManager {
     }))
   }
 
-  private responseNote(route: ResolvedRoute): string {
+  private responseNote(route: ResolvedRoute, resolvedModel?: RuntimeResolvedModel): string {
+    const model = resolvedModel?.model || route.modelConfig.model || 'Codex 默认'
+    const reasoningEffort = resolvedModel?.reasoningEffort || route.modelConfig.reasoningEffort
+    const modelLabel = `${model}${reasoningEffort ? ` · ${reasoningEffort}` : ''}${resolvedModel?.fallback ? ' · 已回退' : ''}`
     return [
       `工作区：${route.workspace.name}`,
       `场景：${route.scene?.name ?? '默认路由'}`,
       `技能包：${route.skillPackages.map(item => item.name).join('、') || '无'}`,
+      `模型：${modelLabel}`,
       '权限：YOLO · 允许网络与工具',
     ].join('  |  ')
   }
