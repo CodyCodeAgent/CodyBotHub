@@ -5,6 +5,7 @@ REPOSITORY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PORT=3003
 HOST='::'
 DRY_RUN=false
+export PATH="${HOME}/.local/bin:${PATH}"
 
 usage() {
   echo "Usage: $0 [--port PORT] [--host HOST] [--dry-run]" >&2
@@ -27,6 +28,11 @@ fi
 
 if [[ "$(uname -s)" != "Linux" && "${DRY_RUN}" != true ]]; then
   echo "This installer targets Linux user systemd. Use --dry-run to preview elsewhere." >&2
+  exit 1
+fi
+
+if [[ "${REPOSITORY_DIR}" =~ [[:space:]] ]]; then
+  echo "The Linux systemd installer requires a repository path without whitespace: ${REPOSITORY_DIR}" >&2
   exit 1
 fi
 
@@ -53,7 +59,7 @@ After=network-online.target
 [Service]
 EnvironmentFile=-$(escape_value "${HOME}/.config/codybothub/proxy.env")
 Type=simple
-WorkingDirectory=\"$(escape_value "${REPOSITORY_DIR}")\"
+WorkingDirectory=$(escape_value "${REPOSITORY_DIR}")
 Environment=\"NODE_ENV=production\"
 Environment=\"CODY_BOT_HUB_HOST=$(escape_value "${HOST}")\"
 Environment=\"CODY_BOT_HUB_PORT=${PORT}\"

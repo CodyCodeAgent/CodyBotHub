@@ -3,6 +3,7 @@ set -uo pipefail
 
 REPOSITORY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 PORT="${CODY_BOT_HUB_PORT:-3003}"
+export PATH="${HOME}/.local/bin:${PATH}"
 
 status_line() {
   local name="$1" status="$2" detail="$3"
