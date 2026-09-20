@@ -51,14 +51,105 @@ pnpm dev
 
 ## 部署
 
-标准部署使用仓库中的脚本，禁止直接 `systemctl restart`：
+### 为什么不能直接重启
+
+Codex Turn 可能运行几分钟甚至更久。直接执行 `systemctl restart codybothub.service` 会向进程发送停止信号；如果 systemd 在 Turn 结束前强制结束进程，本轮调查会失败，飞书只能收到中断错误。
+
+生产环境统一使用 [scripts/deploy.sh](scripts/deploy.sh)。它会在切换版本前进入**排空状态**：
+
+1. 先拉取、安装依赖并构建新版本，此时线上服务继续运行。
+2. 向服务发送 `SIGUSR2`，停止启动新的 Codex Turn。
+3. 排空期间仍然接收飞书消息，并把消息与任务持久化到 SQLite 队列。
+4. 等待正在运行的 Turn 和飞书回执处理完毕。
+5. 原子切换前端资源，重启服务并检查健康状态。
+6. 新进程启动后自动继续消费排空期间积压的任务。
+
+因此，排空不是停止接收消息，也不会丢弃消息；它只暂停从持久队列中启动新任务。
+
+### 日常发布命令
+
+发布脚本需要在部署服务器的仓库目录中运行：
 
 ```bash
-# 服务端或数据库代码有变化：先排空运行任务，再重启并恢复队列
+# 登录当前生产服务器
+ssh 'gouchao@fdbd:dc01:ff:31d:5830:b5a4:4263:f20b'
+cd /home/gouchao/code/github/CodyBotHub
+
+# 服务端、依赖或数据库代码有变化：构建、排空、重启、健康检查
 ./scripts/deploy.sh
 
-# 只有管理端页面变化：原子发布静态资源，不重启 Bot 服务
+# 只有管理端页面变化：原子发布静态资源，不重启 Bot 服务和 Codex Turn
 ./scripts/deploy.sh --web-only
 ```
 
-完整部署会先构建新版本，再向运行服务发送 `SIGUSR2` 进入排空状态。排空期间新消息仍写入 SQLite，但不会启动新的 Codex Turn；活动任务全部结束后脚本才重启服务。等待超过 20 分钟时部署取消，并发送 `SIGUSR1` 恢复队列消费。`deploy/codybothub.service` 将 systemd 停止超时同步设置为 20 分钟，作为直接停止服务时的最后保护。
+只修改 `apps/web` 时优先使用 `--web-only`。静态资源会先构建到 `dist.next`，再原子替换入口文件；浏览器刷新后加载新版本，Bot 服务的进程号和运行任务都不会变化。
+
+### 排空状态与超时
+
+运行总览每 5 秒刷新一次。发布期间会显示“服务正在排空”，并展示运行任务、待发送回执和排队任务数量。也可以直接查询：
+
+```bash
+curl --noproxy '*' http://127.0.0.1:3003/api/deployment-status
+```
+
+返回示例：
+
+```json
+{
+  "draining": true,
+  "drainStartedAt": "2026-09-20T03:44:00.846Z",
+  "activeJobs": 1,
+  "pendingReceipts": 0,
+  "activeChannels": 1,
+  "queuedJobs": 3
+}
+```
+
+- `activeJobs`：正在运行的 Codex 任务数，脚本会等待它降为 `0`。
+- `pendingReceipts`：正在处理的飞书接收确认数，脚本也会等待它降为 `0`。
+- `queuedJobs`：已经安全写入 SQLite、将在新进程启动后继续执行的任务数；它不阻止发布。
+- `activeChannels`：当前有任务运行的 Thread Channel 数。
+
+默认最多等待 20 分钟。超过时间后，发布会取消并发送 `SIGUSR1` 退出排空，线上服务继续消费队列，不会为了发布而强制杀死长任务。可按次调整等待时间：
+
+```bash
+CODY_BOT_HUB_DEPLOY_DRAIN_TIMEOUT_SECONDS=1800 ./scripts/deploy.sh
+```
+
+如果在等待期间手动按 `Ctrl+C`，脚本同样会自动退出排空并恢复任务消费。
+
+### 服务安装与检查
+
+systemd 用户服务模板位于 [deploy/codybothub.service](deploy/codybothub.service)。首次部署或模板更新后执行：
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/codybothub.service ~/.config/systemd/user/codybothub.service
+systemctl --user daemon-reload
+systemctl --user enable --now codybothub.service
+```
+
+模板将 `TimeoutStopSec` 设置为 20 分钟，作为误操作 `stop/restart` 时的最后保护。日常发布仍应使用部署脚本，因为脚本会在发送停止信号前完成构建、主动排空并验证健康状态。
+
+常用检查命令：
+
+```bash
+systemctl --user status codybothub.service
+journalctl --user -u codybothub.service -n 200 --no-pager
+curl --noproxy '*' --fail http://127.0.0.1:3003/api/health
+```
+
+服务支持的运维信号：
+
+- `SIGUSR2`：进入排空，新任务只入队、不启动。
+- `SIGUSR1`：取消排空，恢复队列消费。
+- `SIGTERM` / `SIGINT`：进入排空，等待活动任务结束，再关闭飞书连接、HTTP 服务、Codex Runtime 和 SQLite。
+
+这些信号主要供部署脚本和 systemd 使用。人工发布不要跳过脚本直接发送信号或重启服务。
+
+### 发布失败如何处理
+
+- **构建失败**：排空尚未开始，线上版本不受影响。
+- **等待超时或脚本被取消**：脚本发送 `SIGUSR1`，恢复原进程消费队列。
+- **重启后健康检查失败**：运行 `systemctl --user status` 和 `journalctl` 查看启动错误；Git 工作区仍保留当前提交，可修复后重新运行脚本。
+- **只需修复前端**：使用 `./scripts/deploy.sh --web-only`，避免无意义地重启 Bot 服务。
