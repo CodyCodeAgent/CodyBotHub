@@ -96,6 +96,12 @@ const formatDate = (value: string) => { const [, month, day] = value.split('-');
 const rate = (completed: number, failed: number) => completed + failed ? Math.round(completed / (completed + failed) * 100) : null
 const routeLabel = (value: string) => ({ fixed: '继续当前会话', new: '全新处理', reused: '复用历史会话', experience: '引用历史经验' }[value] ?? value)
 const routeClass = (value: string) => value === 'reused' ? 'green' : value === 'experience' ? 'purple' : value === 'new' ? 'blue' : 'gray'
+const chatDisplayName = (item: DashboardOverview['analytics']['chats'][number]) => {
+  if (item.chatName && item.chatName !== item.chatId) return item.chatName
+  if (item.chatMode === 'p2p') return '单聊会话'
+  if (item.chatMode === 'topic') return '未命名话题群'
+  return '未命名群'
+}
 </script>
 
 <template>
@@ -158,8 +164,8 @@ const routeClass = (value: string) => value === 'reused' ? 'green' : value === '
 
     <section class="analytics-bottom">
       <article class="panel chat-panel">
-        <div class="panel-header"><div><h2><UsersRound :size="17" />群处理量排行</h2><p class="panel-description">按 Bot + 群或会话聚合，展示累计使用量与处理质量。</p></div><span class="badge gray">Top {{ stats.analytics.chats.length }}</span></div>
-        <div v-if="stats.analytics.chats.length" class="ranking-list"><article v-for="(item, index) in stats.analytics.chats" :key="`${item.botId}:${item.chatId}`"><span class="rank">{{ String(index + 1).padStart(2, '0') }}</span><div class="rank-main"><div class="rank-title"><strong>{{ item.chatName }}</strong><span>{{ item.botName }}</span></div><div class="rank-bar"><span :style="{ width: `${item.received / maxChat * 100}%` }" /></div><small class="mono">{{ item.chatId }}</small></div><div class="rank-metrics"><strong>{{ item.received }}</strong><span>条消息</span></div><div class="rank-quality"><strong>{{ rate(item.completed, item.failed) === null ? '—' : `${rate(item.completed, item.failed)}%` }}</strong><span>成功率</span></div></article></div>
+        <div class="panel-header"><div><h2><UsersRound :size="17" />群 / 会话处理量排行</h2><p class="panel-description">按 Bot + 群或单聊会话聚合，展示累计使用量与处理质量。</p></div><span class="badge gray">Top {{ stats.analytics.chats.length }}</span></div>
+        <div v-if="stats.analytics.chats.length" class="ranking-list"><article v-for="(item, index) in stats.analytics.chats" :key="`${item.botId}:${item.chatId}`"><span class="rank">{{ String(index + 1).padStart(2, '0') }}</span><div class="rank-main"><div class="rank-title"><strong>{{ chatDisplayName(item) }}</strong><span>{{ item.botName }}</span></div><div class="rank-bar"><span :style="{ width: `${item.received / maxChat * 100}%` }" /></div><small class="mono">{{ item.chatId }}</small></div><div class="rank-metrics"><strong>{{ item.received }}</strong><span>条消息</span></div><div class="rank-quality"><strong>{{ rate(item.completed, item.failed) === null ? '—' : `${rate(item.completed, item.failed)}%` }}</strong><span>成功率</span></div></article></div>
         <div v-else class="empty"><UsersRound :size="30" /><strong>还没有群处理数据</strong></div>
       </article>
 
