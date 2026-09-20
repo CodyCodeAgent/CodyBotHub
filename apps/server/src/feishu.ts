@@ -9,6 +9,15 @@ import type { FeishuManagerHealthRecord, ResolvedRoute } from './types.js'
 
 type ManagedProvider = { provider: FeishuProvider; fingerprint: string; botName: string; state: string; error: string }
 
+export const shouldAcceptRoutedMessage = (
+  message: ChannelInboundMessage,
+  options: { hasScene: boolean; independentlyMatches: boolean; ownSender: boolean },
+): boolean => {
+  if (message.sender.type !== 'user') return !options.ownSender && options.hasScene && options.independentlyMatches
+  if (message.conversation.scope !== 'private' && !message.addressedToAgent && !options.independentlyMatches) return false
+  return true
+}
+
 export class FeishuBotManager {
   private readonly providers = new Map<string, ManagedProvider>()
   private readonly channelQueues = new Map<string, Promise<void>>()
@@ -162,9 +171,11 @@ export class FeishuBotManager {
   private prepareRoute(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): ResolvedRoute | null {
     const baseRoute = this.store.resolveRoute(botId, message)
     const independentlyMatches = baseRoute.scene ? this.store.messageMatchesScene(baseRoute.scene.id, message) : false
-    if (message.sender.type !== 'user' && (provider.isOwnSenderId(message.sender.id) || !baseRoute.scene || !independentlyMatches)) return null
-    if (message.sender.type === 'user' && baseRoute.routeSource === 'topic_context' && !message.addressedToAgent && !independentlyMatches) return null
-    if (!baseRoute.scene && message.conversation.scope !== 'private' && !message.addressedToAgent) return null
+    if (!shouldAcceptRoutedMessage(message, {
+      hasScene: Boolean(baseRoute.scene),
+      independentlyMatches,
+      ownSender: provider.isOwnSenderId(message.sender.id),
+    })) return null
     if (baseRoute.scene && baseRoute.routeSource === 'matcher' && baseRoute.topicId) this.store.rememberTopicRoute(botId, message.conversation.id, baseRoute.topicId, baseRoute.scene.id)
     return this.store.resolveThreadRouting(baseRoute, message)
   }
