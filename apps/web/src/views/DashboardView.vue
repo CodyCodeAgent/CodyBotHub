@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Activity, BarChart3, Bot, Boxes, CheckCircle2, Clock3, Gauge, GitBranch, MessageSquareText, RefreshCw, Sparkles, UsersRound, Workflow } from 'lucide-vue-next'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from '../api'
 import type { DashboardOverview, SystemHealth } from '../types'
 
@@ -21,14 +21,31 @@ const health = ref<SystemHealth>(emptyHealth)
 const loading = ref(false)
 const error = ref('')
 const hoveredDailyIndex = ref<number | null>(null)
+let loadInFlight = false
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 
-const load = async () => {
-  loading.value = true; error.value = ''
+const load = async (silent = false) => {
+  if (loadInFlight) return
+  loadInFlight = true
+  if (!silent) loading.value = true
+  error.value = ''
   try { [stats.value, health.value] = await Promise.all([api.dashboard(), api.systemHealth()]) }
   catch (value) { error.value = value instanceof Error ? value.message : '读取运行状态失败' }
-  finally { loading.value = false }
+  finally {
+    loadInFlight = false
+    if (!silent) loading.value = false
+  }
 }
-onMounted(load)
+onMounted(() => {
+  void load()
+  refreshTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') void load(true)
+  }, 5_000)
+})
+onUnmounted(() => {
+  if (refreshTimer) clearInterval(refreshTimer)
+  refreshTimer = null
+})
 
 const activeJobs = computed(() => health.value.store.queue.queued + health.value.store.queue.processing)
 const needsAttention = computed(() => health.value.status === 'attention' || stats.value.today.failed > 0)
@@ -82,7 +99,7 @@ const routeClass = (value: string) => value === 'reused' ? 'green' : value === '
 
 <template>
   <div class="page dashboard-page">
-    <header class="page-header"><div><p class="eyebrow">Operations analytics</p><h1>运行总览</h1><p class="page-description">查看累计使用量、每日趋势、群与场景分布，以及当前运行健康状态。</p></div><button class="ghost-button" :disabled="loading" @click="load"><RefreshCw :size="16" :class="{ spinning: loading }" />刷新</button></header>
+    <header class="page-header"><div><p class="eyebrow">Operations analytics</p><h1>运行总览</h1><p class="page-description">查看累计使用量、每日趋势、群与场景分布，以及当前运行健康状态。</p></div><button class="ghost-button" :disabled="loading" @click="load()"><RefreshCw :size="16" :class="{ spinning: loading }" />刷新</button></header>
     <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
 
     <section class="health-strip" :class="{ attention: needsAttention }">
