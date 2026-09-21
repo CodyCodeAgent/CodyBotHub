@@ -416,9 +416,10 @@ export class CodyBotRuntime {
     const toolPackages = this.store.listToolPackages().filter(item => item.enabled && item.workspaceId === route.workspace.id && route.skillPackages.some(skillPackage => skillPackage.toolPackageIds.includes(item.id)))
     const toolPackageLines = toolPackages.map(item => [
       `- ${item.name}（packageId: ${item.id}）${item.approvalRequired ? '，需要人工确认' : '，可直接执行'}`,
-      `  ${item.description || item.prompt || '未提供说明'}`,
+      `  说明：${item.description || '未提供说明'}`,
+      item.prompt ? `  使用规则：${item.prompt}` : '',
       `  步骤：${item.steps.map(step => `${step.phase}:${step.toolName}`).join(' → ') || '未配置'}`,
-    ].join('\n')).join('\n')
+    ].filter(Boolean).join('\n')).join('\n')
     const policy = mode === 'package_only'
       ? '本轮为 package_only：只使用首选 Skill，不得读取或启用候选 Skill、知识库或其他工作区能力。'
       : mode === 'package_first'
