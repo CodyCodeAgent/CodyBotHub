@@ -82,11 +82,14 @@ export class FeishuBotManager {
     const duplicate = this.store.findToolPackageExecution(binding.id, call.callId)
     if (duplicate) return { status: duplicate.status, executionId: duplicate.id, toolPackage: duplicate.toolPackageName }
     const log = this.store.getMessageLogForToolInvocation(call.sourceLogId, binding.id)
-    const pack = this.store.getToolPackage(call.packageId)
-    if (!pack.enabled) throw new Error(`Tool Package ${pack.name} is disabled`)
-    if (pack.workspaceId !== log.workspaceId) throw new Error('Tool Package belongs to another Workspace')
-    const allowed = this.store.listSkillPackages().some(item => log.skillPackages.some(link => link.id === item.id) && item.toolPackageIds.includes(pack.id))
-    if (!allowed) throw new Error('Tool Package is not attached to the active Skill Package')
+    const activeSkillPackageIds = new Set(log.skillPackages.map(item => item.id))
+    const authorizedIds = new Set(this.store.listSkillPackages().filter(item => activeSkillPackageIds.has(item.id)).flatMap(item => item.toolPackageIds))
+    const authorized = this.store.listToolPackages().filter(item => item.enabled && item.workspaceId === log.workspaceId && authorizedIds.has(item.id))
+    const pack = authorized.find(item => item.id === call.packageId)
+    if (!pack) {
+      const available = authorized.map(item => `${item.name}=${item.id}`).join('；') || '无'
+      throw new Error(`未知或未授权的 packageId：${call.packageId}。当前消息可用工具包：${available}。请使用准确 UUID 重新调用，不得改用通用命令绕过。`)
+    }
     if (!pack.steps.length) throw new Error('Tool Package has no executable steps')
     const provider = this.providers.get(log.botId)?.provider
     if (!provider) throw new Error('Feishu Bot is not connected')
