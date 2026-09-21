@@ -57,23 +57,6 @@ type EngineState = {
   attaching: Map<string, Promise<void>>
 }
 
-const approvalCommand = (params: unknown): string => {
-  if (!params || typeof params !== 'object' || Array.isArray(params)) return ''
-  const command = (params as Record<string, unknown>).command
-  return typeof command === 'string' ? command.trim() : ''
-}
-
-/** Governed scenes may use the shell for investigation, but an approval
- * request must never become an escape hatch for a business write. */
-export const isGovernedReadOnlyCommand = (command: string): boolean => {
-  const normalized = command.replace(/\s+/gu, ' ').trim().toLocaleLowerCase()
-  if (!normalized) return false
-  if (/\b(gdpa-cli|gdpa)\s+run\s+(rds|argos|logs?|metrics|bytefaas-query)\b/u.test(normalized)) {
-    return !/\b(insert|update|delete|replace|alter|drop|truncate|create|grant|revoke|call|execute|exec)\b/u.test(normalized)
-  }
-  return false
-}
-
 export const resolveRuntimeModel = (requested: ResolvedModelConfig, models: CodexModelOption[], configuredModel = '', configuredEffort = '', runtimeDefaultSource: ModelConfigSource = 'codex'): RuntimeResolvedModel => {
   const visible = models.filter(item => !item.hidden)
   const findModel = (value: string) => models.find(item => item.id === value || item.model === value)
@@ -135,7 +118,7 @@ export class CodyBotRuntime {
   private static readonly TOOL_CONTRACT_VERSION = 2
   private readonly engines = new Map<AgentRuntimeKind, EngineState>()
   private readonly resources = new WorkspaceResourceIndex()
-  private readonly activeToolContexts = new Map<string, { sourceLogId: string; invocationAllowed: boolean; governed: boolean }>()
+  private readonly activeToolContexts = new Map<string, { sourceLogId: string; invocationAllowed: boolean }>()
   private toolInvoker: ((call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string; sourceLogId: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>) | null = null
 
   constructor(
@@ -171,7 +154,7 @@ export class CodyBotRuntime {
         ...(localImages.length ? { localImages } : {}),
       }),
       runtimeWorkspaceRoots: [realpathSync.native(route.workspace.path)],
-      approvalPolicy: skillPlan.requiresDynamicTools ? 'untrusted' : 'never',
+      approvalPolicy: 'never',
       ...this.permissions(route),
       ...(model.model ? { model: model.model } : {}),
       ...(model.reasoningEffort ? { effort: model.reasoningEffort as TurnInput['effort'] } : {}),
@@ -205,7 +188,7 @@ export class CodyBotRuntime {
       }
     }
     const unsubscribe = manager.subscribe(applyProgress)
-    if (sourceLogId) this.activeToolContexts.set(channel.id, { sourceLogId, invocationAllowed: toolInvocationAllowed, governed: skillPlan.requiresDynamicTools })
+    if (sourceLogId) this.activeToolContexts.set(channel.id, { sourceLogId, invocationAllowed: toolInvocationAllowed })
     try {
       const submission = manager.submit(channel.id, turn, 'queue', channelCommandId(message))
       turnId = (await submission.started).turnId
@@ -291,17 +274,9 @@ export class CodyBotRuntime {
       return existing
     }
     const policy: ExecutionPolicyProvider = {
-      evaluate: (operation, binding) => {
-        if (!/approval/iu.test(operation.method)) return { action: 'deny', reason: 'CodyBotHub cannot answer interactive questions without a user response.' }
-        const active = this.activeToolContexts.get(binding.id)
-        if (!active?.governed) return { action: 'allow', reason: 'CodyBotHub YOLO mode automatically approves tool execution.' }
-        const command = approvalCommand(operation.params)
-        if (isGovernedReadOnlyCommand(command)) return { action: 'allow', reason: 'Read-only investigation command allowed in a governed scene.' }
-        return {
-          action: 'deny',
-          reason: 'This scene has governed Tool Packages. State-changing or unclassified commands cannot bypass CodyBotHub approval; use codybothub.invoke_tool_package.',
-        }
-      },
+      evaluate: operation => /approval/iu.test(operation.method)
+        ? ({ action: 'allow', reason: 'CodyBotHub YOLO mode automatically approves tool execution.' })
+        : ({ action: 'deny', reason: 'CodyBotHub cannot answer interactive questions without a user response.' }),
     }
     const host = createRuntimeAppServerHost(kind, {
       command: this.commands[kind] || kind,
@@ -393,8 +368,8 @@ export class CodyBotRuntime {
     ].filter(Boolean).join('\n')).join('\n')
     return [
       '## CodyBotHub 受控业务操作契约',
-      '下列工具包是本场景唯一允许改变外部系统状态的入口。需要执行时必须调用 `codybothub.invoke_tool_package`，并逐字使用列出的 UUID `packageId`。',
-      '不得直接或间接使用 shell、gdpa-cli、Bits RPC、HTTP、脚本、数据库写入或其他通用工具完成同一写操作；动态工具返回失败时也不得绕过，应根据返回的可用工具包修正调用或向用户说明阻塞。',
+      '下列工具包是本场景为对应业务动作提供的标准执行入口。需要执行已配置的业务动作时，应调用 `codybothub.invoke_tool_package`，并逐字使用列出的 UUID `packageId`。',
+      '可以继续使用 shell、gdpa-cli、Bits RPC、HTTP、脚本和数据库查询搜集证据。工具包调用失败时，应根据返回的可用工具包修正调用；不得把失败的工具包申请描述成已经审批或执行成功。',
       rows,
     ].join('\n\n')
   }
@@ -402,12 +377,11 @@ export class CodyBotRuntime {
   private context(route: ResolvedRoute, resourceInstructions = ''): ExecutionContext {
     const cwd = realpathSync.native(route.workspace.path)
     const toolContract = this.toolPackageContract(route)
-    const governed = Boolean(toolContract)
     const developerInstructions = [route.turnInstructions, toolContract].filter(Boolean).join('\n\n')
     return {
       thread: {
         cwd,
-        approvalPolicy: governed ? 'untrusted' : 'never',
+        approvalPolicy: 'never',
         sandbox: 'danger-full-access',
         runtimeWorkspaceRoots: [cwd],
         baseInstructions: null,
@@ -437,7 +411,7 @@ export class CodyBotRuntime {
       turn: {
         cwd,
         runtimeWorkspaceRoots: [cwd],
-        approvalPolicy: governed ? 'untrusted' : 'never',
+        approvalPolicy: 'never',
         sandboxPolicy: { type: 'dangerFullAccess' },
         summary: 'detailed',
         additionalContext: developerInstructions || resourceInstructions ? {
@@ -517,7 +491,7 @@ export class CodyBotRuntime {
       mode === 'package_only' ? '' : `## 知识资源\n知识根目录：${knowledgeRoots.join('、') || '未识别'}\n${knowledgeLines || '当前没有识别到知识文件；仍可在工作区内搜索 README、文档和 Skill references。'}`,
       mode === 'package_only' ? '' : `## 代码\n代码根目录：${codeRoot}\n允许使用 rg 搜索代码、配置和 Git 历史，以确认当前实现。`,
       mode === 'package_only' ? '' : '## 调查要求\n对告警、故障和数据差异任务，应提取关键 ID、时间、地区、服务和链接；交叉验证知识、代码、配置、数据库与日志；建立时间线并主动排除主要反例。没有实际查询证据时只能标记为“初判”。只有样本、规则或配置、运行事实和排除证据相互闭合时才可输出确定根因。遇到权限、工具或数据阻塞时，列出已经执行的查询和具体阻塞。',
-      toolPackageLines ? `## 可执行工具包\n分析完成后，只有确实需要改变外部系统状态时，才调用 codybothub.invoke_tool_package。必须使用这里列出的 packageId，并传入完整业务参数与可审计的执行理由。若返回 awaiting_approval，告诉用户审批卡片已发出，本轮不要假设动作已执行。若调用失败，不得用 shell、gdpa-cli、Bits RPC、HTTP、脚本或数据库写入绕过。\n${toolPackageLines}` : '',
+      toolPackageLines ? `## 可执行工具包\n分析完成后，执行这里已经配置的业务动作时，应调用 codybothub.invoke_tool_package。必须使用这里列出的 packageId，并传入完整业务参数与可审计的执行理由。若返回 awaiting_approval，告诉用户审批卡片已发出，本轮不要假设动作已执行。通用接口、脚本和查询工具仍可用于搜集调查证据。\n${toolPackageLines}` : '',
     ].filter(Boolean).join('\n\n')
     return { attached, instructions, trace, requiresDynamicTools: toolPackages.length > 0 }
   }

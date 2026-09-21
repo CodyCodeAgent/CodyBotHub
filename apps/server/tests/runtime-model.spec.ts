@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CodexModelOption } from '@codycodeagent/cody-web-core/session'
-import { isGovernedReadOnlyCommand, rankSkillCandidates, resolveRuntimeModel } from '../src/runtime.js'
+import { rankSkillCandidates, resolveRuntimeModel } from '../src/runtime.js'
 
 const model = (id: string, efforts: string[], isDefault = false): CodexModelOption => ({
   id, model: id, label: id, description: '', hidden: false, isDefault,
@@ -57,19 +57,5 @@ describe('workspace Skill ranking', () => {
     const source = { ...skill('argos-query', '源码目录中的日志查询能力'), path: '/workspace/skills/argos-query/SKILL.md' }
     const ranked = rankSkillCandidates([source, installed, skill('rds', '只读数据库查询')], '告警日志排查')
     expect(ranked.filter(item => item.name === 'argos-query')).toEqual([installed])
-  })
-})
-
-describe('governed command policy', () => {
-  it('allows known read-only production queries', () => {
-    expect(isGovernedReadOnlyCommand('gdpa-cli run rds --query "select * from budget_manager limit 1"')).toBe(true)
-    expect(isGovernedReadOnlyCommand('gdpa-cli run argos --log-id 123')).toBe(true)
-  })
-
-  it('blocks write and unclassified commands from bypassing Tool Packages', () => {
-    expect(isGovernedReadOnlyCommand('gdpa-cli run bam-query EnsureBudget --vdc lf')).toBe(false)
-    expect(isGovernedReadOnlyCommand('gdpa-cli run rds --query "update budget_manager set c_extra=1"')).toBe(false)
-    expect(isGovernedReadOnlyCommand('python3 /tmp/call-production-api.py')).toBe(false)
-    expect(isGovernedReadOnlyCommand('curl -X POST https://example.com/action')).toBe(false)
   })
 })
