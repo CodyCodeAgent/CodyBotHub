@@ -149,9 +149,76 @@ export interface SkillPackageRecord {
   description: string
   prompt: string
   skills: string[]
+  toolPackageIds: string[]
   fallbackMode: 'package_first' | 'mixed' | 'package_only'
   createdAt: string
   updatedAt: string
+}
+
+export type ToolExecutorType = 'bits_rpc' | 'command'
+export interface ToolRecord {
+  id: string
+  workspaceId: string
+  name: string
+  description: string
+  executorType: ToolExecutorType
+  command: string
+  argumentsTemplate: string[]
+  inputSchema: Record<string, unknown>
+  timeoutSeconds: number
+  enabled: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ToolPackageStepRecord {
+  toolId: string
+  toolName: string
+  phase: 'precheck' | 'execute' | 'verify'
+  position: number
+  arguments: Record<string, unknown>
+}
+
+export interface ToolPackageRecord {
+  id: string
+  workspaceId: string
+  name: string
+  description: string
+  prompt: string
+  approvalRequired: boolean
+  approverIds: string[]
+  cardTitle: string
+  cardDescription: string
+  enabled: boolean
+  steps: ToolPackageStepRecord[]
+  createdAt: string
+  updatedAt: string
+}
+
+export type ToolPackageExecutionStatus = 'awaiting_approval' | 'queued' | 'running' | 'completed' | 'failed' | 'rejected'
+export interface ToolPackageExecutionRecord {
+  id: string
+  callId: string
+  toolPackageId: string
+  toolPackageName: string
+  botId: string
+  sceneId: string
+  chatId: string
+  topicId: string
+  threadChannelId: string
+  coreThreadId: string
+  sourceMessageId: string
+  status: ToolPackageExecutionStatus
+  arguments: Record<string, unknown>
+  reason: string
+  requestedBy: string
+  approvedBy: string
+  cardMessageId: string
+  result: unknown
+  error: string
+  createdAt: string
+  updatedAt: string
+  completedAt: string
 }
 
 export interface InvestigationSkillRecord {

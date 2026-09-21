@@ -4,21 +4,21 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { findComposerTrigger, type ComposerTrigger } from '@codycodeagent/cody-web-core/composer'
 import { api, type SkillOption } from '../api'
 import PaginationBar from '../components/PaginationBar.vue'
-import type { SkillPackage, Workspace } from '../types'
+import type { SkillPackage, ToolPackage, Workspace } from '../types'
 const pageSize = 20
-const items = ref<SkillPackage[]>([]), workspaces = ref<Workspace[]>([]), total = ref(0), offset = ref(0), loading = ref(false), open = ref(false), saving = ref(false), error = ref('')
-const form = reactive({ id: '', workspaceId: '', name: '', description: '', prompt: '', skillsText: '', fallbackMode: 'package_first' as SkillPackage['fallbackMode'] })
+const items = ref<SkillPackage[]>([]), workspaces = ref<Workspace[]>([]), toolPackages = ref<ToolPackage[]>([]), total = ref(0), offset = ref(0), loading = ref(false), open = ref(false), saving = ref(false), error = ref('')
+const form = reactive({ id: '', workspaceId: '', name: '', description: '', prompt: '', skillsText: '', toolPackageIds: [] as string[], fallbackMode: 'package_first' as SkillPackage['fallbackMode'] })
 const skillOptions = ref<SkillOption[]>([]), skillsLoading = ref(false), skillInput = ref<HTMLTextAreaElement | null>(null), activeTrigger = ref<ComposerTrigger | null>(null), highlightedSkill = ref(0)
 const filteredSkills = computed(() => {
   const query = activeTrigger.value?.query ?? ''
   return skillOptions.value.filter(skill => !query || [skill.name, skill.displayName, skill.description, skill.path].join(' ').toLowerCase().includes(query)).slice(0, 12)
 })
-const load = async () => { loading.value = true; try { const [page, workspaceItems] = await Promise.all([api.skillPackagesPage(pageSize, offset.value), api.workspaces()]); items.value = page.items; total.value = page.total; workspaces.value = workspaceItems } finally { loading.value = false } }
+const load = async () => { loading.value = true; try { const [page, workspaceItems, tools] = await Promise.all([api.skillPackagesPage(pageSize, offset.value), api.workspaces(), api.toolPackages()]); items.value = page.items; total.value = page.total; workspaces.value = workspaceItems; toolPackages.value = tools } finally { loading.value = false } }
 const move = async (value: number) => { offset.value = value; await load() }
 onMounted(load)
 const loadSkills = async () => { if (!form.workspaceId) { skillOptions.value = []; return }; skillsLoading.value = true; try { skillOptions.value = await api.skills(form.workspaceId) } catch { skillOptions.value = [] } finally { skillsLoading.value = false } }
-const edit = (item?: SkillPackage) => { Object.assign(form, item ? { ...item, skillsText: item.skills.join('\n') } : { id: '', workspaceId: workspaces.value[0]?.id ?? '', name: '', description: '', prompt: '', skillsText: '', fallbackMode: 'package_first' }); error.value = ''; activeTrigger.value = null; open.value = true; void loadSkills() }
-watch(() => form.workspaceId, () => { if (open.value) void loadSkills() })
+const edit = (item?: SkillPackage) => { Object.assign(form, item ? { ...item, toolPackageIds: [...item.toolPackageIds], skillsText: item.skills.join('\n') } : { id: '', workspaceId: workspaces.value[0]?.id ?? '', name: '', description: '', prompt: '', skillsText: '', toolPackageIds: [], fallbackMode: 'package_first' }); error.value = ''; activeTrigger.value = null; open.value = true; void loadSkills() }
+watch(() => form.workspaceId, () => { form.toolPackageIds = form.toolPackageIds.filter(id => toolPackages.value.some(item => item.id === id && item.workspaceId === form.workspaceId)); if (open.value) void loadSkills() })
 const save = async () => { saving.value = true; error.value = ''; try { await api.saveSkillPackage({ ...form, skills: form.skillsText.split('\n').map(v => v.trim()).filter(Boolean) }); open.value = false; await load() } catch (e) { error.value = e instanceof Error ? e.message : '保存失败' } finally { saving.value = false } }
 const remove = async (item: SkillPackage) => { if (!confirm(`删除技能包“${item.name}”？`)) return; try { await api.deleteSkillPackage(item.id); await load() } catch (e) { alert(e instanceof Error ? e.message : '删除失败') } }
 const workspaceName = (id: string) => workspaces.value.find(item => item.id === id)?.name ?? '未知工作区'
@@ -53,6 +53,7 @@ const closeSkillMenu = () => window.setTimeout(() => { activeTrigger.value = nul
       <div class="field"><label for="package-description">描述</label><input id="package-description" v-model.trim="form.description" placeholder="适用范围和预期产出" /></div>
       <div class="field"><label for="package-skills">Skills</label><div class="skill-picker"><textarea id="package-skills" ref="skillInput" v-model="form.skillsText" rows="5" class="mono" placeholder="输入 $ 选择当前可用 Skill，也可每行填写一个名称或路径" @input="updateTrigger" @click="updateTrigger" @keyup="updateTrigger" @keydown="onSkillKeydown" @blur="closeSkillMenu" /><div v-if="activeTrigger" class="skill-suggestion-menu" role="listbox"><div v-if="skillsLoading" class="skill-suggestion-status">正在读取 Skill…</div><template v-else><button v-for="(skill, index) in filteredSkills" :key="skill.path" type="button" :class="{ active: index === highlightedSkill }" @mousedown.prevent="selectSkill(skill)"><strong>${{ skill.displayName || skill.name }}</strong><span>{{ skill.description || skill.name }}</span><code>{{ skill.scope }} · {{ skill.path }}</code></button><div v-if="!filteredSkills.length" class="skill-suggestion-status">没有匹配的 Skill</div></template></div></div><small>输入 <code>$</code> 可检索工作区、用户和系统 Skill；每行保存一个 Skill 路径或名称。</small></div>
       <div class="field"><label for="fallback-mode">Skill 查找策略</label><select id="fallback-mode" v-model="form.fallbackMode"><option value="package_first">技能包优先，找不到再用其他 Skill</option><option value="mixed">技能包与其他 Skill 混合查找</option><option value="package_only">仅允许技能包内 Skill</option></select></div>
+      <div class="field"><label>关联工具包</label><div class="checkbox-grid"><label v-for="toolPackage in toolPackages.filter(item=>item.workspaceId===form.workspaceId)" :key="toolPackage.id" class="check-card"><input v-model="form.toolPackageIds" type="checkbox" :value="toolPackage.id"/><span><strong>{{toolPackage.name}}</strong><small>{{toolPackage.approvalRequired?'需要人工确认':'可直接执行'}} · {{toolPackage.steps.length}} 个步骤</small></span></label></div><small>Codex 只会感知当前技能包明确关联的工具包。</small></div>
       <div class="field"><label for="package-prompt">技能包 Prompt</label><textarea id="package-prompt" v-model="form.prompt" rows="6" placeholder="定义执行步骤、输出格式和质量要求…" /></div>
       <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
     </div><footer class="dialog-actions"><button type="button" class="ghost-button" @click="open = false">取消</button><button class="button" :disabled="saving">{{ saving ? '保存中…' : '保存技能包' }}</button></footer></form></div>

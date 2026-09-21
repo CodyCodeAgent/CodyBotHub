@@ -6,7 +6,7 @@ import { FEISHU_MESSAGE_TYPES } from '@codycodeagent/cody-web-core/feishu'
 import { AuthService } from './auth.js'
 import { SecretVault } from './crypto.js'
 import { HubStore } from './db.js'
-import type { AgentRuntimeKind, DeploymentStatusRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord } from './types.js'
+import type { AgentRuntimeKind, DeploymentStatusRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord, ToolPackageRecord, ToolRecord } from './types.js'
 import type { FeishuProvisioningService, ProvisioningRequest } from './provisioning.js'
 import { listBrowsableDirectories } from './directories.js'
 import type { CodyBotRuntime } from './runtime.js'
@@ -364,6 +364,21 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         const packageId = matchId(url.pathname, '/api/skill-packages/')
         if (packageId && method === 'PUT') { const result = store.updateSkillPackage(packageId, skillPackageInput(await readJson(request))); audit('skill_package.update', 'skill_package', result.id, `更新技能包 ${result.name}`); return sendJson(response, 200, result) }
         if (packageId && method === 'DELETE') { const item = store.listSkillPackages().find(value => value.id === packageId); store.deleteSkillPackage(packageId); audit('skill_package.delete', 'skill_package', packageId, `删除技能包 ${item?.name ?? packageId}`); response.statusCode = 204; return response.end() }
+
+        if (method === 'GET' && url.pathname === '/api/tools/page') return sendJson(response, 200, page(store.listTools(), url))
+        if (method === 'GET' && url.pathname === '/api/tools') return sendJson(response, 200, store.listTools())
+        if (method === 'POST' && url.pathname === '/api/tools') { const result = store.createTool(toolInput(await readJson(request))); audit('tool.create', 'tool', result.id, `创建工具 ${result.name}`); return sendJson(response, 201, result) }
+        const toolId = matchId(url.pathname, '/api/tools/')
+        if (toolId && method === 'PUT') { const result = store.updateTool(toolId, toolInput(await readJson(request))); audit('tool.update', 'tool', result.id, `更新工具 ${result.name}`); return sendJson(response, 200, result) }
+        if (toolId && method === 'DELETE') { const item = store.listTools().find(value => value.id === toolId); store.deleteTool(toolId); audit('tool.delete', 'tool', toolId, `删除工具 ${item?.name ?? toolId}`); response.statusCode = 204; return response.end() }
+
+        if (method === 'GET' && url.pathname === '/api/tool-packages/page') return sendJson(response, 200, page(store.listToolPackages(), url))
+        if (method === 'GET' && url.pathname === '/api/tool-packages') return sendJson(response, 200, store.listToolPackages())
+        if (method === 'GET' && url.pathname === '/api/tool-package-executions') return sendJson(response, 200, page(store.listToolPackageExecutions(500), url))
+        if (method === 'POST' && url.pathname === '/api/tool-packages') { const result = store.createToolPackage(toolPackageInput(await readJson(request), store)); audit('tool_package.create', 'tool_package', result.id, `创建工具包 ${result.name}`); return sendJson(response, 201, result) }
+        const toolPackageId = matchId(url.pathname, '/api/tool-packages/')
+        if (toolPackageId && method === 'PUT') { const result = store.updateToolPackage(toolPackageId, toolPackageInput(await readJson(request), store)); audit('tool_package.update', 'tool_package', result.id, `更新工具包 ${result.name}`); return sendJson(response, 200, result) }
+        if (toolPackageId && method === 'DELETE') { const item = store.listToolPackages().find(value => value.id === toolPackageId); store.deleteToolPackage(toolPackageId); audit('tool_package.delete', 'tool_package', toolPackageId, `删除工具包 ${item?.name ?? toolPackageId}`); response.statusCode = 204; return response.end() }
         throw new HttpError(404, 'Route not found')
       }
       await serveWeb(url.pathname, response, webDist)
@@ -401,8 +416,25 @@ const sceneInput = (body: Json): Omit<SceneRecord, 'id' | 'createdAt' | 'updated
 }
 
 const skillPackageInput = (body: Json): Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => ({
-  workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), skills: stringList(body.skills), fallbackMode: ['mixed', 'package_only'].includes(String(body.fallbackMode)) ? String(body.fallbackMode) as 'mixed' | 'package_only' : 'package_first',
+  workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), skills: stringList(body.skills), toolPackageIds: stringList(body.toolPackageIds), fallbackMode: ['mixed', 'package_only'].includes(String(body.fallbackMode)) ? String(body.fallbackMode) as 'mixed' | 'package_only' : 'package_first',
 })
+
+const objectValue = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+const toolInput = (body: Json): Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt'> => {
+  const executorType = body.executorType === 'command' ? 'command' : 'bits_rpc'
+  return { workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), description: optional(body, 'description'), executorType, command: optional(body, 'command') || 'bits', argumentsTemplate: stringList(body.argumentsTemplate), inputSchema: objectValue(body.inputSchema), timeoutSeconds: Math.min(900, Math.max(1, number(body.timeoutSeconds, 60))), enabled: bool(body.enabled, true) }
+}
+const toolPackageInput = (body: Json, store: HubStore): Omit<ToolPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => {
+  const workspaceId = required(body, 'workspaceId'), tools = new Map(store.listTools().map(item => [item.id, item]))
+  const steps = (Array.isArray(body.steps) ? body.steps : []).flatMap((value, position) => {
+    const row = objectValue(value), toolId = optional(row, 'toolId'), tool = tools.get(toolId)
+    if (!tool) return []
+    if (tool.workspaceId !== workspaceId) throw new HttpError(400, 'Tool Package and Tool must use the same Workspace')
+    const phase: 'precheck' | 'execute' | 'verify' = row.phase === 'precheck' || row.phase === 'verify' ? row.phase : 'execute'
+    return [{ toolId, toolName: tool.name, phase, position, arguments: objectValue(row.arguments) }]
+  })
+  return { workspaceId, name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), approvalRequired: bool(body.approvalRequired, true), approverIds: stringList(body.approverIds), cardTitle: optional(body, 'cardTitle'), cardDescription: optional(body, 'cardDescription'), enabled: bool(body.enabled, true), steps }
+}
 
 const skillSourceInput = (body: Json) => ({
   name: required(body, 'name'), repositoryUrl: required(body, 'repositoryUrl'), branch: optional(body, 'branch') || 'main', workspaceId: required(body, 'workspaceId'),

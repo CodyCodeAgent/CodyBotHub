@@ -44,6 +44,7 @@ const roles = {
     label: '能力配置者', title: '把业务规则组装成可复用场景', description: '适合告警排查、知识问答、代码分析等业务能力的负责人。',
     steps: [
       ['确认可用 Skill', '在工作区和 Codex Skill 目录中确认系统能识别到需要的能力。', '/skills', '查看 Skill'],
+      ['注册工具与工具包', '把 Bits RPC 等原子接口注册为工具，再编排执行顺序、确认卡片和审批人。', '/tool-packages', '配置工具包'],
       ['组装技能包', '把专项 Prompt、首选 Skill 和回退策略组合成能力包。', '/packages', '创建技能包'],
       ['定义场景路由', '配置群、消息类型、关键词或卡片标题，并选择唯一工作区。', '/scenes', '创建场景'],
       ['用真实消息验证', '在飞书中发送消息，再从记录查看实际路由、模型、Skill 和 Thread。', '/messages', '查看记录'],
@@ -160,7 +161,7 @@ onBeforeUnmount(() => observer?.disconnect())
             <div class="relation-arrow"><small>关联一个或多个</small><ArrowRight :size="22" /></div>
             <div class="relation-column"><span>接入与默认策略</span><RouterLink class="relation-card" to="/bots"><Bot :size="20" /><div><strong>飞书 Bot</strong><small>凭据 · 默认工作区 · 会话模式 · 模型</small></div><em>必须选工作区</em></RouterLink></div>
             <div class="relation-arrow"><small>消息命中</small><ArrowRight :size="22" /></div>
-            <div class="relation-column"><span>业务编排</span><RouterLink class="relation-card mini" to="/scenes"><Workflow :size="20" /><div><strong>场景路由</strong><small>群 · 匹配器 · 唯一工作区</small></div></RouterLink><RouterLink class="relation-card mini" to="/packages"><Puzzle :size="20" /><div><strong>技能包</strong><small>Skill · Prompt · 调度策略</small></div></RouterLink></div>
+            <div class="relation-column"><span>业务编排</span><RouterLink class="relation-card mini" to="/scenes"><Workflow :size="20" /><div><strong>场景路由</strong><small>群 · 匹配器 · 唯一工作区</small></div></RouterLink><RouterLink class="relation-card mini" to="/packages"><Puzzle :size="20" /><div><strong>技能包</strong><small>Skill · Prompt · 工具包授权</small></div></RouterLink></div>
             <div class="relation-arrow"><small>创建或复用</small><ArrowRight :size="22" /></div>
             <div class="relation-column"><span>持续执行上下文</span><RouterLink class="relation-card" to="/conversation-threads"><GitBranch :size="20" /><div><strong>Thread Channel</strong><small>群/话题边界 · 队列 · Codex Thread</small></div><em>串行执行</em></RouterLink></div>
           </div>
@@ -176,7 +177,7 @@ onBeforeUnmount(() => observer?.disconnect())
         <section id="pipeline" class="guide-section">
           <header class="section-heading"><div><p>05 · MESSAGE LIFECYCLE</p><h2>一条消息怎样变成可交付的结果</h2></div><p>每一步都有明确输入和输出，并保存到消息记录中。出现问题时，可以准确知道失败发生在哪一层。</p></header>
           <div class="pipeline-list"><article v-for="(step, index) in pipeline" :key="step.title"><span class="pipeline-number">0{{ index + 1 }}</span><div class="pipeline-icon"><component :is="step.icon" :size="20" /></div><div><h3>{{ step.title }}</h3><p>{{ step.text }}</p></div><small>OUTPUT · {{ step.output }}</small></article></div>
-          <div class="fallback-grid"><article><CheckCircle2 :size="18" /><div><strong>没有命中场景</strong><p>用户可选择场景；暂不选择时，仍可在默认工作区继续对话。</p></div></article><article><TimerReset :size="18" /><div><strong>同一 Thread 正在执行</strong><p>新消息先进入持久队列，等待当前任务结束后串行执行。</p></div></article><article><ShieldCheck :size="18" /><div><strong>部署期间收到消息</strong><p>排空期间消息继续入库；新版本启动后自动恢复消费。</p></div></article></div>
+          <div class="fallback-grid"><article><CheckCircle2 :size="18" /><div><strong>没有命中场景</strong><p>用户可选择场景；暂不选择时，仍可在默认工作区继续对话。</p></div></article><article><TimerReset :size="18" /><div><strong>同一 Thread 正在执行</strong><p>新消息与工具包都进入持久队列，等待当前任务结束后串行执行。</p></div></article><article><ShieldCheck :size="18" /><div><strong>工具包需要确认</strong><p>飞书卡片校验操作人后执行，并把真实接口结果续写回原 Codex Thread。</p></div></article></div>
         </section>
 
         <section id="example" class="guide-section">

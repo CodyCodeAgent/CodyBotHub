@@ -20,6 +20,8 @@ const startedAt = new Date()
 const store = new HubStore(path.join(dataDir, 'cody-bot-hub.sqlite'))
 const interrupted = store.recoverInterruptedWork()
 if (interrupted.jobs || interrupted.messages) console.warn(`[startup] recovered interrupted work: jobs=${interrupted.jobs} messages=${interrupted.messages}; queued jobs will resume`)
+const interruptedTools = store.recoverInterruptedToolExecutions()
+if (interruptedTools) console.warn(`[startup] marked ${interruptedTools} interrupted tool executions as failed; external state requires manual review`)
 const vault = await SecretVault.open(dataDir)
 const runtimeDirectory = path.join(dataDir, 'runtime')
 mkdirSync(runtimeDirectory, { recursive: true })
@@ -28,6 +30,7 @@ const codexCommand = process.env.CODY_BOT_HUB_CODEX_COMMAND ?? process.env.CODEX
 const traexCommand = process.env.CODY_BOT_HUB_TRAEX_COMMAND ?? 'traex'
 const runtime = new CodyBotRuntime(store, runtimeDirectory, { codex: codexCommand, traex: traexCommand }, Number(process.env.CODY_BOT_HUB_TURN_TIMEOUT_MS ?? 15 * 60 * 1000))
 const feishu = new FeishuBotManager(store, vault, runtime, path.join(dataDir, 'attachments'))
+runtime.setToolPackageInvoker((call, binding) => feishu.invokeToolPackage(call, binding))
 const provisioning = new FeishuProvisioningService(store, vault, () => feishu.reload())
 const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))
 const server = createHubServer({

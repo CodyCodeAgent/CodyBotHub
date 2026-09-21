@@ -2,7 +2,7 @@
 
 ## Boundaries
 
-CodyBotHub owns the management product and its domain entities: Workspace, Bot, Scene, Skill Package, group binding, topic routing context, provisioning job, Thread Channel, conversation binding and Thread job. CodyWebCore remains the single owner of Codex protocol, session lifecycle, normalized conversation events and provider-neutral channel primitives.
+CodyBotHub owns the management product and its domain entities: Workspace, Bot, Scene, Skill Package, Tool, Tool Package, tool execution, group binding, topic routing context, provisioning job, Thread Channel, conversation binding and Thread job. CodyWebCore remains the single owner of Codex protocol, session lifecycle, dynamic-tool request routing, normalized conversation events and provider-neutral channel primitives.
 
 Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@codycodeagent/cody-web-core/feishu`. CodyBotHub adds only product routing and policy.
 
@@ -83,6 +83,18 @@ A Skill Package belongs to one Workspace. A Scene can attach only packages from 
 - an explicit absolute `SKILL.md` path
 
 The package policy is also expressed in the Turn prompt so `package_first`, `mixed` and `package_only` remain visible to the model. Resolved local Skills are sent as native Core skill inputs.
+
+## Tools, Tool Packages and human confirmation
+
+Tools are product-owned atomic executors. Each Tool belongs to one Workspace and stores an executable, an argv template, a JSON input schema, a timeout and an enabled flag. Execution uses `spawn(command, argv, { shell: false })`; template values never pass through a shell. `bits_rpc` is a presentation category for Bits RPC commands and uses the same fixed argv boundary.
+
+A Tool Package belongs to one Workspace and owns an ordered list of `precheck`, `execute` and `verify` steps. It also owns the business Prompt, approval policy, allowed Feishu Open IDs and confirmation-card copy. A Skill Package explicitly attaches Tool Packages; this association is the capability grant. Tools from another Workspace and Tool Packages outside the active Skill Package are rejected server-side.
+
+New native Agent Threads receive one CodyBotHub dynamic namespace tool at `thread/start`. The route Prompt lists only the Tool Packages authorized for the current Scene's Skill Packages. When Codex calls `codybothub.invoke_tool_package`, CodyWebCore routes the native `item/tool/call` server request to Hub while retaining sole ownership of the JSON-RPC response.
+
+Hub creates a durable `tool_package_executions` row before any external side effect. If approval is required, the dynamic call returns `awaiting_approval` after sending a Feishu card. The callback trusts only the Feishu-verified action operator ID, checks the package allowlist, acknowledges the click, and queues execution on the original Thread Channel. Without approval, the execution enters the same queue immediately.
+
+Steps execute deterministically and sequentially. The final status, approver, bounded stdout/stderr and errors remain in SQLite. Hub then submits a synthetic result Turn to the original Thread Channel, so the native Codex Thread receives the actual external result and produces the user-facing follow-up. A process restart resumes `queued` executions; an execution interrupted after entering `running` is marked failed with an unknown-side-effect warning and is never automatically replayed.
 
 ## Security
 

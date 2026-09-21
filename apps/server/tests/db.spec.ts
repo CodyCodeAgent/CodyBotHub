@@ -477,4 +477,17 @@ describe('HubStore invariants', () => {
     })
     store.close()
   })
+
+  it('persists tools, ordered tool packages, and Skill Package authorization links', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Tools')
+    const tool = store.createTool({ workspaceId: linked.id, name: 'Echo check', description: 'safe test', executorType: 'command', command: 'printf', argumentsTemplate: ['%s', '{{message}}'], inputSchema: { type: 'object', required: ['message'] }, timeoutSeconds: 5, enabled: true })
+    const pack = store.createToolPackage({ workspaceId: linked.id, name: 'Echo workflow', description: '', prompt: 'Only after evidence is complete', approvalRequired: true, approverIds: ['ou_reviewer'], cardTitle: 'Confirm echo', cardDescription: 'Test operation', enabled: true, steps: [{ toolId: tool.id, toolName: tool.name, phase: 'verify', position: 0, arguments: {} }] })
+    const skill = store.createSkillPackage({ workspaceId: linked.id, name: 'Triage with action', description: '', prompt: '', skills: [], toolPackageIds: [pack.id], fallbackMode: 'package_first' })
+    expect(store.listTools()).toMatchObject([{ id: tool.id, argumentsTemplate: ['%s', '{{message}}'] }])
+    expect(store.listToolPackages()).toMatchObject([{ id: pack.id, approverIds: ['ou_reviewer'], steps: [{ toolId: tool.id, phase: 'verify' }] }])
+    expect(store.listSkillPackages()).toMatchObject([{ id: skill.id, toolPackageIds: [pack.id] }])
+    expect(() => store.deleteTool(tool.id)).toThrow()
+    store.close()
+  })
 })

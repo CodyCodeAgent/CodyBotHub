@@ -3,7 +3,7 @@ import path from 'node:path'
 import { channelCommandId, type ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import type { CodexEvent } from '@codycodeagent/cody-web-core/conversation'
 import { createRuntimeAppServerHost, type AppServerHost } from '@codycodeagent/cody-web-core/runtime'
-import { buildTurnUserInput, CodexSessionManager, type CodexModelOption, type CodexSkillOption, type ExecutionContext, type ExecutionPolicyProvider, type TurnInput, type TurnInputSkill, type TurnOutcome } from '@codycodeagent/cody-web-core/session'
+import { buildTurnUserInput, CodexSessionManager, type CodexModelOption, type CodexSkillOption, type DynamicToolProvider, type ExecutionContext, type ExecutionPolicyProvider, type ThreadBinding, type TurnInput, type TurnInputSkill, type TurnOutcome } from '@codycodeagent/cody-web-core/session'
 import type { HubStore } from './db.js'
 import { readSkillSearchTags, relevance, WorkspaceResourceIndex, type KnowledgeResource } from './resources.js'
 import type { AgentRuntimeKind, InvestigationSkillRecord, InvestigationTraceRecord, InvestigationToolRecord, ModelConfigSource, ResolvedModelConfig, ResolvedRoute } from './types.js'
@@ -116,6 +116,7 @@ const isWithin = (root: string, filename: string): boolean => {
 export class CodyBotRuntime {
   private readonly engines = new Map<AgentRuntimeKind, EngineState>()
   private readonly resources = new WorkspaceResourceIndex()
+  private toolInvoker: ((call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>) | null = null
 
   constructor(
     private readonly store: HubStore,
@@ -123,6 +124,10 @@ export class CodyBotRuntime {
     private readonly commands: Partial<Record<AgentRuntimeKind, string>> = { codex: 'codex', traex: 'traex' },
     private readonly turnTimeoutMs = 15 * 60 * 1000,
   ) {}
+
+  setToolPackageInvoker(invoker: (call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>): void {
+    this.toolInvoker = invoker
+  }
 
   async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void): Promise<string> {
     const channel = this.store.getThreadChannel(route.threadChannelId)
@@ -272,7 +277,17 @@ export class CodyBotRuntime {
       cwd: this.runtimeDirectory,
       initializeParams: { clientInfo: { name: 'cody-bot-hub', title: 'CodyBotHub', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } },
     })
-    const manager = new CodexSessionManager({ host, policy })
+    const dynamicTools: DynamicToolProvider = { invoke: async (call, binding) => {
+      if (call.namespace !== 'codybothub' || call.tool !== 'invoke_tool_package') throw new Error(`Unknown CodyBotHub tool: ${call.namespace ?? ''}.${call.tool}`)
+      if (!this.toolInvoker) throw new Error('CodyBotHub tool package service is unavailable')
+      const args = call.arguments && typeof call.arguments === 'object' && !Array.isArray(call.arguments) ? call.arguments as Record<string, unknown> : {}
+      const packageId = typeof args.packageId === 'string' ? args.packageId : ''
+      if (!packageId) throw new Error('packageId is required')
+      const input = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments) ? args.arguments as Record<string, unknown> : {}
+      const result = await this.toolInvoker({ callId: call.callId, packageId, arguments: input, reason: typeof args.reason === 'string' ? args.reason : '' }, binding)
+      return { contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: result.status !== 'failed' }
+    } }
+    const manager = new CodexSessionManager({ host, policy, dynamicTools })
     const state: EngineState = { kind, host, manager, attached: new Set(), attaching: new Map() }
     this.engines.set(kind, state)
     try {
@@ -316,6 +331,25 @@ export class CodyBotRuntime {
         baseInstructions: null,
         experimentalRawEvents: false,
         ephemeral: false,
+        dynamicTools: [{
+          type: 'namespace',
+          name: 'codybothub',
+          description: 'CodyBotHub 中由管理员注册、可审批、可审计的业务操作。',
+          tools: [{
+            type: 'function',
+            name: 'invoke_tool_package',
+            description: '在完成分析并有足够证据后，申请或执行当前技能包关联的工具包。需要审批时会发送飞书确认卡片。',
+            inputSchema: {
+              type: 'object',
+              properties: {
+                packageId: { type: 'string', description: '工具包 ID，只能使用当前上下文列出的 ID' },
+                arguments: { type: 'object', description: '工具包所需业务参数' },
+                reason: { type: 'string', description: '执行原因、证据和预期影响' },
+              },
+              required: ['packageId', 'arguments', 'reason'], additionalProperties: false,
+            },
+          }],
+        }],
       },
       turn: {
         cwd,
@@ -379,6 +413,12 @@ export class CodyBotRuntime {
     const missing = requested.filter(name => !uniquePrimary.some(skill => skill.name === name || skill.displayName === name || path.basename(path.dirname(skill.path)) === name))
     const skillLines = candidateTrace.map(item => `- ${item.name}：${item.description || '未提供描述'}\n  SKILL.md：${item.path}`).join('\n')
     const knowledgeLines = knowledge.map(item => `- ${item.title}：${item.path}${item.description ? `\n  ${item.description}` : ''}`).join('\n')
+    const toolPackages = this.store.listToolPackages().filter(item => item.enabled && item.workspaceId === route.workspace.id && route.skillPackages.some(skillPackage => skillPackage.toolPackageIds.includes(item.id)))
+    const toolPackageLines = toolPackages.map(item => [
+      `- ${item.name}（packageId: ${item.id}）${item.approvalRequired ? '，需要人工确认' : '，可直接执行'}`,
+      `  ${item.description || item.prompt || '未提供说明'}`,
+      `  步骤：${item.steps.map(step => `${step.phase}:${step.toolName}`).join(' → ') || '未配置'}`,
+    ].join('\n')).join('\n')
     const policy = mode === 'package_only'
       ? '本轮为 package_only：只使用首选 Skill，不得读取或启用候选 Skill、知识库或其他工作区能力。'
       : mode === 'package_first'
@@ -393,6 +433,7 @@ export class CodyBotRuntime {
       mode === 'package_only' ? '' : `## 知识资源\n知识根目录：${knowledgeRoots.join('、') || '未识别'}\n${knowledgeLines || '当前没有识别到知识文件；仍可在工作区内搜索 README、文档和 Skill references。'}`,
       mode === 'package_only' ? '' : `## 代码\n代码根目录：${codeRoot}\n允许使用 rg 搜索代码、配置和 Git 历史，以确认当前实现。`,
       mode === 'package_only' ? '' : '## 调查要求\n对告警、故障和数据差异任务，应提取关键 ID、时间、地区、服务和链接；交叉验证知识、代码、配置、数据库与日志；建立时间线并主动排除主要反例。没有实际查询证据时只能标记为“初判”。只有样本、规则或配置、运行事实和排除证据相互闭合时才可输出确定根因。遇到权限、工具或数据阻塞时，列出已经执行的查询和具体阻塞。',
+      toolPackageLines ? `## 可执行工具包\n分析完成后，只有确实需要改变外部系统状态时，才调用 codybothub.invoke_tool_package。必须使用这里列出的 packageId，并传入完整业务参数与可审计的执行理由。若返回 awaiting_approval，告诉用户审批卡片已发出，本轮不要假设动作已执行。\n${toolPackageLines}` : '',
     ].filter(Boolean).join('\n\n')
     return { attached, instructions, trace }
   }

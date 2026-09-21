@@ -14,6 +14,8 @@ import ConversationThreadsView from './views/ConversationThreadsView.vue'
 import SkillsView from './views/SkillsView.vue'
 import ThreadRoutingView from './views/ThreadRoutingView.vue'
 import GuideView from './views/GuideView.vue'
+import ToolsView from './views/ToolsView.vue'
+import ToolPackagesView from './views/ToolPackagesView.vue'
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -27,6 +29,8 @@ export const router = createRouter({
     { path: '/conversation-threads', name: 'conversation-threads', component: ConversationThreadsView },
     { path: '/thread-routing', name: 'thread-routing', component: ThreadRoutingView },
     { path: '/packages', name: 'packages', component: PackagesView },
+    { path: '/tools', name: 'tools', component: ToolsView },
+    { path: '/tool-packages', name: 'tool-packages', component: ToolPackagesView },
     { path: '/skills', name: 'skills', component: SkillsView },
     { path: '/messages', name: 'messages', component: MessagesView },
     { path: '/accounts', name: 'accounts', component: AccountsView },

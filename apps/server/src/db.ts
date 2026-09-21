@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AgentRuntimeKind, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, StoreHealthRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AgentRuntimeKind, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, StoreHealthRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, ToolPackageExecutionRecord, ToolPackageRecord, ToolRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
@@ -17,6 +17,9 @@ const now = () => new Date().toISOString()
 const list = (value: unknown): string[] => {
   try { return JSON.parse(String(value)) as string[] } catch { return [] }
 }
+const object = (value: unknown): Record<string, unknown> => {
+  try { const parsed = JSON.parse(String(value)); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {} } catch { return {} }
+}
 
 export class HubStore {
   readonly db: DatabaseSync
@@ -29,6 +32,11 @@ export class HubStore {
   }
 
   close(): void { this.db.close() }
+
+  recoverInterruptedToolExecutions(): number {
+    const timestamp = now()
+    return Number(this.db.prepare("UPDATE tool_package_executions SET status = 'failed', error = '服务在工具执行期间重启，外部副作用状态未知，请人工核对后再决定是否重试', completed_at = ?, updated_at = ? WHERE status = 'running'").run(timestamp, timestamp).changes)
+  }
 
   private migrate(): void {
     this.db.exec(`
@@ -140,6 +148,75 @@ export class HubStore {
         skill_package_id TEXT NOT NULL REFERENCES skill_packages(id) ON DELETE CASCADE,
         position INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (scene_id, skill_package_id)
+      );
+      CREATE TABLE IF NOT EXISTS tools (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        executor_type TEXT NOT NULL DEFAULT 'bits_rpc' CHECK (executor_type IN ('bits_rpc', 'command')),
+        command TEXT NOT NULL DEFAULT 'bits',
+        arguments_template_json TEXT NOT NULL DEFAULT '[]',
+        input_schema_json TEXT NOT NULL DEFAULT '{}',
+        timeout_seconds INTEGER NOT NULL DEFAULT 60,
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, name)
+      );
+      CREATE TABLE IF NOT EXISTS tool_packages (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE RESTRICT,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        prompt TEXT NOT NULL DEFAULT '',
+        approval_required INTEGER NOT NULL DEFAULT 1 CHECK (approval_required IN (0, 1)),
+        approver_ids_json TEXT NOT NULL DEFAULT '[]',
+        card_title TEXT NOT NULL DEFAULT '',
+        card_description TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (workspace_id, name)
+      );
+      CREATE TABLE IF NOT EXISTS tool_package_steps (
+        tool_package_id TEXT NOT NULL REFERENCES tool_packages(id) ON DELETE CASCADE,
+        tool_id TEXT NOT NULL REFERENCES tools(id) ON DELETE RESTRICT,
+        phase TEXT NOT NULL DEFAULT 'execute' CHECK (phase IN ('precheck', 'execute', 'verify')),
+        position INTEGER NOT NULL DEFAULT 0,
+        arguments_json TEXT NOT NULL DEFAULT '{}',
+        PRIMARY KEY (tool_package_id, position)
+      );
+      CREATE TABLE IF NOT EXISTS skill_package_tool_packages (
+        skill_package_id TEXT NOT NULL REFERENCES skill_packages(id) ON DELETE CASCADE,
+        tool_package_id TEXT NOT NULL REFERENCES tool_packages(id) ON DELETE CASCADE,
+        position INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (skill_package_id, tool_package_id)
+      );
+      CREATE TABLE IF NOT EXISTS tool_package_executions (
+        id TEXT PRIMARY KEY,
+        call_id TEXT NOT NULL,
+        tool_package_id TEXT NOT NULL REFERENCES tool_packages(id) ON DELETE RESTRICT,
+        tool_package_name TEXT NOT NULL,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        scene_id TEXT NOT NULL DEFAULT '',
+        chat_id TEXT NOT NULL,
+        topic_id TEXT NOT NULL DEFAULT '',
+        thread_channel_id TEXT NOT NULL REFERENCES thread_channels(id) ON DELETE CASCADE,
+        core_thread_id TEXT NOT NULL DEFAULT '',
+        source_message_id TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('awaiting_approval', 'queued', 'running', 'completed', 'failed', 'rejected')),
+        arguments_json TEXT NOT NULL DEFAULT '{}',
+        reason TEXT NOT NULL DEFAULT '',
+        requested_by TEXT NOT NULL DEFAULT '',
+        approved_by TEXT NOT NULL DEFAULT '',
+        card_message_id TEXT NOT NULL DEFAULT '',
+        result_json TEXT NOT NULL DEFAULT 'null',
+        error TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        completed_at TEXT NOT NULL DEFAULT '',
+        UNIQUE (thread_channel_id, call_id)
       );
       CREATE TABLE IF NOT EXISTS bot_operators (
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
@@ -837,6 +914,7 @@ export class HubStore {
     const id = randomUUID(), timestamp = now()
     this.db.prepare(`INSERT INTO skill_packages (id, workspace_id, name, description, prompt, skills_json, fallback_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(id, input.workspaceId, input.name, input.description, input.prompt, JSON.stringify(input.skills), input.fallbackMode, timestamp, timestamp)
+    this.setSkillPackageTools(id, input.toolPackageIds ?? [])
     return this.getSkillPackage(id)
   }
   updateSkillPackage(id: string, input: Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'>): SkillPackageRecord {
@@ -846,6 +924,8 @@ export class HubStore {
     const result = this.db.prepare(`UPDATE skill_packages SET workspace_id = ?, name = ?, description = ?, prompt = ?, skills_json = ?, fallback_mode = ?, updated_at = ? WHERE id = ?`)
       .run(input.workspaceId, input.name, input.description, input.prompt, JSON.stringify(input.skills), input.fallbackMode, now(), id)
     if (!result.changes) throw new Error('Skill Package not found')
+    this.db.prepare('DELETE FROM skill_package_tool_packages WHERE skill_package_id = ?').run(id)
+    this.setSkillPackageTools(id, input.toolPackageIds ?? [])
     return this.getSkillPackage(id)
   }
   deleteSkillPackage(id: string): void { if (!this.db.prepare('DELETE FROM skill_packages WHERE id = ?').run(id).changes) throw new Error('Skill Package not found') }
@@ -854,7 +934,99 @@ export class HubStore {
     if (!row) throw new Error('Skill Package not found')
     return this.skillPackage(row)
   }
-  private skillPackage = (row: Row): SkillPackageRecord => ({ id: String(row.id), workspaceId: String(row.workspace_id), name: String(row.name), description: String(row.description), prompt: String(row.prompt), skills: list(row.skills_json), fallbackMode: String(row.fallback_mode) as SkillPackageRecord['fallbackMode'], createdAt: String(row.created_at), updatedAt: String(row.updated_at) })
+  private setSkillPackageTools(id: string, ids: string[]): void {
+    const add = this.db.prepare('INSERT INTO skill_package_tool_packages (skill_package_id, tool_package_id, position) VALUES (?, ?, ?)')
+    ids.forEach((toolPackageId, index) => add.run(id, toolPackageId, index))
+  }
+  private skillPackage = (row: Row): SkillPackageRecord => ({
+    id: String(row.id), workspaceId: String(row.workspace_id), name: String(row.name), description: String(row.description), prompt: String(row.prompt), skills: list(row.skills_json),
+    toolPackageIds: (this.db.prepare('SELECT tool_package_id FROM skill_package_tool_packages WHERE skill_package_id = ? ORDER BY position').all(String(row.id)) as Row[]).map(item => String(item.tool_package_id)),
+    fallbackMode: String(row.fallback_mode) as SkillPackageRecord['fallbackMode'], createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  })
+
+  listTools(): ToolRecord[] { return (this.db.prepare('SELECT * FROM tools ORDER BY name COLLATE NOCASE').all() as Row[]).map(this.tool) }
+  getTool(id: string): ToolRecord {
+    const row = this.db.prepare('SELECT * FROM tools WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Tool not found')
+    return this.tool(row)
+  }
+  createTool(input: Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt'>): ToolRecord {
+    this.assertWorkspaces([input.workspaceId])
+    const id = randomUUID(), timestamp = now()
+    this.db.prepare('INSERT INTO tools (id, workspace_id, name, description, executor_type, command, arguments_template_json, input_schema_json, timeout_seconds, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, input.workspaceId, input.name, input.description, input.executorType, input.command, JSON.stringify(input.argumentsTemplate), JSON.stringify(input.inputSchema), input.timeoutSeconds, input.enabled ? 1 : 0, timestamp, timestamp)
+    return this.getTool(id)
+  }
+  updateTool(id: string, input: Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt'>): ToolRecord {
+    this.assertWorkspaces([input.workspaceId])
+    const result = this.db.prepare('UPDATE tools SET workspace_id = ?, name = ?, description = ?, executor_type = ?, command = ?, arguments_template_json = ?, input_schema_json = ?, timeout_seconds = ?, enabled = ?, updated_at = ? WHERE id = ?')
+      .run(input.workspaceId, input.name, input.description, input.executorType, input.command, JSON.stringify(input.argumentsTemplate), JSON.stringify(input.inputSchema), input.timeoutSeconds, input.enabled ? 1 : 0, now(), id)
+    if (!result.changes) throw new Error('Tool not found')
+    return this.getTool(id)
+  }
+  deleteTool(id: string): void { if (!this.db.prepare('DELETE FROM tools WHERE id = ?').run(id).changes) throw new Error('Tool not found') }
+  private tool = (row: Row): ToolRecord => ({ id: String(row.id), workspaceId: String(row.workspace_id), name: String(row.name), description: String(row.description), executorType: String(row.executor_type) as ToolRecord['executorType'], command: String(row.command), argumentsTemplate: list(row.arguments_template_json), inputSchema: object(row.input_schema_json), timeoutSeconds: Number(row.timeout_seconds), enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at) })
+
+  listToolPackages(): ToolPackageRecord[] { return (this.db.prepare('SELECT * FROM tool_packages ORDER BY name COLLATE NOCASE').all() as Row[]).map(this.toolPackage) }
+  getToolPackage(id: string): ToolPackageRecord {
+    const row = this.db.prepare('SELECT * FROM tool_packages WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Tool Package not found')
+    return this.toolPackage(row)
+  }
+  createToolPackage(input: Omit<ToolPackageRecord, 'id' | 'createdAt' | 'updatedAt'>): ToolPackageRecord {
+    this.assertWorkspaces([input.workspaceId]); const id = randomUUID(), timestamp = now()
+    this.db.prepare('INSERT INTO tool_packages (id, workspace_id, name, description, prompt, approval_required, approver_ids_json, card_title, card_description, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, input.workspaceId, input.name, input.description, input.prompt, input.approvalRequired ? 1 : 0, JSON.stringify(input.approverIds), input.cardTitle, input.cardDescription, input.enabled ? 1 : 0, timestamp, timestamp)
+    this.setToolPackageSteps(id, input.steps)
+    return this.getToolPackage(id)
+  }
+  updateToolPackage(id: string, input: Omit<ToolPackageRecord, 'id' | 'createdAt' | 'updatedAt'>): ToolPackageRecord {
+    this.assertWorkspaces([input.workspaceId])
+    const result = this.db.prepare('UPDATE tool_packages SET workspace_id = ?, name = ?, description = ?, prompt = ?, approval_required = ?, approver_ids_json = ?, card_title = ?, card_description = ?, enabled = ?, updated_at = ? WHERE id = ?')
+      .run(input.workspaceId, input.name, input.description, input.prompt, input.approvalRequired ? 1 : 0, JSON.stringify(input.approverIds), input.cardTitle, input.cardDescription, input.enabled ? 1 : 0, now(), id)
+    if (!result.changes) throw new Error('Tool Package not found')
+    this.db.prepare('DELETE FROM tool_package_steps WHERE tool_package_id = ?').run(id); this.setToolPackageSteps(id, input.steps)
+    return this.getToolPackage(id)
+  }
+  deleteToolPackage(id: string): void { if (!this.db.prepare('DELETE FROM tool_packages WHERE id = ?').run(id).changes) throw new Error('Tool Package not found') }
+  private setToolPackageSteps(id: string, steps: ToolPackageRecord['steps']): void {
+    const add = this.db.prepare('INSERT INTO tool_package_steps (tool_package_id, tool_id, phase, position, arguments_json) VALUES (?, ?, ?, ?, ?)')
+    steps.forEach((step, index) => add.run(id, step.toolId, step.phase, index, JSON.stringify(step.arguments)))
+  }
+  private toolPackage = (row: Row): ToolPackageRecord => ({
+    id: String(row.id), workspaceId: String(row.workspace_id), name: String(row.name), description: String(row.description), prompt: String(row.prompt), approvalRequired: Boolean(row.approval_required), approverIds: list(row.approver_ids_json), cardTitle: String(row.card_title), cardDescription: String(row.card_description), enabled: Boolean(row.enabled),
+    steps: (this.db.prepare('SELECT s.*, t.name AS tool_name FROM tool_package_steps s JOIN tools t ON t.id = s.tool_id WHERE s.tool_package_id = ? ORDER BY s.position').all(String(row.id)) as Row[]).map(item => ({ toolId: String(item.tool_id), toolName: String(item.tool_name), phase: String(item.phase) as 'precheck' | 'execute' | 'verify', position: Number(item.position), arguments: object(item.arguments_json) })),
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
+  })
+
+  createToolPackageExecution(input: Pick<ToolPackageExecutionRecord, 'callId' | 'toolPackageId' | 'botId' | 'sceneId' | 'chatId' | 'topicId' | 'threadChannelId' | 'coreThreadId' | 'sourceMessageId' | 'arguments' | 'reason' | 'requestedBy'> & { status: ToolPackageExecutionRecord['status'] }): ToolPackageExecutionRecord {
+    const pack = this.getToolPackage(input.toolPackageId), id = randomUUID(), timestamp = now()
+    this.db.prepare('INSERT INTO tool_package_executions (id, call_id, tool_package_id, tool_package_name, bot_id, scene_id, chat_id, topic_id, thread_channel_id, core_thread_id, source_message_id, status, arguments_json, reason, requested_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, input.callId, pack.id, pack.name, input.botId, input.sceneId, input.chatId, input.topicId, input.threadChannelId, input.coreThreadId, input.sourceMessageId, input.status, JSON.stringify(input.arguments), input.reason, input.requestedBy, timestamp, timestamp)
+    return this.getToolPackageExecution(id)
+  }
+  getToolPackageExecution(id: string): ToolPackageExecutionRecord {
+    const row = this.db.prepare('SELECT * FROM tool_package_executions WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Tool Package execution not found')
+    return this.toolPackageExecution(row)
+  }
+  findToolPackageExecution(threadChannelId: string, callId: string): ToolPackageExecutionRecord | null {
+    const row = this.db.prepare('SELECT * FROM tool_package_executions WHERE thread_channel_id = ? AND call_id = ?').get(threadChannelId, callId) as Row | undefined
+    return row ? this.toolPackageExecution(row) : null
+  }
+  listToolPackageExecutions(limit = 100): ToolPackageExecutionRecord[] { return (this.db.prepare('SELECT * FROM tool_package_executions ORDER BY created_at DESC LIMIT ?').all(limit) as Row[]).map(this.toolPackageExecution) }
+  updateToolPackageExecution(id: string, patch: Partial<Pick<ToolPackageExecutionRecord, 'status' | 'approvedBy' | 'cardMessageId' | 'result' | 'error' | 'completedAt'>>): ToolPackageExecutionRecord {
+    const current = this.getToolPackageExecution(id)
+    this.db.prepare('UPDATE tool_package_executions SET status = ?, approved_by = ?, card_message_id = ?, result_json = ?, error = ?, completed_at = ?, updated_at = ? WHERE id = ?')
+      .run(patch.status ?? current.status, patch.approvedBy ?? current.approvedBy, patch.cardMessageId ?? current.cardMessageId, JSON.stringify(patch.result === undefined ? current.result : patch.result), patch.error ?? current.error, patch.completedAt ?? current.completedAt, now(), id)
+    return this.getToolPackageExecution(id)
+  }
+  transitionToolPackageExecution(id: string, from: ToolPackageExecutionRecord['status'], to: ToolPackageExecutionRecord['status'], approvedBy = '', completedAt = ''): ToolPackageExecutionRecord | null {
+    const result = this.db.prepare('UPDATE tool_package_executions SET status = ?, approved_by = ?, completed_at = ?, updated_at = ? WHERE id = ? AND status = ?')
+      .run(to, approvedBy, completedAt, now(), id, from)
+    return result.changes ? this.getToolPackageExecution(id) : null
+  }
+  private toolPackageExecution = (row: Row): ToolPackageExecutionRecord => ({ id: String(row.id), callId: String(row.call_id), toolPackageId: String(row.tool_package_id), toolPackageName: String(row.tool_package_name), botId: String(row.bot_id), sceneId: String(row.scene_id), chatId: String(row.chat_id), topicId: String(row.topic_id), threadChannelId: String(row.thread_channel_id), coreThreadId: String(row.core_thread_id), sourceMessageId: String(row.source_message_id), status: String(row.status) as ToolPackageExecutionRecord['status'], arguments: object(row.arguments_json), reason: String(row.reason), requestedBy: String(row.requested_by), approvedBy: String(row.approved_by), cardMessageId: String(row.card_message_id), result: (() => { try { return JSON.parse(String(row.result_json)) as unknown } catch { return null } })(), error: String(row.error), createdAt: String(row.created_at), updatedAt: String(row.updated_at), completedAt: String(row.completed_at) })
 
   stats(): {
     workspaces: number; bots: number; scenes: number; skillPackages: number; messageLogs: number
@@ -1239,6 +1411,12 @@ export class HubStore {
   getMessageLog(id: string): MessageLogRecord {
     const row = this.db.prepare('SELECT * FROM message_logs WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new Error('Message log not found')
+    return this.messageLog(row)
+  }
+
+  latestMessageLogForThreadChannel(threadChannelId: string): MessageLogRecord {
+    const row = this.db.prepare('SELECT * FROM message_logs WHERE thread_channel_id = ? ORDER BY received_at DESC, id DESC LIMIT 1').get(threadChannelId) as Row | undefined
+    if (!row) throw new Error('Message log not found for Thread Channel')
     return this.messageLog(row)
   }
 
