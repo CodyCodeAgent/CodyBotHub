@@ -1,4 +1,4 @@
-import type { AdminAccount, AgentRuntimeKind, AuditLog, Bot, ChatMetadata, ConversationThread, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, SystemHealth, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Tool, ToolPackage, ToolPackageExecution, Workspace, WorkspaceResources } from './types'
+import type { AdminAccount, AgentRuntimeKind, AuditLog, Bot, ChatMetadata, ConversationThread, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, SystemHealth, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Tool, ToolPackage, ToolPackageExecution, ToolScriptVersion, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -111,6 +111,7 @@ export const api = {
   tools: () => request<Tool[]>('/tools'),
   toolsPage: (limit = 20, offset = 0) => request<PageResult<Tool>>(`/tools/page?limit=${limit}&offset=${offset}`),
   saveTool: (value: Record<string, unknown> & { id?: string }) => request<Tool>(value.id ? `/tools/${value.id}` : '/tools', { method: value.id ? 'PUT' : 'POST', body: JSON.stringify(value) }),
+  toolScriptVersions: (id: string) => request<ToolScriptVersion[]>(`/tools/${encodeURIComponent(id)}/versions`),
   deleteTool: (id: string) => request<void>(`/tools/${id}`, { method: 'DELETE' }),
   toolPackages: () => request<ToolPackage[]>('/tool-packages'),
   toolPackagesPage: (limit = 20, offset = 0) => request<PageResult<ToolPackage>>(`/tool-packages/page?limit=${limit}&offset=${offset}`),

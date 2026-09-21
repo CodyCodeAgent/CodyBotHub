@@ -156,6 +156,15 @@ export interface SkillPackageRecord {
 }
 
 export type ToolExecutorType = 'bits_rpc' | 'command'
+export type ToolScriptLanguage = 'python' | 'shell' | 'node'
+export interface BitsRpcConfig {
+  service: string
+  method: string
+  vregion: string
+  environment: string
+  cluster: string
+  requestTemplate: Record<string, unknown>
+}
 export interface ToolRecord {
   id: string
   workspaceId: string
@@ -165,10 +174,22 @@ export interface ToolRecord {
   command: string
   argumentsTemplate: string[]
   inputSchema: Record<string, unknown>
+  rpcConfig: BitsRpcConfig
+  scriptLanguage: ToolScriptLanguage | ''
+  scriptContent: string
+  scriptVersion: number
   timeoutSeconds: number
   enabled: boolean
   createdAt: string
   updatedAt: string
+}
+
+export interface ToolScriptVersionRecord {
+  toolId: string
+  version: number
+  language: ToolScriptLanguage
+  content: string
+  createdAt: string
 }
 
 export interface ToolPackageStepRecord {

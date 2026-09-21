@@ -1,4 +1,4 @@
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import path from 'node:path'
@@ -45,6 +45,7 @@ const required = (body: Json, key: string): string => {
   return value.trim()
 }
 const optional = (body: Json, key: string): string => typeof body[key] === 'string' ? String(body[key]).trim() : ''
+const rawString = (body: Json, key: string): string => typeof body[key] === 'string' ? String(body[key]) : ''
 const stringList = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean) : []
 const bool = (value: unknown, fallback = false): boolean => typeof value === 'boolean' ? value : fallback
 const number = (value: unknown, fallback: number): number => typeof value === 'number' && Number.isFinite(value) ? value : fallback
@@ -367,10 +368,12 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
 
         if (method === 'GET' && url.pathname === '/api/tools/page') return sendJson(response, 200, page(store.listTools(), url))
         if (method === 'GET' && url.pathname === '/api/tools') return sendJson(response, 200, store.listTools())
-        if (method === 'POST' && url.pathname === '/api/tools') { const result = store.createTool(toolInput(await readJson(request))); audit('tool.create', 'tool', result.id, `创建工具 ${result.name}`); return sendJson(response, 201, result) }
+        if (method === 'POST' && url.pathname === '/api/tools') { const result = store.createTool(toolInput(await readJson(request))); syncToolSource(store, result); audit('tool.create', 'tool', result.id, `创建工具 ${result.name}`); return sendJson(response, 201, result) }
+        const toolVersions = url.pathname.match(/^\/api\/tools\/([^/]+)\/versions$/u)
+        if (toolVersions && method === 'GET') return sendJson(response, 200, store.listToolScriptVersions(decodeURIComponent(toolVersions[1]!)))
         const toolId = matchId(url.pathname, '/api/tools/')
-        if (toolId && method === 'PUT') { const result = store.updateTool(toolId, toolInput(await readJson(request))); audit('tool.update', 'tool', result.id, `更新工具 ${result.name}`); return sendJson(response, 200, result) }
-        if (toolId && method === 'DELETE') { const item = store.listTools().find(value => value.id === toolId); store.deleteTool(toolId); audit('tool.delete', 'tool', toolId, `删除工具 ${item?.name ?? toolId}`); response.statusCode = 204; return response.end() }
+        if (toolId && method === 'PUT') { const previous = store.getTool(toolId); const result = store.updateTool(toolId, toolInput(await readJson(request))); if (previous.workspaceId !== result.workspaceId) removeToolSource(store, previous); syncToolSource(store, result); audit('tool.update', 'tool', result.id, `更新工具 ${result.name}`); return sendJson(response, 200, result) }
+        if (toolId && method === 'DELETE') { const item = store.getTool(toolId); store.deleteTool(toolId); removeToolSource(store, item); audit('tool.delete', 'tool', toolId, `删除工具 ${item.name}`); response.statusCode = 204; return response.end() }
 
         if (method === 'GET' && url.pathname === '/api/tool-packages/page') return sendJson(response, 200, page(store.listToolPackages(), url))
         if (method === 'GET' && url.pathname === '/api/tool-packages') return sendJson(response, 200, store.listToolPackages())
@@ -420,9 +423,33 @@ const skillPackageInput = (body: Json): Omit<SkillPackageRecord, 'id' | 'created
 })
 
 const objectValue = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-const toolInput = (body: Json): Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt'> => {
-  const executorType = body.executorType === 'command' ? 'command' : 'bits_rpc'
-  return { workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), description: optional(body, 'description'), executorType, command: optional(body, 'command') || 'bits', argumentsTemplate: stringList(body.argumentsTemplate), inputSchema: objectValue(body.inputSchema), timeoutSeconds: Math.min(900, Math.max(1, number(body.timeoutSeconds, 60))), enabled: bool(body.enabled, true) }
+const removeToolSource = (store: HubStore, tool: ToolRecord): void => {
+  const workspace = store.getWorkspace(tool.workspaceId)
+  rmSync(path.join(workspace.path, '.codybothub', 'tools', tool.id), { recursive: true, force: true })
+}
+const syncToolSource = (store: HubStore, tool: ToolRecord): void => {
+  const workspace = store.getWorkspace(tool.workspaceId)
+  const directory = path.join(workspace.path, '.codybothub', 'tools', tool.id)
+  if (!tool.scriptContent) { removeToolSource(store, tool); return }
+  const extension = tool.scriptLanguage === 'shell' ? 'sh' : tool.scriptLanguage === 'node' ? 'js' : 'py'
+  mkdirSync(directory, { recursive: true })
+  writeFileSync(path.join(directory, `main.${extension}`), tool.scriptContent, { encoding: 'utf8', mode: 0o700 })
+  writeFileSync(path.join(directory, 'tool.json'), `${JSON.stringify({ id: tool.id, name: tool.name, language: tool.scriptLanguage, version: tool.scriptVersion, updatedAt: tool.updatedAt }, null, 2)}\n`, 'utf8')
+}
+const toolInput = (body: Json): Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt' | 'scriptVersion'> => {
+  const requestedType = String(body.executorType ?? 'bits_rpc')
+  const executorType: ToolRecord['executorType'] = requestedType === 'bits_rpc' ? 'bits_rpc' : 'command'
+  const rpc = objectValue(body.rpcConfig), requestTemplate = objectValue(rpc.requestTemplate)
+  const rpcConfig: ToolRecord['rpcConfig'] = {
+    service: optional(rpc, 'service'), method: optional(rpc, 'method'), vregion: optional(rpc, 'vregion'),
+    environment: optional(rpc, 'environment') || 'prod', cluster: optional(rpc, 'cluster') || 'default', requestTemplate,
+  }
+  if (executorType === 'bits_rpc' && (!rpcConfig.service || !rpcConfig.method)) throw new HttpError(400, 'Bits RPC service and method are required')
+  const language: ToolRecord['scriptLanguage'] = body.scriptLanguage === 'shell' || body.scriptLanguage === 'node' ? body.scriptLanguage : 'python'
+  const scriptContent = requestedType === 'script' ? rawString(body, 'scriptContent') : ''
+  if (requestedType === 'script' && !scriptContent.trim()) throw new HttpError(400, 'Script content is required')
+  const command = executorType === 'bits_rpc' ? (optional(body, 'command') || 'gdpa-cli') : requestedType === 'script' ? '' : required(body, 'command')
+  return { workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), description: optional(body, 'description'), executorType, command, argumentsTemplate: stringList(body.argumentsTemplate), inputSchema: objectValue(body.inputSchema), rpcConfig, scriptLanguage: scriptContent ? language : '', scriptContent, timeoutSeconds: Math.min(900, Math.max(1, number(body.timeoutSeconds, 60))), enabled: bool(body.enabled, true) }
 }
 const toolPackageInput = (body: Json, store: HubStore): Omit<ToolPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => {
   const workspaceId = required(body, 'workspaceId'), tools = new Map(store.listTools().map(item => [item.id, item]))

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AgentRuntimeKind, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, StoreHealthRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, ToolPackageExecutionRecord, ToolPackageRecord, ToolRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AgentRuntimeKind, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, StoreHealthRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, ToolPackageExecutionRecord, ToolPackageRecord, ToolRecord, ToolScriptVersionRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
@@ -13,6 +13,7 @@ type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'mod
   retrieval?: SceneRecord['retrieval']
   skillPackageIds?: string[]
 }
+type ToolWriteInput = Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt' | 'rpcConfig' | 'scriptLanguage' | 'scriptContent' | 'scriptVersion'> & Partial<Pick<ToolRecord, 'rpcConfig' | 'scriptLanguage' | 'scriptContent' | 'scriptVersion'>>
 const now = () => new Date().toISOString()
 const list = (value: unknown): string[] => {
   try { return JSON.parse(String(value)) as string[] } catch { return [] }
@@ -158,11 +159,23 @@ export class HubStore {
         command TEXT NOT NULL DEFAULT 'bits',
         arguments_template_json TEXT NOT NULL DEFAULT '[]',
         input_schema_json TEXT NOT NULL DEFAULT '{}',
+        rpc_config_json TEXT NOT NULL DEFAULT '{}',
+        script_language TEXT NOT NULL DEFAULT '',
+        script_content TEXT NOT NULL DEFAULT '',
+        script_version INTEGER NOT NULL DEFAULT 0,
         timeout_seconds INTEGER NOT NULL DEFAULT 60,
         enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (workspace_id, name)
+      );
+      CREATE TABLE IF NOT EXISTS tool_script_versions (
+        tool_id TEXT NOT NULL REFERENCES tools(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        language TEXT NOT NULL CHECK (language IN ('python', 'shell', 'node')),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (tool_id, version)
       );
       CREATE TABLE IF NOT EXISTS tool_packages (
         id TEXT PRIMARY KEY,
@@ -497,6 +510,11 @@ export class HubStore {
     if (!sceneColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE scenes ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if (!sceneColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE scenes ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
     if (!sceneColumns.some(column => String(column.name) === 'retrieval_config_json')) this.db.exec("ALTER TABLE scenes ADD COLUMN retrieval_config_json TEXT NOT NULL DEFAULT '{}'")
+    const toolColumns = this.db.prepare('PRAGMA table_info(tools)').all() as Row[]
+    if (!toolColumns.some(column => String(column.name) === 'rpc_config_json')) this.db.exec("ALTER TABLE tools ADD COLUMN rpc_config_json TEXT NOT NULL DEFAULT '{}'")
+    if (!toolColumns.some(column => String(column.name) === 'script_language')) this.db.exec("ALTER TABLE tools ADD COLUMN script_language TEXT NOT NULL DEFAULT ''")
+    if (!toolColumns.some(column => String(column.name) === 'script_content')) this.db.exec("ALTER TABLE tools ADD COLUMN script_content TEXT NOT NULL DEFAULT ''")
+    if (!toolColumns.some(column => String(column.name) === 'script_version')) this.db.exec('ALTER TABLE tools ADD COLUMN script_version INTEGER NOT NULL DEFAULT 0')
     const messageLogColumns = this.db.prepare('PRAGMA table_info(message_logs)').all() as Row[]
     if (!messageLogColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE message_logs ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if (!messageLogColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE message_logs ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
@@ -952,22 +970,35 @@ export class HubStore {
     if (!row) throw new Error('Tool not found')
     return this.tool(row)
   }
-  createTool(input: Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt'>): ToolRecord {
+  createTool(input: ToolWriteInput): ToolRecord {
     this.assertWorkspaces([input.workspaceId])
     const id = randomUUID(), timestamp = now()
-    this.db.prepare('INSERT INTO tools (id, workspace_id, name, description, executor_type, command, arguments_template_json, input_schema_json, timeout_seconds, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      .run(id, input.workspaceId, input.name, input.description, input.executorType, input.command, JSON.stringify(input.argumentsTemplate), JSON.stringify(input.inputSchema), input.timeoutSeconds, input.enabled ? 1 : 0, timestamp, timestamp)
+    const scriptContent = input.scriptContent ?? '', scriptLanguage = scriptContent ? (input.scriptLanguage || 'python') : '', scriptVersion = scriptContent ? 1 : 0
+    this.db.prepare('INSERT INTO tools (id, workspace_id, name, description, executor_type, command, arguments_template_json, input_schema_json, rpc_config_json, script_language, script_content, script_version, timeout_seconds, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, input.workspaceId, input.name, input.description, input.executorType, input.command, JSON.stringify(input.argumentsTemplate), JSON.stringify(input.inputSchema), JSON.stringify(input.rpcConfig ?? {}), scriptLanguage, scriptContent, scriptVersion, input.timeoutSeconds, input.enabled ? 1 : 0, timestamp, timestamp)
+    if (scriptContent) this.db.prepare('INSERT INTO tool_script_versions (tool_id, version, language, content, created_at) VALUES (?, 1, ?, ?, ?)').run(id, scriptLanguage, scriptContent, timestamp)
     return this.getTool(id)
   }
-  updateTool(id: string, input: Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt'>): ToolRecord {
+  updateTool(id: string, input: ToolWriteInput): ToolRecord {
     this.assertWorkspaces([input.workspaceId])
-    const result = this.db.prepare('UPDATE tools SET workspace_id = ?, name = ?, description = ?, executor_type = ?, command = ?, arguments_template_json = ?, input_schema_json = ?, timeout_seconds = ?, enabled = ?, updated_at = ? WHERE id = ?')
-      .run(input.workspaceId, input.name, input.description, input.executorType, input.command, JSON.stringify(input.argumentsTemplate), JSON.stringify(input.inputSchema), input.timeoutSeconds, input.enabled ? 1 : 0, now(), id)
+    const current = this.getTool(id)
+    const scriptContent = input.scriptContent ?? '', scriptLanguage = scriptContent ? (input.scriptLanguage || 'python') : ''
+    const scriptChanged = scriptContent !== current.scriptContent || scriptLanguage !== current.scriptLanguage
+    const latestVersionRow = this.db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM tool_script_versions WHERE tool_id = ?').get(id) as Row
+    const latestVersion = Number(latestVersionRow.version ?? 0)
+    const scriptVersion = scriptContent ? (scriptChanged ? latestVersion + 1 : current.scriptVersion || latestVersion || 1) : 0
+    const timestamp = now()
+    const result = this.db.prepare('UPDATE tools SET workspace_id = ?, name = ?, description = ?, executor_type = ?, command = ?, arguments_template_json = ?, input_schema_json = ?, rpc_config_json = ?, script_language = ?, script_content = ?, script_version = ?, timeout_seconds = ?, enabled = ?, updated_at = ? WHERE id = ?')
+      .run(input.workspaceId, input.name, input.description, input.executorType, input.command, JSON.stringify(input.argumentsTemplate), JSON.stringify(input.inputSchema), JSON.stringify(input.rpcConfig ?? {}), scriptLanguage, scriptContent, scriptVersion, input.timeoutSeconds, input.enabled ? 1 : 0, timestamp, id)
     if (!result.changes) throw new Error('Tool not found')
+    if (scriptContent && scriptChanged) this.db.prepare('INSERT INTO tool_script_versions (tool_id, version, language, content, created_at) VALUES (?, ?, ?, ?, ?)').run(id, scriptVersion, scriptLanguage, scriptContent, timestamp)
     return this.getTool(id)
   }
   deleteTool(id: string): void { if (!this.db.prepare('DELETE FROM tools WHERE id = ?').run(id).changes) throw new Error('Tool not found') }
-  private tool = (row: Row): ToolRecord => ({ id: String(row.id), workspaceId: String(row.workspace_id), name: String(row.name), description: String(row.description), executorType: String(row.executor_type) as ToolRecord['executorType'], command: String(row.command), argumentsTemplate: list(row.arguments_template_json), inputSchema: object(row.input_schema_json), timeoutSeconds: Number(row.timeout_seconds), enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at) })
+  listToolScriptVersions(id: string): ToolScriptVersionRecord[] {
+    return (this.db.prepare('SELECT tool_id, version, language, content, created_at FROM tool_script_versions WHERE tool_id = ? ORDER BY version DESC').all(id) as Row[]).map(row => ({ toolId: String(row.tool_id), version: Number(row.version), language: String(row.language) as ToolScriptVersionRecord['language'], content: String(row.content), createdAt: String(row.created_at) }))
+  }
+  private tool = (row: Row): ToolRecord => ({ id: String(row.id), workspaceId: String(row.workspace_id), name: String(row.name), description: String(row.description), executorType: String(row.executor_type) as ToolRecord['executorType'], command: String(row.command), argumentsTemplate: list(row.arguments_template_json), inputSchema: object(row.input_schema_json), rpcConfig: object(row.rpc_config_json) as unknown as ToolRecord['rpcConfig'], scriptLanguage: String(row.script_language ?? '') as ToolRecord['scriptLanguage'], scriptContent: String(row.script_content ?? ''), scriptVersion: Number(row.script_version ?? 0), timeoutSeconds: Number(row.timeout_seconds), enabled: Boolean(row.enabled), createdAt: String(row.created_at), updatedAt: String(row.updated_at) })
 
   listToolPackages(): ToolPackageRecord[] { return (this.db.prepare('SELECT * FROM tool_packages ORDER BY name COLLATE NOCASE').all() as Row[]).map(this.toolPackage) }
   getToolPackage(id: string): ToolPackageRecord {
