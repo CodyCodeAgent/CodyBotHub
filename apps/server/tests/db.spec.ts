@@ -8,6 +8,25 @@ import { HubStore } from '../src/db.js'
 const workspace = (store: HubStore, name = 'Workspace') => store.createWorkspace({ name, path: `/tmp/${name.toLowerCase().replaceAll(' ', '-')}` })
 
 describe('HubStore invariants', () => {
+  it('migrates legacy Thread Channels with an explicit tool contract version', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'codybothub-thread-contract-'))
+    const filename = path.join(directory, 'hub.sqlite')
+    const legacy = new DatabaseSync(filename)
+    legacy.exec(`CREATE TABLE thread_channels (
+      id TEXT PRIMARY KEY, bot_id TEXT NOT NULL, runtime_kind TEXT NOT NULL DEFAULT 'codex',
+      core_thread_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    INSERT INTO thread_channels VALUES ('channel-1', 'bot-1', 'codex', 'thread-1', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');`)
+    legacy.close()
+
+    const store = new HubStore(filename)
+    expect(store.getThreadChannel('channel-1')).toMatchObject({ threadId: 'thread-1', toolContractVersion: 0 })
+    store.setThreadChannelCoreThread('channel-1', 'thread-2', 1)
+    expect(store.getThreadChannel('channel-1')).toMatchObject({ threadId: 'thread-2', toolContractVersion: 1 })
+    store.close()
+    rmSync(directory, { recursive: true, force: true })
+  })
+
   it('migrates the legacy administrator and keeps existing sessions authenticated', () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'codybothub-auth-'))
     const filename = path.join(directory, 'hub.sqlite')
@@ -64,8 +83,8 @@ describe('HubStore invariants', () => {
       mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
     }
     const codexRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
-    store.setThreadChannelCoreThread(codexRoute.threadChannelId, 'codex-thread')
-    expect(store.getThreadChannel(codexRoute.threadChannelId)).toMatchObject({ runtimeKind: 'codex', threadId: 'codex-thread' })
+    store.setThreadChannelCoreThread(codexRoute.threadChannelId, 'codex-thread', 1)
+    expect(store.getThreadChannel(codexRoute.threadChannelId)).toMatchObject({ runtimeKind: 'codex', threadId: 'codex-thread', toolContractVersion: 1 })
 
     store.updateBot(bot.id, { name: bot.name, runtimeKind: 'traex', defaultWorkspaceId: linked.id })
     const traexRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, { ...message, eventId: 'event-runtime-2', messageId: 'message-runtime-2' }), message)
@@ -493,22 +512,34 @@ describe('HubStore invariants', () => {
       mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
     }
     const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
-    store.createMessageLog(bot.id, route, message)
+    const sourceLog = store.createMessageLog(bot.id, route, message)
+    const newerMessage = { ...message, eventId: 'event-tools-newer', messageId: 'message-tools-newer', text: 'a newer queued message' }
+    const newerLog = store.createMessageLog(bot.id, route, newerMessage)
+    expect(store.getMessageLogForToolInvocation(sourceLog.id, route.threadChannelId).messageId).toBe(message.messageId)
+    expect(store.getMessageLogForToolInvocation(newerLog.id, route.threadChannelId).messageId).toBe(newerMessage.messageId)
+    expect(() => store.getMessageLogForToolInvocation(sourceLog.id, 'another-channel')).toThrow('active Thread Channel')
+    store.finishMessageLog(sourceLog.id, { responseContent: 'source answer' })
+    store.finishMessageLog(newerLog.id, { responseContent: 'newer answer' })
+    const migrationContext = store.threadChannelMigrationContext(route.threadChannelId, newerLog.id)
+    expect(migrationContext).toContain('source answer')
+    expect(migrationContext).not.toContain('newer answer')
     const completed = store.createToolPackageExecution({ callId: 'call-completed', toolPackageId: pack.id, botId: bot.id, sceneId: scene.id, chatId: 'oc_tools', topicId: '', threadChannelId: route.threadChannelId, coreThreadId: 'thread-tools', sourceMessageId: message.messageId, arguments: { message: 'hello' }, reason: 'verify', requestedBy: 'ou_requester', status: 'running' })
     store.updateToolPackageExecution(completed.id, { status: 'completed', result: [{ step: 1 }, { step: 2 }], completedAt: new Date().toISOString() })
     store.createToolPackageExecution({ callId: 'call-awaiting', toolPackageId: pack.id, botId: bot.id, sceneId: scene.id, chatId: 'oc_tools', topicId: '', threadChannelId: route.threadChannelId, coreThreadId: 'thread-tools', sourceMessageId: message.messageId, arguments: {}, reason: 'needs approval', requestedBy: 'ou_requester', status: 'awaiting_approval' })
+    const partialFailure = store.createToolPackageExecution({ callId: 'call-partial', toolPackageId: pack.id, botId: bot.id, sceneId: scene.id, chatId: 'oc_tools', topicId: '', threadChannelId: route.threadChannelId, coreThreadId: 'thread-tools', sourceMessageId: message.messageId, arguments: {}, reason: 'partial failure', requestedBy: 'ou_requester', status: 'running' })
+    store.updateToolPackageExecution(partialFailure.id, { status: 'failed', result: [{ step: 1 }], error: 'step 2 failed', completedAt: new Date().toISOString() })
     expect(store.listTools()).toMatchObject([{ id: tool.id, argumentsTemplate: ['%s', '{{message}}'] }])
     expect(store.listToolPackages()).toMatchObject([{ id: pack.id, approverIds: ['ou_reviewer'], steps: [{ toolId: tool.id, phase: 'verify' }] }])
     expect(store.listSkillPackages()).toMatchObject([{ id: skill.id, toolPackageIds: [pack.id] }])
     expect(store.stats().analytics.capabilities).toMatchObject({
       configuredTools: 1,
       configuredToolPackages: 1,
-      skillPackageUses: 1,
-      toolPackageRequests: 2,
-      successfulToolCalls: 2,
-      status: { awaitingApproval: 1, completed: 1, failed: 0, rejected: 0 },
-      skillPackages: [{ id: skill.id, name: skill.name, uses: 1 }],
-      toolPackages: [{ id: pack.id, name: pack.name, requests: 2, awaitingApproval: 1, completed: 1, successfulToolCalls: 2 }],
+      skillPackageUses: 2,
+      toolPackageRequests: 3,
+      successfulToolCalls: 3,
+      status: { awaitingApproval: 1, completed: 1, failed: 1, rejected: 0 },
+      skillPackages: [{ id: skill.id, name: skill.name, uses: 2 }],
+      toolPackages: [{ id: pack.id, name: pack.name, requests: 3, awaitingApproval: 1, completed: 1, failed: 1, successfulToolCalls: 3 }],
     })
     expect(() => store.deleteTool(tool.id)).toThrow()
     store.close()

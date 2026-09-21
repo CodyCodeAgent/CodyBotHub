@@ -5,6 +5,7 @@ const managerFixture = () => {
   const store = {
     listBots: vi.fn(() => []),
     listQueuedThreadJobs: vi.fn(() => []),
+    listQueuedToolPackageExecutions: vi.fn(() => []),
   }
   const manager = new FeishuBotManager(store as never, {} as never, {} as never, '/tmp/codybothub-attachments')
   return { manager, store }

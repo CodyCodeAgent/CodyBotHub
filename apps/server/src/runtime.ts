@@ -46,6 +46,7 @@ type RuntimeSkillPlan = {
   attached: TurnInputSkill[]
   instructions: string
   trace: InvestigationTraceRecord
+  requiresDynamicTools: boolean
 }
 
 type EngineState = {
@@ -114,9 +115,11 @@ const isWithin = (root: string, filename: string): boolean => {
 }
 
 export class CodyBotRuntime {
+  private static readonly TOOL_CONTRACT_VERSION = 1
   private readonly engines = new Map<AgentRuntimeKind, EngineState>()
   private readonly resources = new WorkspaceResourceIndex()
-  private toolInvoker: ((call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>) | null = null
+  private readonly activeToolContexts = new Map<string, { sourceLogId: string; invocationAllowed: boolean }>()
+  private toolInvoker: ((call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string; sourceLogId: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>) | null = null
 
   constructor(
     private readonly store: HubStore,
@@ -125,11 +128,11 @@ export class CodyBotRuntime {
     private readonly turnTimeoutMs = 15 * 60 * 1000,
   ) {}
 
-  setToolPackageInvoker(invoker: (call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>): void {
+  setToolPackageInvoker(invoker: (call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string; sourceLogId: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>): void {
     this.toolInvoker = invoker
   }
 
-  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void): Promise<string> {
+  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true): Promise<string> {
     const channel = this.store.getThreadChannel(route.threadChannelId)
     if (channel.runtimeKind !== route.bot.runtimeKind) throw new Error(`Thread Channel runtime mismatch: ${channel.runtimeKind} != ${route.bot.runtimeKind}`)
     const engine = await this.ensureEngine(route.bot.runtimeKind)
@@ -138,10 +141,11 @@ export class CodyBotRuntime {
     onModelResolved?.(model)
     const skillPlan = await this.resolveSkills(manager, route, message)
     onInvestigation?.(skillPlan.trace)
-    await this.ensureThreadChannel(engine, channel, route, skillPlan.instructions)
+    const migrationContext = await this.ensureThreadChannel(engine, channel, route, skillPlan.instructions, skillPlan.requiresDynamicTools, sourceLogId)
     const activeThreadId = manager.snapshot(channel.id)?.threadId ?? channel.threadId
     if (activeThreadId) onThreadResolved?.(activeThreadId)
-    manager.setContext(channel.id, this.context(route, skillPlan.instructions))
+    const resourceInstructions = [skillPlan.instructions, migrationContext].filter(Boolean).join('\n\n')
+    manager.setContext(channel.id, this.context(route, resourceInstructions))
     const localImages = attachments.filter(attachment => attachment.type === 'image').map(attachment => ({ path: attachment.path }))
     const turn: TurnInput = {
       input: buildTurnUserInput({
@@ -184,6 +188,7 @@ export class CodyBotRuntime {
       }
     }
     const unsubscribe = manager.subscribe(applyProgress)
+    if (sourceLogId) this.activeToolContexts.set(channel.id, { sourceLogId, invocationAllowed: toolInvocationAllowed })
     try {
       const submission = manager.submit(channel.id, turn, 'queue', channelCommandId(message))
       turnId = (await submission.started).turnId
@@ -192,6 +197,7 @@ export class CodyBotRuntime {
       return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
     } finally {
       unsubscribe()
+      if (this.activeToolContexts.get(channel.id)?.sourceLogId === sourceLogId) this.activeToolContexts.delete(channel.id)
     }
   }
 
@@ -284,7 +290,11 @@ export class CodyBotRuntime {
       const packageId = typeof args.packageId === 'string' ? args.packageId : ''
       if (!packageId) throw new Error('packageId is required')
       const input = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments) ? args.arguments as Record<string, unknown> : {}
-      const result = await this.toolInvoker({ callId: call.callId, packageId, arguments: input, reason: typeof args.reason === 'string' ? args.reason : '' }, binding)
+      const active = this.activeToolContexts.get(binding.id)
+      const sourceLogId = active?.sourceLogId ?? ''
+      if (!sourceLogId) throw new Error('Tool invocation is missing its source message context')
+      if (!active?.invocationAllowed) throw new Error('Tool Package chaining is disabled while reporting a previous execution result')
+      const result = await this.toolInvoker({ callId: call.callId, packageId, arguments: input, reason: typeof args.reason === 'string' ? args.reason : '', sourceLogId }, binding)
       return { contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: result.status !== 'failed' }
     } }
     const manager = new CodexSessionManager({ host, policy, dynamicTools })
@@ -303,21 +313,41 @@ export class CodyBotRuntime {
     return resolveRuntimeModel(requested, models, config.config.model ?? '', config.config.model_reasoning_effort ?? '', kind === 'traex' ? 'runtime' : 'codex')
   }
 
-  private async ensureThreadChannel(engine: EngineState, channel: { id: string; threadId: string }, route: ResolvedRoute, resourceInstructions: string): Promise<void> {
+  private async ensureThreadChannel(engine: EngineState, channel: { id: string; threadId: string; toolContractVersion: number }, route: ResolvedRoute, resourceInstructions: string, requiresDynamicTools: boolean, sourceLogId: string): Promise<string> {
     const manager = engine.manager
-    if (engine.attached.has(channel.id)) return
+    const mustMigrate = Boolean(channel.threadId) && requiresDynamicTools && channel.toolContractVersion < CodyBotRuntime.TOOL_CONTRACT_VERSION
+    if (engine.attached.has(channel.id) && !mustMigrate) return ''
     const pending = engine.attaching.get(channel.id)
-    if (pending) return pending
-    const attach = (async () => {
-      if (channel.threadId) await manager.resume({ id: channel.id, threadId: channel.threadId }, this.context(route, resourceInstructions))
+    if (pending) { await pending; return '' }
+    let migrationContext = ''
+    const attach = (async (): Promise<void> => {
+      if (mustMigrate) {
+        migrationContext = this.store.threadChannelMigrationContext(channel.id, sourceLogId)
+        if (engine.attached.has(channel.id)) manager.detach(channel.id)
+        engine.attached.delete(channel.id)
+        const migrationInstructions = migrationContext ? [resourceInstructions, [
+          '## Thread 工具契约升级上下文',
+          `原 Codex Thread ${channel.threadId} 创建于动态工具上线前，平台已自动切换到具备受控工具入口的新 Thread。`,
+          '以下是同一 Thread Channel 最近已完成的用户消息与助手回复，仅用于延续当前对话事实。重新校验会变化的数据后再执行操作；不得把旧回复当作本轮已经执行成功。',
+          migrationContext,
+        ].join('\n\n')].filter(Boolean).join('\n\n') : resourceInstructions
+        const binding = await manager.create(channel.id, this.context(route, migrationInstructions))
+        this.store.setThreadChannelCoreThread(channel.id, binding.threadId, CodyBotRuntime.TOOL_CONTRACT_VERSION)
+      } else if (channel.threadId) await manager.resume({ id: channel.id, threadId: channel.threadId }, this.context(route, resourceInstructions))
       else {
         const binding = await manager.create(channel.id, this.context(route, resourceInstructions))
-        this.store.setThreadChannelCoreThread(channel.id, binding.threadId)
+        this.store.setThreadChannelCoreThread(channel.id, binding.threadId, CodyBotRuntime.TOOL_CONTRACT_VERSION)
       }
       engine.attached.add(channel.id)
     })().finally(() => engine.attaching.delete(channel.id))
     engine.attaching.set(channel.id, attach)
-    return attach
+    await attach
+    return migrationContext ? [
+      '## Thread 工具契约升级上下文',
+      `原 Codex Thread ${channel.threadId} 创建于动态工具上线前，平台已自动切换到具备受控工具入口的新 Thread。`,
+      '以下是同一 Thread Channel 最近已完成的用户消息与助手回复，仅用于延续当前对话事实。重新校验会变化的数据后再执行操作；不得把旧回复当作本轮已经执行成功。',
+      migrationContext,
+    ].join('\n\n') : ''
   }
 
   private context(route: ResolvedRoute, resourceInstructions = ''): ExecutionContext {
@@ -436,7 +466,7 @@ export class CodyBotRuntime {
       mode === 'package_only' ? '' : '## 调查要求\n对告警、故障和数据差异任务，应提取关键 ID、时间、地区、服务和链接；交叉验证知识、代码、配置、数据库与日志；建立时间线并主动排除主要反例。没有实际查询证据时只能标记为“初判”。只有样本、规则或配置、运行事实和排除证据相互闭合时才可输出确定根因。遇到权限、工具或数据阻塞时，列出已经执行的查询和具体阻塞。',
       toolPackageLines ? `## 可执行工具包\n分析完成后，只有确实需要改变外部系统状态时，才调用 codybothub.invoke_tool_package。必须使用这里列出的 packageId，并传入完整业务参数与可审计的执行理由。若返回 awaiting_approval，告诉用户审批卡片已发出，本轮不要假设动作已执行。\n${toolPackageLines}` : '',
     ].filter(Boolean).join('\n\n')
-    return { attached, instructions, trace }
+    return { attached, instructions, trace, requiresDynamicTools: toolPackages.length > 0 }
   }
 
   private messageText(text: string, attachments: RuntimeAttachment[]): string {

@@ -37,16 +37,25 @@ const validateInput = (schema: Record<string, unknown>, input: Record<string, un
 
 const execute = (command: string, args: string[], cwd: string, timeoutSeconds: number): Promise<Omit<ToolStepResult, 'toolId' | 'toolName' | 'phase'>> => new Promise((resolve, reject) => {
   const started = Date.now(), child = spawn(command, args, { cwd, shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
-  let stdout = '', stderr = '', finished = false
+  let stdout = '', stderr = '', finished = false, timedOut = false
+  let killTimer: ReturnType<typeof setTimeout> | null = null
   const append = (current: string, chunk: Buffer): string => `${current}${chunk.toString('utf8')}`.slice(-100_000)
   child.stdout.on('data', chunk => { stdout = append(stdout, chunk as Buffer) })
   child.stderr.on('data', chunk => { stderr = append(stderr, chunk as Buffer) })
-  const timer = setTimeout(() => { if (!finished) child.kill('SIGTERM') }, Math.max(1, timeoutSeconds) * 1_000)
-  child.on('error', error => { finished = true; clearTimeout(timer); reject(error) })
+  const timer = setTimeout(() => {
+    if (finished) return
+    timedOut = true
+    child.kill('SIGTERM')
+    killTimer = setTimeout(() => { if (!finished) child.kill('SIGKILL') }, 2_000)
+    killTimer.unref?.()
+  }, Math.max(1, timeoutSeconds) * 1_000)
+  timer.unref?.()
+  child.on('error', error => { finished = true; clearTimeout(timer); if (killTimer) clearTimeout(killTimer); reject(error) })
   child.on('close', code => {
-    finished = true; clearTimeout(timer)
+    finished = true; clearTimeout(timer); if (killTimer) clearTimeout(killTimer)
     const result = { command, arguments: args, exitCode: code ?? -1, stdout, stderr, durationMs: Date.now() - started }
-    if (code === 0) resolve(result)
+    if (timedOut) reject(Object.assign(new Error(`${command} timed out after ${Math.max(1, timeoutSeconds)} seconds`), { result }))
+    else if (code === 0) resolve(result)
     else reject(Object.assign(new Error(`${command} exited with code ${code ?? -1}: ${stderr || stdout}`.slice(0, 4_000)), { result }))
   })
 })
@@ -60,11 +69,17 @@ export class ToolPackageRunner {
       const tool = this.store.getTool(step.toolId)
       if (!tool.enabled) throw new Error(`Tool ${tool.name} is disabled`)
       if (tool.workspaceId !== pack.workspaceId) throw new Error(`Tool ${tool.name} belongs to another Workspace`)
-      const input = { ...step.arguments, ...args }
+      // Package-level step arguments are administrator policy and must not be overridden by model-supplied values.
+      const input = { ...args, ...step.arguments }
       validateInput(tool.inputSchema, input, tool.name)
       const commandArgs = tool.argumentsTemplate.map(value => render(value, input))
-      const result = await execute(tool.command, commandArgs, cwd, tool.timeoutSeconds)
-      results.push({ toolId: tool.id, toolName: tool.name, phase: step.phase, ...result })
+      try {
+        const result = await execute(tool.command, commandArgs, cwd, tool.timeoutSeconds)
+        results.push({ toolId: tool.id, toolName: tool.name, phase: step.phase, ...result })
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error))
+        throw Object.assign(failure, { partialResults: [...results] })
+      }
     }
     return results
   }

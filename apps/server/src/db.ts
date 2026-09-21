@@ -274,6 +274,7 @@ export class HubStore {
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
         runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex')),
         core_thread_id TEXT NOT NULL DEFAULT '',
+        tool_contract_version INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -523,6 +524,7 @@ export class HubStore {
     if (!threadProfileColumns.some(column => String(column.name) === 'runtime_kind')) this.db.exec("ALTER TABLE thread_profiles ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex'))")
     const threadChannelColumns = this.db.prepare('PRAGMA table_info(thread_channels)').all() as Row[]
     if (!threadChannelColumns.some(column => String(column.name) === 'runtime_kind')) this.db.exec("ALTER TABLE thread_channels ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex'))")
+    if (!threadChannelColumns.some(column => String(column.name) === 'tool_contract_version')) this.db.exec('ALTER TABLE thread_channels ADD COLUMN tool_contract_version INTEGER NOT NULL DEFAULT 0')
     const threadJobColumns = this.db.prepare('PRAGMA table_info(thread_jobs)').all() as Row[]
     if (!threadJobColumns.some(column => String(column.name) === 'receipt_reaction_id')) this.db.exec("ALTER TABLE thread_jobs ADD COLUMN receipt_reaction_id TEXT NOT NULL DEFAULT ''")
     this.db.prepare(`WITH canonical AS (
@@ -1015,6 +1017,7 @@ export class HubStore {
     return row ? this.toolPackageExecution(row) : null
   }
   listToolPackageExecutions(limit = 100): ToolPackageExecutionRecord[] { return (this.db.prepare('SELECT * FROM tool_package_executions ORDER BY created_at DESC LIMIT ?').all(limit) as Row[]).map(this.toolPackageExecution) }
+  listQueuedToolPackageExecutions(limit = 500): ToolPackageExecutionRecord[] { return (this.db.prepare("SELECT * FROM tool_package_executions WHERE status = 'queued' ORDER BY created_at LIMIT ?").all(Math.min(1_000, Math.max(1, limit))) as Row[]).map(this.toolPackageExecution) }
   updateToolPackageExecution(id: string, patch: Partial<Pick<ToolPackageExecutionRecord, 'status' | 'approvedBy' | 'cardMessageId' | 'result' | 'error' | 'completedAt'>>): ToolPackageExecutionRecord {
     const current = this.getToolPackageExecution(id)
     this.db.prepare('UPDATE tool_package_executions SET status = ?, approved_by = ?, card_message_id = ?, result_json = ?, error = ?, completed_at = ?, updated_at = ? WHERE id = ?')
@@ -1099,49 +1102,48 @@ export class HubStore {
         sceneId: String(row.scene_id), sceneName: String(row.scene_name), received: Number(row.received), completed: Number(row.completed), failed: Number(row.failed),
       }))
     const routes = (this.db.prepare('SELECT thread_route_type AS type, COUNT(*) AS count FROM message_logs GROUP BY thread_route_type ORDER BY count DESC').all() as Row[]).map(row => ({ type: String(row.type), count: Number(row.count) }))
-    const skillPackageNames = new Map((this.db.prepare('SELECT id, name FROM skill_packages').all() as Row[]).map(row => [String(row.id), String(row.name)]))
-    const skillPackageUsage = new Map<string, { id: string; name: string; uses: number }>()
-    for (const row of this.db.prepare('SELECT skill_packages_json FROM message_logs').all() as Row[]) {
-      let packages: Array<{ id?: unknown; name?: unknown }> = []
-      try {
-        const parsed = JSON.parse(String(row.skill_packages_json)) as unknown
-        if (Array.isArray(parsed)) packages = parsed as Array<{ id?: unknown; name?: unknown }>
-      } catch { /* Invalid historical snapshots contribute no usage. */ }
-      const seen = new Set<string>()
-      for (const item of packages) {
-        const id = String(item?.id ?? '')
-        if (!id || seen.has(id)) continue
-        seen.add(id)
-        const current = skillPackageUsage.get(id)
-        const name = skillPackageNames.get(id) || String(item?.name ?? '') || '已删除技能包'
-        skillPackageUsage.set(id, { id, name, uses: (current?.uses ?? 0) + 1 })
-      }
-    }
-    const skillPackages = [...skillPackageUsage.values()].sort((a, b) => b.uses - a.uses || a.name.localeCompare(b.name, 'zh-CN')).slice(0, 10)
-    const skillPackageUses = [...skillPackageUsage.values()].reduce((sum, item) => sum + item.uses, 0)
-    type ToolPackageUsage = { id: string; name: string; requests: number; awaitingApproval: number; queued: number; running: number; completed: number; failed: number; rejected: number; successfulToolCalls: number }
-    const toolPackageNames = new Map((this.db.prepare('SELECT id, name FROM tool_packages').all() as Row[]).map(row => [String(row.id), String(row.name)]))
-    const toolPackageUsage = new Map<string, ToolPackageUsage>()
-    const toolStatus = { awaitingApproval: 0, queued: 0, running: 0, completed: 0, failed: 0, rejected: 0 }
-    let successfulToolCalls = 0
-    for (const row of this.db.prepare('SELECT tool_package_id, tool_package_name, status, result_json FROM tool_package_executions').all() as Row[]) {
-      const id = String(row.tool_package_id)
-      const status = String(row.status)
-      const statusKey = status === 'awaiting_approval' ? 'awaitingApproval' : status
-      let callCount = 0
-      if (status === 'completed') {
-        try { const result = JSON.parse(String(row.result_json)) as unknown; callCount = Array.isArray(result) ? result.length : 0 } catch { /* Ignore malformed historical results. */ }
-      }
-      const current = toolPackageUsage.get(id) ?? { id, name: toolPackageNames.get(id) || String(row.tool_package_name) || '已删除工具包', requests: 0, awaitingApproval: 0, queued: 0, running: 0, completed: 0, failed: 0, rejected: 0, successfulToolCalls: 0 }
-      current.requests += 1
-      current.successfulToolCalls += callCount
-      if (statusKey in current) current[statusKey as keyof Pick<ToolPackageUsage, 'awaitingApproval' | 'queued' | 'running' | 'completed' | 'failed' | 'rejected'>] += 1
-      if (statusKey in toolStatus) toolStatus[statusKey as keyof typeof toolStatus] += 1
-      successfulToolCalls += callCount
-      toolPackageUsage.set(id, current)
-    }
-    const toolPackages = [...toolPackageUsage.values()].sort((a, b) => b.requests - a.requests || a.name.localeCompare(b.name, 'zh-CN')).slice(0, 10)
-    const toolPackageRequests = [...toolPackageUsage.values()].reduce((sum, item) => sum + item.requests, 0)
+    const skillUsageRows = this.db.prepare(`WITH refs AS (
+      SELECT DISTINCT m.id AS log_id, json_extract(CASE WHEN j.type = 'object' THEN j.value ELSE '{}' END, '$.id') AS package_id,
+        json_extract(CASE WHEN j.type = 'object' THEN j.value ELSE '{}' END, '$.name') AS snapshot_name
+      FROM message_logs m JOIN json_each(CASE WHEN json_valid(m.skill_packages_json) THEN m.skill_packages_json ELSE '[]' END) j
+      WHERE j.type = 'object' AND json_extract(j.value, '$.id') IS NOT NULL AND json_extract(j.value, '$.id') <> ''
+    )
+    SELECT refs.package_id AS id, COALESCE(sp.name, MAX(refs.snapshot_name), '已删除技能包') AS name, COUNT(*) AS uses
+    FROM refs LEFT JOIN skill_packages sp ON sp.id = refs.package_id
+    GROUP BY refs.package_id, sp.name ORDER BY uses DESC, name COLLATE NOCASE LIMIT 10`).all() as Row[]
+    const skillPackages = skillUsageRows.map(row => ({ id: String(row.id), name: String(row.name), uses: Number(row.uses) }))
+    const skillPackageUses = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM (
+      SELECT DISTINCT m.id AS log_id, json_extract(CASE WHEN j.type = 'object' THEN j.value ELSE '{}' END, '$.id') AS package_id
+      FROM message_logs m JOIN json_each(CASE WHEN json_valid(m.skill_packages_json) THEN m.skill_packages_json ELSE '[]' END) j
+      WHERE j.type = 'object' AND json_extract(j.value, '$.id') IS NOT NULL AND json_extract(j.value, '$.id') <> ''
+    )`).get() as Row).count)
+    const toolUsageRows = this.db.prepare(`SELECT e.tool_package_id AS id,
+      COALESCE(tp.name, MAX(e.tool_package_name), '已删除工具包') AS name,
+      COUNT(*) AS requests,
+      SUM(CASE WHEN e.status = 'awaiting_approval' THEN 1 ELSE 0 END) AS awaiting_approval,
+      SUM(CASE WHEN e.status = 'queued' THEN 1 ELSE 0 END) AS queued,
+      SUM(CASE WHEN e.status = 'running' THEN 1 ELSE 0 END) AS running,
+      SUM(CASE WHEN e.status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN e.status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN e.status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+      SUM(CASE WHEN json_type(CASE WHEN json_valid(e.result_json) THEN e.result_json ELSE 'null' END) = 'array' THEN json_array_length(e.result_json) ELSE 0 END) AS successful_tool_calls
+      FROM tool_package_executions e LEFT JOIN tool_packages tp ON tp.id = e.tool_package_id
+      GROUP BY e.tool_package_id, tp.name ORDER BY requests DESC, name COLLATE NOCASE LIMIT 10`).all() as Row[]
+    const toolPackages = toolUsageRows.map(row => ({
+      id: String(row.id), name: String(row.name), requests: Number(row.requests), awaitingApproval: Number(row.awaiting_approval), queued: Number(row.queued), running: Number(row.running), completed: Number(row.completed), failed: Number(row.failed), rejected: Number(row.rejected), successfulToolCalls: Number(row.successful_tool_calls),
+    }))
+    const toolTotals = this.db.prepare(`SELECT COUNT(*) AS requests,
+      SUM(CASE WHEN status = 'awaiting_approval' THEN 1 ELSE 0 END) AS awaiting_approval,
+      SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) AS queued,
+      SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running,
+      SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+      SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+      SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+      SUM(CASE WHEN json_type(CASE WHEN json_valid(result_json) THEN result_json ELSE 'null' END) = 'array' THEN json_array_length(result_json) ELSE 0 END) AS successful_tool_calls
+      FROM tool_package_executions`).get() as Row
+    const toolPackageRequests = Number(toolTotals.requests)
+    const successfulToolCalls = Number(toolTotals.successful_tool_calls || 0)
+    const toolStatus = { awaitingApproval: Number(toolTotals.awaiting_approval || 0), queued: Number(toolTotals.queued || 0), running: Number(toolTotals.running || 0), completed: Number(toolTotals.completed || 0), failed: Number(toolTotals.failed || 0), rejected: Number(toolTotals.rejected || 0) }
     return {
       workspaces: count('workspaces'), bots: count('bots'), scenes: enabledScenes, skillPackages: count('skill_packages'), messageLogs: count('message_logs'),
       today: { received: Number(activity.received), completed: Number(activity.completed), failed: Number(activity.failed), processing: Number(activity.processing), reused: Number(activity.reused), experience: Number(activity.experience), created: Number(activity.created), averageDurationMs: Number(activity.average_duration_ms || 0) },
@@ -1255,15 +1257,29 @@ export class HubStore {
     return this.getMessageLog(id)
   }
 
-  getThreadChannel(id: string): { id: string; threadId: string; runtimeKind: AgentRuntimeKind } {
-    const row = this.db.prepare('SELECT id, core_thread_id, runtime_kind FROM thread_channels WHERE id = ?').get(id) as Row | undefined
+  getThreadChannel(id: string): { id: string; threadId: string; runtimeKind: AgentRuntimeKind; toolContractVersion: number } {
+    const row = this.db.prepare('SELECT id, core_thread_id, runtime_kind, tool_contract_version FROM thread_channels WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new Error('Thread Channel not found')
-    return { id: String(row.id), threadId: String(row.core_thread_id), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind }
+    return { id: String(row.id), threadId: String(row.core_thread_id), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, toolContractVersion: Number(row.tool_contract_version || 0) }
   }
 
-  setThreadChannelCoreThread(id: string, coreThreadId: string): void {
-    const result = this.db.prepare('UPDATE thread_channels SET core_thread_id = ?, updated_at = ? WHERE id = ?').run(coreThreadId, now(), id)
+  setThreadChannelCoreThread(id: string, coreThreadId: string, toolContractVersion?: number): void {
+    const result = toolContractVersion === undefined
+      ? this.db.prepare('UPDATE thread_channels SET core_thread_id = ?, updated_at = ? WHERE id = ?').run(coreThreadId, now(), id)
+      : this.db.prepare('UPDATE thread_channels SET core_thread_id = ?, tool_contract_version = ?, updated_at = ? WHERE id = ?').run(coreThreadId, toolContractVersion, now(), id)
     if (!result.changes) throw new Error('Thread Channel not found')
+  }
+
+  threadChannelMigrationContext(threadChannelId: string, excludeLogId = '', limit = 4): string {
+    const rows = this.db.prepare(`SELECT inbound_content, response_content, received_at
+      FROM message_logs
+      WHERE thread_channel_id = ? AND id <> ? AND status = 'completed' AND response_content <> ''
+      ORDER BY received_at DESC, id DESC LIMIT ?`).all(threadChannelId, excludeLogId, Math.min(8, Math.max(1, limit))) as Row[]
+    return rows.reverse().map(row => [
+      `时间：${String(row.received_at)}`,
+      `用户消息：\n${String(row.inbound_content).slice(0, 20_000)}`,
+      `助手回复：\n${String(row.response_content).slice(0, 20_000)}`,
+    ].join('\n')).join('\n\n---\n\n').slice(-80_000)
   }
 
   enqueueThreadJob(botId: string, threadChannelId: string, message: ChannelInboundMessage, logId: string, receiptReactionId = ''): ThreadJobRecord {
@@ -1464,6 +1480,18 @@ export class HubStore {
   getMessageLog(id: string): MessageLogRecord {
     const row = this.db.prepare('SELECT * FROM message_logs WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new Error('Message log not found')
+    return this.messageLog(row)
+  }
+
+  getMessageLogForToolInvocation(id: string, threadChannelId: string): MessageLogRecord {
+    const log = this.getMessageLog(id)
+    if (log.threadChannelId !== threadChannelId) throw new Error('Tool invocation message does not belong to the active Thread Channel')
+    return log
+  }
+
+  getMessageLogByBotMessage(botId: string, messageId: string): MessageLogRecord {
+    const row = this.db.prepare('SELECT * FROM message_logs WHERE bot_id = ? AND message_id = ? ORDER BY received_at DESC, id DESC LIMIT 1').get(botId, messageId) as Row | undefined
+    if (!row) throw new Error('Tool invocation source message log not found')
     return this.messageLog(row)
   }
 

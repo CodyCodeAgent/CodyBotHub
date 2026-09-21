@@ -49,7 +49,7 @@ export class FeishuBotManager {
 
   start(): Promise<void> {
     if (!this.queueTimer) {
-      this.queueTimer = setInterval(() => this.resumeQueuedJobs(3_000), 2_000)
+      this.queueTimer = setInterval(() => { this.resumeQueuedJobs(3_000); this.resumeToolExecutions() }, 2_000)
       this.queueTimer.unref?.()
     }
     return this.reload().then(() => { this.resumeToolExecutions() })
@@ -78,10 +78,10 @@ export class FeishuBotManager {
     this.resumeToolExecutions()
   }
 
-  async invokeToolPackage(call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string }, binding: { id: string; threadId: string }): Promise<Record<string, unknown>> {
+  async invokeToolPackage(call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string; sourceLogId: string }, binding: { id: string; threadId: string }): Promise<Record<string, unknown>> {
     const duplicate = this.store.findToolPackageExecution(binding.id, call.callId)
     if (duplicate) return { status: duplicate.status, executionId: duplicate.id, toolPackage: duplicate.toolPackageName }
-    const log = this.store.latestMessageLogForThreadChannel(binding.id)
+    const log = this.store.getMessageLogForToolInvocation(call.sourceLogId, binding.id)
     const pack = this.store.getToolPackage(call.packageId)
     if (!pack.enabled) throw new Error(`Tool Package ${pack.name} is disabled`)
     if (pack.workspaceId !== log.workspaceId) throw new Error('Tool Package belongs to another Workspace')
@@ -117,9 +117,7 @@ export class FeishuBotManager {
   }
 
   private resumeToolExecutions(): void {
-    const listExecutions = (this.store as Partial<HubStore>).listToolPackageExecutions
-    if (!listExecutions) return
-    for (const execution of listExecutions.call(this.store, 500)) if (execution.status === 'queued') this.scheduleToolExecution(execution.id)
+    for (const execution of this.store.listQueuedToolPackageExecutions(500)) this.scheduleToolExecution(execution.id)
   }
 
   private scheduleToolExecution(executionId: string): void {
@@ -148,13 +146,20 @@ export class FeishuBotManager {
     execution = this.store.updateToolPackageExecution(execution.id, { status: 'running' })
     if (execution.cardMessageId) await this.retryDelivery(provider, () => provider.updateCard(execution.cardMessageId, feishuTextCard(`正在执行：${pack.name}`, `已通过确认，正在按顺序执行 ${pack.steps.length} 个步骤。`, { color: 'blue', note: `执行 ID：${execution.id}` }))).catch(() => undefined)
     try {
+      const sourceLog = this.store.getMessageLogByBotMessage(execution.botId, execution.sourceMessageId)
+      const stillAuthorized = this.store.listSkillPackages().some(item => sourceLog.skillPackages.some(link => link.id === item.id) && item.toolPackageIds.includes(pack.id))
+      if (!stillAuthorized) throw new Error('工具包已从本次消息使用的技能包中移除，已拒绝执行；请让 AI 基于最新配置重新发起申请')
+      const requestedAt = Date.parse(execution.createdAt)
+      const configurationChanged = Date.parse(pack.updatedAt) > requestedAt || pack.steps.some(step => Date.parse(this.store.getTool(step.toolId).updatedAt) > requestedAt)
+      if (configurationChanged) throw new Error('工具包或工具配置在本次申请后发生变化，已拒绝执行；请让 AI 基于最新配置重新发起申请')
       const results = await this.toolRunner.run(pack, execution.arguments, workspace.path)
       execution = this.store.updateToolPackageExecution(execution.id, { status: 'completed', result: results, completedAt: new Date().toISOString() })
       if (execution.cardMessageId) await this.retryDelivery(provider, () => provider.updateCard(execution.cardMessageId, feishuTextCard(`执行完成：${pack.name}`, results.map(item => `- ${item.phase} · ${item.toolName}：成功（${item.durationMs}ms）`).join('\n'), { color: 'green', note: `执行 ID：${execution.id}` }))).catch(error => console.warn('[feishu] failed to patch completed tool card:', error))
       await this.continueAfterToolExecution(execution, provider).catch(error => console.error('[feishu] failed to continue completed tool execution:', error))
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
-      execution = this.store.updateToolPackageExecution(execution.id, { status: 'failed', error: detail, completedAt: new Date().toISOString() })
+      const partialResults = error && typeof error === 'object' && 'partialResults' in error && Array.isArray(error.partialResults) ? error.partialResults : []
+      execution = this.store.updateToolPackageExecution(execution.id, { status: 'failed', result: partialResults, error: detail, completedAt: new Date().toISOString() })
       if (execution.cardMessageId) await this.retryDelivery(provider, () => provider.updateCard(execution.cardMessageId, feishuTextCard(`执行失败：${pack.name}`, `**错误**\n${detail}`, { color: 'red', note: `执行 ID：${execution.id}` }))).catch(() => undefined)
       await this.continueAfterToolExecution(execution, provider).catch(continuationError => console.error('[feishu] failed to continue tool execution:', continuationError))
     }
@@ -166,12 +171,14 @@ export class FeishuBotManager {
       provider: 'feishu', accountId: execution.botId, eventId: `tool-package:${execution.id}`, messageId: execution.sourceMessageId,
       conversation: { id: execution.chatId, scope: execution.topicId ? 'topic' : 'group', ...(execution.topicId ? { rootId: execution.topicId } : {}) },
       sender: { id: 'codybothub-tool-runner', type: 'app' }, content: { type: 'tool_result', title: scene?.matcher.cardTitleIncludes[0] ?? '' },
-      text: [scene?.matcher.textIncludes[0] ?? '', `工具包“${execution.toolPackageName}”执行结果如下。`, `执行状态：${execution.status}`, execution.error ? `错误：${execution.error}` : `结果：${JSON.stringify(execution.result, null, 2)}`, '请根据原任务和本次真实执行结果继续处理，并向用户说明最终状态。'].filter(Boolean).join('\n\n'),
+      text: [scene?.matcher.textIncludes[0] ?? '', `工具包“${execution.toolPackageName}”执行结果如下。`, `执行状态：${execution.status}`, execution.error ? `错误：${execution.error}` : '', Array.isArray(execution.result) && execution.result.length ? `已成功步骤：${JSON.stringify(execution.result, null, 2)}` : execution.error ? '' : `结果：${JSON.stringify(execution.result, null, 2)}`, '请根据原任务和本次真实执行结果继续处理，并向用户说明最终状态。'].filter(Boolean).join('\n\n'),
       attachments: [], addressedToAgent: true, mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
     }
     const base = this.store.resolveRoute(execution.botId, message)
     const route: ResolvedRoute = { ...base, threadChannelId: execution.threadChannelId, threadRouting: { type: 'fixed', matchedThreadId: execution.coreThreadId, score: 1, reason: '工具包执行结果续写原 Thread Channel' } }
-    const answer = await this.runtime.execute(route, message)
+    const originalLog = this.store.getMessageLogByBotMessage(execution.botId, execution.sourceMessageId)
+    const sourceLog = this.store.getMessageLogForToolInvocation(originalLog.id, execution.threadChannelId)
+    const answer = await this.runtime.execute(route, message, [], undefined, undefined, undefined, undefined, sourceLog.id, false)
     const cards = feishuMarkdownCards(answer, { note: `工具包：${execution.toolPackageName}  |  Thread：${execution.coreThreadId}` })
     for (let index = 0; index < cards.length; index += 1) await this.replyCard(provider, execution.sourceMessageId, cards[index]!, Boolean(execution.topicId), `tool-package:${execution.id}:answer:${index}`)
   }
@@ -402,6 +409,7 @@ export class FeishuBotManager {
         },
         trace => this.store.setMessageLogInvestigation(log.id, trace),
         threadId => this.store.setMessageLogThread(log.id, threadId),
+        log.id,
       )
       if (patchTimer) { clearTimeout(patchTimer); patchTimer = null }
       await patchTail
@@ -493,6 +501,7 @@ export class FeishuBotManager {
     if (action.value.botId !== botId) return { toast: { type: 'warning', content: '这个操作已失效' } }
     const executionId = String(action.value.executionId ?? '')
     const execution = this.store.getToolPackageExecution(executionId)
+    if (execution.botId !== botId) return { toast: { type: 'warning', content: '这个操作不属于当前 Bot' } }
     if (execution.status !== 'awaiting_approval') return { toast: { type: 'info', content: `当前状态：${execution.status}` } }
     const pack = this.store.getToolPackage(execution.toolPackageId)
     const bot = this.store.listBots().find(item => item.id === botId)
