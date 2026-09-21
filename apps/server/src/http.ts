@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import path from 'node:path'
@@ -11,6 +11,8 @@ import type { FeishuProvisioningService, ProvisioningRequest } from './provision
 import { listBrowsableDirectories } from './directories.js'
 import type { CodyBotRuntime } from './runtime.js'
 import type { SkillSyncService } from './skills.js'
+import { removeToolSource, syncToolSource } from './tool-source.js'
+import type { CopilotService } from './copilot.js'
 
 type Json = Record<string, unknown>
 
@@ -69,9 +71,10 @@ export interface HubServerOptions {
   getDeploymentStatus?: () => DeploymentStatusRecord
   provisioning: FeishuProvisioningService
   skills: SkillSyncService
+  copilot: CopilotService
 }
 
-export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, getSystemHealth, getDeploymentStatus, provisioning, skills }: HubServerOptions) => {
+export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, getSystemHealth, getDeploymentStatus, provisioning, skills, copilot }: HubServerOptions) => {
   const auth = new AuthService(store)
 
   return createServer(async (request, response) => {
@@ -99,6 +102,37 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         const audit = (action: string, targetType: string, targetId: string, summary: string, details: Record<string, unknown> = {}) => store.createAuditLog({ actor, action, targetType, targetId, summary, details, ipAddress: requestIp(request) })
 
         if (method === 'GET' && url.pathname === '/api/system-health') return sendJson(response, 200, getSystemHealth?.() ?? null)
+
+        if (method === 'GET' && url.pathname === '/api/copilot/session') {
+          const workspaceId = url.searchParams.get('workspaceId') ?? store.listWorkspaces()[0]?.id ?? ''
+          if (!workspaceId) throw new HttpError(400, 'Create a Workspace before using Copilot')
+          return sendJson(response, 200, copilot.session(actor.id, workspaceId))
+        }
+        if (method === 'POST' && url.pathname === '/api/copilot/session/reset') {
+          const body = await readJson(request), result = copilot.reset(required(body, 'sessionId'), actor.id)
+          audit('copilot.reset', 'copilot_session', result.session.id, '重置平台 Copilot 会话', { workspaceId: result.session.workspaceId })
+          return sendJson(response, 200, result)
+        }
+        if (method === 'POST' && url.pathname === '/api/copilot/messages') {
+          const body = await readJson(request), content = required(body, 'content')
+          const result = await copilot.ask(required(body, 'sessionId'), actor, content)
+          audit('copilot.ask', 'copilot_session', result.session.id, `询问平台 Copilot：${content.slice(0, 120)}`, { workspaceId: result.session.workspaceId })
+          return sendJson(response, 200, result)
+        }
+        if (method === 'GET' && url.pathname === '/api/copilot/proposals') return sendJson(response, 200, store.listCopilotProposals(url.searchParams.get('sessionId') ?? '', actor.id))
+        const copilotProposal = url.pathname.match(/^\/api\/copilot\/proposals\/([^/]+)\/(apply|dismiss)$/u)
+        if (copilotProposal && method === 'POST') {
+          const id = decodeURIComponent(copilotProposal[1]!), action = copilotProposal[2]
+          if (action === 'dismiss') {
+            const proposal = copilot.dismissProposal(id, actor.id)
+            audit('copilot.proposal.dismiss', 'copilot_proposal', proposal.id, `放弃 Copilot 草稿：${proposal.title}`)
+            return sendJson(response, 200, proposal)
+          }
+          const result = copilot.applyProposal(id, actor)
+          if (result.target.type === 'bot') await onConfigurationChanged?.()
+          audit('copilot.proposal.apply', result.target.type, result.target.id, `应用 Copilot 草稿：${result.proposal.title}`, { proposalId: result.proposal.id, proposalKind: result.proposal.kind })
+          return sendJson(response, 200, result)
+        }
 
         if (method === 'GET' && url.pathname === '/api/preferences') return sendJson(response, 200, { theme: actor.theme })
         if (method === 'PUT' && url.pathname === '/api/preferences') {
@@ -423,19 +457,6 @@ const skillPackageInput = (body: Json): Omit<SkillPackageRecord, 'id' | 'created
 })
 
 const objectValue = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-const removeToolSource = (store: HubStore, tool: ToolRecord): void => {
-  const workspace = store.getWorkspace(tool.workspaceId)
-  rmSync(path.join(workspace.path, '.codybothub', 'tools', tool.id), { recursive: true, force: true })
-}
-const syncToolSource = (store: HubStore, tool: ToolRecord): void => {
-  const workspace = store.getWorkspace(tool.workspaceId)
-  const directory = path.join(workspace.path, '.codybothub', 'tools', tool.id)
-  if (!tool.scriptContent) { removeToolSource(store, tool); return }
-  const extension = tool.scriptLanguage === 'shell' ? 'sh' : tool.scriptLanguage === 'node' ? 'js' : 'py'
-  mkdirSync(directory, { recursive: true })
-  writeFileSync(path.join(directory, `main.${extension}`), tool.scriptContent, { encoding: 'utf8', mode: 0o700 })
-  writeFileSync(path.join(directory, 'tool.json'), `${JSON.stringify({ id: tool.id, name: tool.name, language: tool.scriptLanguage, version: tool.scriptVersion, updatedAt: tool.updatedAt }, null, 2)}\n`, 'utf8')
-}
 const toolInput = (body: Json): Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt' | 'scriptVersion'> => {
   const requestedType = String(body.executorType ?? 'bits_rpc')
   const executorType: ToolRecord['executorType'] = requestedType === 'bits_rpc' ? 'bits_rpc' : 'command'

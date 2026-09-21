@@ -332,6 +332,38 @@ export interface AdminAccountRecord {
   updatedAt: string
 }
 
+export interface CopilotSessionRecord {
+  id: string
+  accountId: string
+  workspaceId: string
+  workspaceName: string
+  coreThreadId: string
+  title: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CopilotMessageRecord {
+  id: string
+  sessionId: string
+  role: 'user' | 'assistant'
+  content: string
+  createdAt: string
+}
+
+export interface CopilotProposalRecord {
+  id: string
+  sessionId: string
+  kind: 'managed_script' | 'bot_operator'
+  title: string
+  status: 'draft' | 'applied' | 'dismissed'
+  payload: Record<string, unknown>
+  result: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+  appliedAt: string
+}
+
 export interface SkillSourceRecord {
   id: string
   name: string

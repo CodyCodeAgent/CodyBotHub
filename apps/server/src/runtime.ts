@@ -42,6 +42,19 @@ export type RuntimeWorkspaceResources = {
   skills: CodexSkillOption[]
 }
 
+export type CopilotExecutionInput = {
+  sessionId: string
+  coreThreadId: string
+  accountId: string
+  workspaceId: string
+  workspacePath: string
+  workspaceName: string
+  content: string
+  platformContext: string
+  onProgress?: (answer: string) => void
+  onThreadResolved?: (threadId: string) => void
+}
+
 type RuntimeSkillPlan = {
   attached: TurnInputSkill[]
   instructions: string
@@ -119,7 +132,9 @@ export class CodyBotRuntime {
   private readonly engines = new Map<AgentRuntimeKind, EngineState>()
   private readonly resources = new WorkspaceResourceIndex()
   private readonly activeToolContexts = new Map<string, { sourceLogId: string; invocationAllowed: boolean }>()
+  private readonly activeCopilotContexts = new Map<string, { sessionId: string; accountId: string; workspaceId: string }>()
   private toolInvoker: ((call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string; sourceLogId: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>) | null = null
+  private copilotToolInvoker: ((call: { tool: string; arguments: Record<string, unknown>; sessionId: string; accountId: string; workspaceId: string }) => Promise<Record<string, unknown>>) | null = null
 
   constructor(
     private readonly store: HubStore,
@@ -130,6 +145,54 @@ export class CodyBotRuntime {
 
   setToolPackageInvoker(invoker: (call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string; sourceLogId: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>): void {
     this.toolInvoker = invoker
+  }
+
+  setCopilotToolInvoker(invoker: (call: { tool: string; arguments: Record<string, unknown>; sessionId: string; accountId: string; workspaceId: string }) => Promise<Record<string, unknown>>): void {
+    this.copilotToolInvoker = invoker
+  }
+
+  resetCopilotSession(sessionId: string): void {
+    const bindingId = `copilot:${sessionId}`
+    for (const engine of this.engines.values()) {
+      if (engine.attached.has(bindingId)) engine.manager.detach(bindingId)
+      engine.attached.delete(bindingId)
+    }
+    this.activeCopilotContexts.delete(bindingId)
+  }
+
+  async executeCopilot(input: CopilotExecutionInput): Promise<string> {
+    const engine = await this.ensureEngine('codex'), manager = engine.manager, bindingId = `copilot:${input.sessionId}`
+    const context = this.copilotContext(input)
+    if (!engine.attached.has(bindingId)) {
+      let threadId = input.coreThreadId
+      if (input.coreThreadId) await manager.resume({ id: bindingId, threadId: input.coreThreadId }, context)
+      else threadId = (await manager.create(bindingId, context)).threadId
+      engine.attached.add(bindingId)
+      if (threadId) input.onThreadResolved?.(threadId)
+    } else manager.setContext(bindingId, context)
+    const settings = this.store.getPlatformSettings()
+    const model = await this.resolveModel(manager, { model: settings.defaultModel, reasoningEffort: settings.defaultReasoningEffort, modelSource: 'platform', reasoningEffortSource: 'platform', fallbackEnabled: settings.modelFallbackEnabled }, 'codex')
+    let turnId = '', answer = ''
+    const unsubscribe = manager.subscribe(event => {
+      if (event.threadId !== (manager.snapshot(bindingId)?.threadId ?? input.coreThreadId) || (turnId && event.turnId && event.turnId !== turnId)) return
+      const text = typeof event.data.text === 'string' ? event.data.text : ''
+      if (event.type === 'assistant.delta' && text) answer += text
+      if (event.type === 'assistant.completed' && text) answer = text
+      if ((event.type === 'assistant.delta' || event.type === 'assistant.completed') && answer) input.onProgress?.(answer)
+    })
+    this.activeCopilotContexts.set(bindingId, { sessionId: input.sessionId, accountId: input.accountId, workspaceId: input.workspaceId })
+    try {
+      const submission = manager.submit(bindingId, {
+        input: buildTurnUserInput({ text: input.content }), runtimeWorkspaceRoots: [realpathSync.native(input.workspacePath)], approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' },
+        ...(model.model ? { model: model.model } : {}), ...(model.reasoningEffort ? { effort: model.reasoningEffort as TurnInput['effort'] } : {}),
+      }, 'queue', `copilot:${input.sessionId}:${Date.now()}`)
+      turnId = (await submission.started).turnId
+      const outcome = await this.waitForCompletion(manager, bindingId, submission.completed, 'codex')
+      if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || 'Copilot Turn failed'))
+      return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
+    } finally {
+      unsubscribe()
+    }
   }
 
   async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true): Promise<string> {
@@ -284,9 +347,15 @@ export class CodyBotRuntime {
       initializeParams: { clientInfo: { name: 'cody-bot-hub', title: 'CodyBotHub', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } },
     })
     const dynamicTools: DynamicToolProvider = { invoke: async (call, binding) => {
+      const args = call.arguments && typeof call.arguments === 'object' && !Array.isArray(call.arguments) ? call.arguments as Record<string, unknown> : {}
+      if (call.namespace === 'codybothub_admin') {
+        const active = this.activeCopilotContexts.get(binding.id)
+        if (!active || !this.copilotToolInvoker) throw new Error('CodyBotHub admin Copilot context is unavailable')
+        const result = await this.copilotToolInvoker({ tool: call.tool, arguments: args, ...active })
+        return { contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: true }
+      }
       if (call.namespace !== 'codybothub' || call.tool !== 'invoke_tool_package') throw new Error(`Unknown CodyBotHub tool: ${call.namespace ?? ''}.${call.tool}`)
       if (!this.toolInvoker) throw new Error('CodyBotHub tool package service is unavailable')
-      const args = call.arguments && typeof call.arguments === 'object' && !Array.isArray(call.arguments) ? call.arguments as Record<string, unknown> : {}
       const packageId = typeof args.packageId === 'string' ? args.packageId : ''
       if (!packageId) throw new Error('packageId is required')
       const input = args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments) ? args.arguments as Record<string, unknown> : {}
@@ -418,6 +487,38 @@ export class CodyBotRuntime {
           'cody-bot-hub-route': { kind: 'application', value: [developerInstructions, resourceInstructions].filter(Boolean).join('\n\n') },
         } : null,
       },
+    }
+  }
+
+  private copilotContext(input: CopilotExecutionInput): ExecutionContext {
+    const cwd = realpathSync.native(input.workspacePath)
+    const instructions = [
+      '你是 CodyBotHub 平台管理员 Copilot。使用简洁中文帮助管理员查询平台、查找飞书人员和生成配置草稿。',
+      '所有平台事实必须通过 codybothub_admin 工具查询，不要猜测 ID、配置或人员信息。',
+      '你运行在只读沙箱中。不得直接编辑工作区、数据库或平台配置。需要创建托管脚本时，先完成脚本、参数和 Schema 设计，再调用 propose_managed_script 生成待确认草稿。需要调整 Bot 操作人时，先确认唯一人员 Open ID 和 Bot，再调用 propose_bot_operator。所有草稿只有管理员点击应用后才会生效。',
+      '查找人员时调用 search_feishu_user；同名命中多条时列出姓名、企业邮箱、部门和 Open ID，让管理员自行确认。',
+      '生成脚本时使用参数 argv，不把用户输入拼进 shell 命令；给出明确错误、超时和 JSON 输出。',
+      `当前账号：${input.accountId}；当前工作区：${input.workspaceName}（${input.workspaceId}）。`,
+      `平台概览：${input.platformContext}`,
+    ].join('\n\n')
+    return {
+      thread: {
+        cwd, approvalPolicy: 'never', sandbox: 'read-only', runtimeWorkspaceRoots: [cwd], baseInstructions: null, developerInstructions: instructions, experimentalRawEvents: false, ephemeral: false,
+        dynamicTools: [{
+          type: 'namespace', name: 'codybothub_admin', description: 'CodyBotHub 平台管理查询与可确认草稿工具。', tools: [
+            { type: 'function', name: 'inspect_platform', description: '查询平台工作区、Bot、场景、技能包、工具和工具包。', inputSchema: { type: 'object', properties: { resource: { type: 'string', enum: ['all', 'workspaces', 'bots', 'scenes', 'skillPackages', 'tools', 'toolPackages'] }, query: { type: 'string' } }, additionalProperties: false } },
+            { type: 'function', name: 'search_feishu_user', description: '按姓名或邮箱搜索飞书员工并返回 Open ID、邮箱和部门。', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
+            { type: 'function', name: 'propose_managed_script', description: '创建平台托管脚本草稿。只生成待确认提案，不直接保存工具。', inputSchema: { type: 'object', properties: {
+              name: { type: 'string' }, description: { type: 'string' }, language: { type: 'string', enum: ['python', 'shell', 'node'] }, scriptContent: { type: 'string' },
+              argumentsTemplate: { type: 'array', items: { type: 'string' } }, inputSchema: { type: 'object' }, timeoutSeconds: { type: 'number' },
+            }, required: ['name', 'description', 'language', 'scriptContent', 'argumentsTemplate', 'inputSchema'], additionalProperties: false } },
+            { type: 'function', name: 'propose_bot_operator', description: '创建添加或移除 Bot 操作人的配置草稿。调用前必须已确认准确的 Bot ID 和人员 Open ID。', inputSchema: { type: 'object', properties: {
+              botId: { type: 'string', description: 'inspect_platform 返回的 Bot ID' }, openId: { type: 'string', description: 'search_feishu_user 返回的 ou_ Open ID' }, personName: { type: 'string' }, action: { type: 'string', enum: ['add', 'remove'] },
+            }, required: ['botId', 'openId', 'action'], additionalProperties: false } },
+          ],
+        }],
+      },
+      turn: { cwd, runtimeWorkspaceRoots: [cwd], approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' }, summary: 'concise', additionalContext: { 'cody-bot-hub-admin': { kind: 'application', value: instructions } } },
     }
   }
 

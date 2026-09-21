@@ -42,8 +42,30 @@ CodyBotHub 是一个独立的飞书 Bot 管理平台。它以工作区为运行�
 - 技能包可以挂载工具包。Codex 只感知当前场景实际关联的工具包，分析完成后通过 CodyWebCore 动态工具协议申请执行
 - 需要人工确认时，平台发送飞书交互卡片并校验回调中的真实 Open ID；确认、拒绝、执行结果全部写入 SQLite
 - 工具包按原 Thread Channel 串行执行，真实结果会自动续写原 Codex Thread，再由 Agent 输出最终说明
+- 全局“平台 Copilot”复用 CodyWebCore，为每个管理员和工作区保存独立 Codex Thread，可查询平台配置、检索飞书员工 Open ID、生成托管脚本和 Bot 操作人变更草稿
+- Copilot 默认运行在只读沙箱；脚本与配置修改只生成可审查草稿，管理员在页面确认后才会落库，并完整记录操作审计
 
 完整的数据流、匹配规则和线程规则见 [docs/architecture.md](docs/architecture.md)。
+
+## 平台 Copilot
+
+登录后，页面右下角的 **AI** 按钮可在任意管理页面打开平台 Copilot。它按“平台账号 + 工作区”保存独立会话，顶部会展示当前工作区和对应的 Codex Thread；切换工作区不会混用上下文。
+
+当前可以直接询问：
+
+- “勾超的飞书 Open ID 是什么？”Copilot 会通过 `lark-cli contact +search-user` 实时检索，不会猜测人员 ID。同名时会列出邮箱和部门供管理员确认。
+- “概览 AI Hub 下的 Bot、场景、技能包和工具包。”平台事实通过内部只读工具获取。
+- “写一个接收 budgetId 并输出 JSON 的 Python 工具。”Copilot 会生成托管脚本草稿，页面展示代码、参数和超时，点击“确认创建工具”后才写入工具注册表。
+- “把勾超加为预算立项小助手的操作人。”Copilot 会先查人和 Bot，再生成配置变更卡片，点击“确认更新 Bot”后才修改 SQLite 并热重载飞书连接。
+
+服务账号需要提前完成 `lark-cli` 用户登录，并拥有通讯录搜索权限；可用以下命令检查：
+
+```bash
+lark-cli auth status --verify
+lark-cli contact +search-user --query "姓名或邮箱" --exclude-external-users --as user --format json
+```
+
+Copilot 不能直接编辑数据库、工作区文件或平台配置。查询走受控的动态工具，写操作走“生成草稿 → 页面确认 → 落库/同步 → 操作记录”链路。管理员可重置当前 Copilot 会话以创建新的 Codex Thread；其他工作区和账号的会话不受影响。
 
 ## 工具与工具包
 

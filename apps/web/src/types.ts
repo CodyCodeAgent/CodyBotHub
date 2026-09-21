@@ -28,6 +28,10 @@ export interface MessageLog { id: string; eventId: string; messageId: string; bo
 export interface MessageAttempt { id: string; logId: string; attemptNumber: number; status: 'queued'|'processing'|'completed'|'failed'; requestedByAccountId: string; requestedByLoginName: string; requestedByDisplayName: string; responseContent: string; error: string; model: string; reasoningEffort: string; startedAt: string; completedAt: string; durationMs: number|null; createdAt: string; updatedAt: string }
 export type ThemePreference = 'system' | 'light' | 'dark'
 export interface AdminAccount { id: string; loginName: string; displayName: string; primary: boolean; enabled: boolean; theme: ThemePreference; lastLoginAt: string; createdAt: string; updatedAt: string }
+export interface CopilotSession { id: string; accountId: string; workspaceId: string; workspaceName: string; coreThreadId: string; title: string; createdAt: string; updatedAt: string }
+export interface CopilotMessage { id: string; sessionId: string; role: 'user'|'assistant'; content: string; createdAt: string }
+export interface CopilotProposal { id: string; sessionId: string; kind: 'managed_script'|'bot_operator'; title: string; status: 'draft'|'applied'|'dismissed'; payload: Record<string, unknown>; result: Record<string, unknown>; createdAt: string; updatedAt: string; appliedAt: string }
+export interface CopilotState { session: CopilotSession; messages: CopilotMessage[]; proposals: CopilotProposal[] }
 export interface AuditLog { id: string; actorAccountId: string; actorLoginName: string; actorDisplayName: string; action: string; targetType: string; targetId: string; summary: string; details: Record<string, unknown>; ipAddress: string; createdAt: string }
 export interface ChatMetadata { botId: string; chatId: string; name: string; mode: 'group'|'topic'|'p2p'; updatedAt: string }
 export interface ConversationThread { id: string; threadChannelId: string; botId: string; botName: string; runtimeKind: AgentRuntimeKind; conversationMode: 'chat'|'topic'; chatId: string; chatName: string; chatMode: ChatMetadata['mode']|''; topicId: string; coreThreadId: string; createdAt: string; updatedAt: string }

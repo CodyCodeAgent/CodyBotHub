@@ -4,6 +4,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from './api'
 import { applyTheme } from './theme'
+import CopilotPanel from './components/CopilotPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -67,5 +68,6 @@ onMounted(async () => { const status = await api.authStatus().catch(() => null);
       </div>
     </aside>
     <main id="main-content" class="main" tabindex="-1"><RouterView /></main>
+    <CopilotPanel />
   </div>
 </template>

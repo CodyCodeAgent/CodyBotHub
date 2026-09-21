@@ -1,4 +1,4 @@
-import type { AdminAccount, AgentRuntimeKind, AuditLog, Bot, ChatMetadata, ConversationThread, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, SystemHealth, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Tool, ToolPackage, ToolPackageExecution, ToolScriptVersion, Workspace, WorkspaceResources } from './types'
+import type { AdminAccount, AgentRuntimeKind, AuditLog, Bot, ChatMetadata, ConversationThread, CopilotProposal, CopilotState, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, SystemHealth, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Tool, ToolPackage, ToolPackageExecution, ToolScriptVersion, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -22,6 +22,11 @@ export const api = {
   setup: (loginName: string, displayName: string, password: string) => request<AuthStatus>('/auth/setup', { method: 'POST', body: JSON.stringify({ loginName, displayName, password }) }),
   login: (loginName: string, password: string) => request<AuthStatus>('/auth/login', { method: 'POST', body: JSON.stringify({ loginName, password }) }),
   logout: () => request('/auth/logout', { method: 'POST' }),
+  copilotSession: (workspaceId: string) => request<CopilotState>(`/copilot/session?workspaceId=${encodeURIComponent(workspaceId)}`),
+  resetCopilot: (sessionId: string) => request<CopilotState>('/copilot/session/reset', { method: 'POST', body: JSON.stringify({ sessionId }) }),
+  askCopilot: (sessionId: string, content: string) => request<CopilotState>('/copilot/messages', { method: 'POST', body: JSON.stringify({ sessionId, content }) }),
+  applyCopilotProposal: (id: string) => request<{ proposal: CopilotProposal; target: { type: 'tool'|'bot'; id: string; name: string } }>(`/copilot/proposals/${encodeURIComponent(id)}/apply`, { method: 'POST' }),
+  dismissCopilotProposal: (id: string) => request<CopilotProposal>(`/copilot/proposals/${encodeURIComponent(id)}/dismiss`, { method: 'POST' }),
   preferences: () => request<{ theme: ThemePreference }>('/preferences'),
   savePreferences: (theme: ThemePreference) => request<{ theme: ThemePreference }>('/preferences', { method: 'PUT', body: JSON.stringify({ theme }) }),
   accounts: () => request<AdminAccount[]>('/accounts'),
