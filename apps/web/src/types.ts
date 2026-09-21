@@ -42,6 +42,12 @@ export interface DashboardOverview {
     chats: Array<{ botId: string; botName: string; chatId: string; chatName: string; chatMode: string; received: number; completed: number; failed: number; averageDurationMs: number; lastActiveAt: string }>
     scenes: Array<{ sceneId: string; sceneName: string; received: number; completed: number; failed: number }>
     routes: Array<{ type: string; count: number }>
+    capabilities: {
+      configuredTools: number; configuredToolPackages: number; skillPackageUses: number; toolPackageRequests: number; successfulToolCalls: number
+      status: { awaitingApproval: number; queued: number; running: number; completed: number; failed: number; rejected: number }
+      skillPackages: Array<{ id: string; name: string; uses: number }>
+      toolPackages: Array<{ id: string; name: string; requests: number; awaitingApproval: number; queued: number; running: number; completed: number; failed: number; rejected: number; successfulToolCalls: number }>
+    }
   }
 }
 export interface SystemHealth {

@@ -481,12 +481,35 @@ describe('HubStore invariants', () => {
   it('persists tools, ordered tool packages, and Skill Package authorization links', () => {
     const store = new HubStore(':memory:')
     const linked = workspace(store, 'Tools')
+    const bot = store.createBot({ name: 'Tool runner', defaultWorkspaceId: linked.id })
     const tool = store.createTool({ workspaceId: linked.id, name: 'Echo check', description: 'safe test', executorType: 'command', command: 'printf', argumentsTemplate: ['%s', '{{message}}'], inputSchema: { type: 'object', required: ['message'] }, timeoutSeconds: 5, enabled: true })
     const pack = store.createToolPackage({ workspaceId: linked.id, name: 'Echo workflow', description: '', prompt: 'Only after evidence is complete', approvalRequired: true, approverIds: ['ou_reviewer'], cardTitle: 'Confirm echo', cardDescription: 'Test operation', enabled: true, steps: [{ toolId: tool.id, toolName: tool.name, phase: 'verify', position: 0, arguments: {} }] })
     const skill = store.createSkillPackage({ workspaceId: linked.id, name: 'Triage with action', description: '', prompt: '', skills: [], toolPackageIds: [pack.id], fallbackMode: 'package_first' })
+    const scene = store.createScene({ botId: bot.id, workspaceId: linked.id, name: 'Tool scene', prompt: '', priority: 1, enabled: true, matcher: { chatIds: ['oc_tools'], messageTypes: ['text'], textIncludes: [], cardTitleIncludes: [] }, skillPackageIds: [skill.id] })
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-tools', messageId: 'message-tools',
+      conversation: { id: 'oc_tools', scope: 'group' as const }, sender: { id: 'ou_requester', type: 'user' as const },
+      content: { type: 'text' as const }, text: 'run the approved workflow', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+    store.createMessageLog(bot.id, route, message)
+    const completed = store.createToolPackageExecution({ callId: 'call-completed', toolPackageId: pack.id, botId: bot.id, sceneId: scene.id, chatId: 'oc_tools', topicId: '', threadChannelId: route.threadChannelId, coreThreadId: 'thread-tools', sourceMessageId: message.messageId, arguments: { message: 'hello' }, reason: 'verify', requestedBy: 'ou_requester', status: 'running' })
+    store.updateToolPackageExecution(completed.id, { status: 'completed', result: [{ step: 1 }, { step: 2 }], completedAt: new Date().toISOString() })
+    store.createToolPackageExecution({ callId: 'call-awaiting', toolPackageId: pack.id, botId: bot.id, sceneId: scene.id, chatId: 'oc_tools', topicId: '', threadChannelId: route.threadChannelId, coreThreadId: 'thread-tools', sourceMessageId: message.messageId, arguments: {}, reason: 'needs approval', requestedBy: 'ou_requester', status: 'awaiting_approval' })
     expect(store.listTools()).toMatchObject([{ id: tool.id, argumentsTemplate: ['%s', '{{message}}'] }])
     expect(store.listToolPackages()).toMatchObject([{ id: pack.id, approverIds: ['ou_reviewer'], steps: [{ toolId: tool.id, phase: 'verify' }] }])
     expect(store.listSkillPackages()).toMatchObject([{ id: skill.id, toolPackageIds: [pack.id] }])
+    expect(store.stats().analytics.capabilities).toMatchObject({
+      configuredTools: 1,
+      configuredToolPackages: 1,
+      skillPackageUses: 1,
+      toolPackageRequests: 2,
+      successfulToolCalls: 2,
+      status: { awaitingApproval: 1, completed: 1, failed: 0, rejected: 0 },
+      skillPackages: [{ id: skill.id, name: skill.name, uses: 1 }],
+      toolPackages: [{ id: pack.id, name: pack.name, requests: 2, awaitingApproval: 1, completed: 1, successfulToolCalls: 2 }],
+    })
     expect(() => store.deleteTool(tool.id)).toThrow()
     store.close()
   })

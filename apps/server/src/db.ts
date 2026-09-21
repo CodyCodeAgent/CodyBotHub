@@ -1038,6 +1038,12 @@ export class HubStore {
       chats: Array<{ botId: string; botName: string; chatId: string; chatName: string; chatMode: string; received: number; completed: number; failed: number; averageDurationMs: number; lastActiveAt: string }>
       scenes: Array<{ sceneId: string; sceneName: string; received: number; completed: number; failed: number }>
       routes: Array<{ type: string; count: number }>
+      capabilities: {
+        configuredTools: number; configuredToolPackages: number; skillPackageUses: number; toolPackageRequests: number; successfulToolCalls: number
+        status: { awaitingApproval: number; queued: number; running: number; completed: number; failed: number; rejected: number }
+        skillPackages: Array<{ id: string; name: string; uses: number }>
+        toolPackages: Array<{ id: string; name: string; requests: number; awaitingApproval: number; queued: number; running: number; completed: number; failed: number; rejected: number; successfulToolCalls: number }>
+      }
     }
   } {
     const count = (table: string) => Number((this.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as Row).count)
@@ -1093,6 +1099,49 @@ export class HubStore {
         sceneId: String(row.scene_id), sceneName: String(row.scene_name), received: Number(row.received), completed: Number(row.completed), failed: Number(row.failed),
       }))
     const routes = (this.db.prepare('SELECT thread_route_type AS type, COUNT(*) AS count FROM message_logs GROUP BY thread_route_type ORDER BY count DESC').all() as Row[]).map(row => ({ type: String(row.type), count: Number(row.count) }))
+    const skillPackageNames = new Map((this.db.prepare('SELECT id, name FROM skill_packages').all() as Row[]).map(row => [String(row.id), String(row.name)]))
+    const skillPackageUsage = new Map<string, { id: string; name: string; uses: number }>()
+    for (const row of this.db.prepare('SELECT skill_packages_json FROM message_logs').all() as Row[]) {
+      let packages: Array<{ id?: unknown; name?: unknown }> = []
+      try {
+        const parsed = JSON.parse(String(row.skill_packages_json)) as unknown
+        if (Array.isArray(parsed)) packages = parsed as Array<{ id?: unknown; name?: unknown }>
+      } catch { /* Invalid historical snapshots contribute no usage. */ }
+      const seen = new Set<string>()
+      for (const item of packages) {
+        const id = String(item?.id ?? '')
+        if (!id || seen.has(id)) continue
+        seen.add(id)
+        const current = skillPackageUsage.get(id)
+        const name = skillPackageNames.get(id) || String(item?.name ?? '') || '已删除技能包'
+        skillPackageUsage.set(id, { id, name, uses: (current?.uses ?? 0) + 1 })
+      }
+    }
+    const skillPackages = [...skillPackageUsage.values()].sort((a, b) => b.uses - a.uses || a.name.localeCompare(b.name, 'zh-CN')).slice(0, 10)
+    const skillPackageUses = [...skillPackageUsage.values()].reduce((sum, item) => sum + item.uses, 0)
+    type ToolPackageUsage = { id: string; name: string; requests: number; awaitingApproval: number; queued: number; running: number; completed: number; failed: number; rejected: number; successfulToolCalls: number }
+    const toolPackageNames = new Map((this.db.prepare('SELECT id, name FROM tool_packages').all() as Row[]).map(row => [String(row.id), String(row.name)]))
+    const toolPackageUsage = new Map<string, ToolPackageUsage>()
+    const toolStatus = { awaitingApproval: 0, queued: 0, running: 0, completed: 0, failed: 0, rejected: 0 }
+    let successfulToolCalls = 0
+    for (const row of this.db.prepare('SELECT tool_package_id, tool_package_name, status, result_json FROM tool_package_executions').all() as Row[]) {
+      const id = String(row.tool_package_id)
+      const status = String(row.status)
+      const statusKey = status === 'awaiting_approval' ? 'awaitingApproval' : status
+      let callCount = 0
+      if (status === 'completed') {
+        try { const result = JSON.parse(String(row.result_json)) as unknown; callCount = Array.isArray(result) ? result.length : 0 } catch { /* Ignore malformed historical results. */ }
+      }
+      const current = toolPackageUsage.get(id) ?? { id, name: toolPackageNames.get(id) || String(row.tool_package_name) || '已删除工具包', requests: 0, awaitingApproval: 0, queued: 0, running: 0, completed: 0, failed: 0, rejected: 0, successfulToolCalls: 0 }
+      current.requests += 1
+      current.successfulToolCalls += callCount
+      if (statusKey in current) current[statusKey as keyof Pick<ToolPackageUsage, 'awaitingApproval' | 'queued' | 'running' | 'completed' | 'failed' | 'rejected'>] += 1
+      if (statusKey in toolStatus) toolStatus[statusKey as keyof typeof toolStatus] += 1
+      successfulToolCalls += callCount
+      toolPackageUsage.set(id, current)
+    }
+    const toolPackages = [...toolPackageUsage.values()].sort((a, b) => b.requests - a.requests || a.name.localeCompare(b.name, 'zh-CN')).slice(0, 10)
+    const toolPackageRequests = [...toolPackageUsage.values()].reduce((sum, item) => sum + item.requests, 0)
     return {
       workspaces: count('workspaces'), bots: count('bots'), scenes: enabledScenes, skillPackages: count('skill_packages'), messageLogs: count('message_logs'),
       today: { received: Number(activity.received), completed: Number(activity.completed), failed: Number(activity.failed), processing: Number(activity.processing), reused: Number(activity.reused), experience: Number(activity.experience), created: Number(activity.created), averageDurationMs: Number(activity.average_duration_ms || 0) },
@@ -1100,6 +1149,10 @@ export class HubStore {
       analytics: {
         total: { received: Number(total.received), completed: Number(total.completed), failed: Number(total.failed), processing: Number(total.processing), uniqueChats: Number(total.unique_chats), averageDurationMs: Number(total.average_duration_ms || 0) },
         daily, chats, scenes: sceneStats, routes,
+        capabilities: {
+          configuredTools: count('tools'), configuredToolPackages: count('tool_packages'), skillPackageUses, toolPackageRequests, successfulToolCalls,
+          status: toolStatus, skillPackages, toolPackages,
+        },
       },
     }
   }
