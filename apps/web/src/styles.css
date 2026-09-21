@@ -498,6 +498,7 @@ input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--mute
 .status-dot { animation: status-pulse 2.8s ease-out infinite; }
 
 .main { position: relative; }
+.main:has(.dialog-backdrop) { z-index: 70; }
 .main::before { content: ''; position: fixed; z-index: -1; top: 0; left: 264px; right: 0; height: 160px; background: linear-gradient(180deg, rgba(90, 74, 220, .055), transparent); pointer-events: none; }
 .page { position: relative; }
 .page::before { content: ''; position: absolute; top: 25px; left: 48px; width: 46px; height: 1px; background: linear-gradient(90deg, var(--cyan), transparent); box-shadow: 0 0 8px rgba(69, 217, 255, .4); opacity: .7; }
