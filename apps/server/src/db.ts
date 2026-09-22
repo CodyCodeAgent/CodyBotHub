@@ -92,6 +92,7 @@ export class HubStore {
         account_id TEXT NOT NULL REFERENCES admin_accounts(id) ON DELETE CASCADE,
         workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
         core_thread_id TEXT NOT NULL DEFAULT '',
+        tool_contract_version INTEGER NOT NULL DEFAULT 0,
         title TEXT NOT NULL DEFAULT '平台 Copilot',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -591,6 +592,8 @@ export class HubStore {
     const threadChannelColumns = this.db.prepare('PRAGMA table_info(thread_channels)').all() as Row[]
     if (!threadChannelColumns.some(column => String(column.name) === 'runtime_kind')) this.db.exec("ALTER TABLE thread_channels ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex'))")
     if (!threadChannelColumns.some(column => String(column.name) === 'tool_contract_version')) this.db.exec('ALTER TABLE thread_channels ADD COLUMN tool_contract_version INTEGER NOT NULL DEFAULT 0')
+    const copilotSessionColumns = this.db.prepare('PRAGMA table_info(copilot_sessions)').all() as Row[]
+    if (!copilotSessionColumns.some(column => String(column.name) === 'tool_contract_version')) this.db.exec('ALTER TABLE copilot_sessions ADD COLUMN tool_contract_version INTEGER NOT NULL DEFAULT 0')
     const threadJobColumns = this.db.prepare('PRAGMA table_info(thread_jobs)').all() as Row[]
     if (!threadJobColumns.some(column => String(column.name) === 'receipt_reaction_id')) this.db.exec("ALTER TABLE thread_jobs ADD COLUMN receipt_reaction_id TEXT NOT NULL DEFAULT ''")
     this.db.prepare(`WITH canonical AS (
@@ -759,6 +762,11 @@ export class HubStore {
     if (!this.db.prepare('UPDATE copilot_sessions SET core_thread_id = ?, updated_at = ? WHERE id = ?').run(coreThreadId, now(), id).changes) throw new Error('Copilot session not found')
     return this.getCopilotSession(id)
   }
+  setCopilotToolContractVersion(id: string, accountId: string, version: number): CopilotSessionRecord {
+    this.getCopilotSession(id, accountId)
+    if (!this.db.prepare("UPDATE copilot_sessions SET core_thread_id = '', tool_contract_version = ?, updated_at = ? WHERE id = ?").run(version, now(), id).changes) throw new Error('Copilot session not found')
+    return this.getCopilotSession(id, accountId)
+  }
   addCopilotMessage(sessionId: string, role: CopilotMessageRecord['role'], content: string): CopilotMessageRecord {
     this.getCopilotSession(sessionId)
     const id = randomUUID(), timestamp = now()
@@ -792,7 +800,7 @@ export class HubStore {
     this.db.prepare('UPDATE copilot_proposals SET status = ?, result_json = ?, applied_at = ?, updated_at = ? WHERE id = ?').run(status, JSON.stringify(result), status === 'applied' ? timestamp : '', timestamp, id)
     return this.getCopilotProposal(id, accountId)
   }
-  private copilotSession = (row: Row): CopilotSessionRecord => ({ id: String(row.id), accountId: String(row.account_id), workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), coreThreadId: String(row.core_thread_id), title: String(row.title), createdAt: String(row.created_at), updatedAt: String(row.updated_at) })
+  private copilotSession = (row: Row): CopilotSessionRecord => ({ id: String(row.id), accountId: String(row.account_id), workspaceId: String(row.workspace_id), workspaceName: String(row.workspace_name), coreThreadId: String(row.core_thread_id), toolContractVersion: Number(row.tool_contract_version) || 0, title: String(row.title), createdAt: String(row.created_at), updatedAt: String(row.updated_at) })
   private copilotProposal = (row: Row): CopilotProposalRecord => ({ id: String(row.id), sessionId: String(row.session_id), kind: String(row.kind) as CopilotProposalRecord['kind'], title: String(row.title), status: String(row.status) as CopilotProposalRecord['status'], payload: object(row.payload_json), result: object(row.result_json), createdAt: String(row.created_at), updatedAt: String(row.updated_at), appliedAt: String(row.applied_at) })
 
   getPlatformSettings(): PlatformSettingsRecord {

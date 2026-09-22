@@ -27,6 +27,8 @@ const stringValue = (value: unknown): string => typeof value === 'string' ? valu
 const stringList = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean) : []
 
 export class CopilotService {
+  private static readonly TOOL_CONTRACT_VERSION = 1
+
   constructor(private readonly store: HubStore, private readonly runtime: CodyBotRuntime, private readonly resolveBotIdentities?: BotIdentityResolver) {}
 
   session(accountId: string, workspaceId: string): { session: CopilotSessionRecord; messages: CopilotMessageRecord[]; proposals: CopilotProposalRecord[] } {
@@ -43,6 +45,10 @@ export class CopilotService {
   async ask(sessionId: string, account: AdminAccountRecord, content: string, onProgress?: (value: string) => void): Promise<{ session: CopilotSessionRecord; messages: CopilotMessageRecord[]; proposals: CopilotProposalRecord[] }> {
     if (!content.trim() || content.trim().length > 20_000) throw new Error('Copilot message must contain 1-20000 characters')
     let session = this.store.getCopilotSession(sessionId, account.id)
+    if (session.toolContractVersion !== CopilotService.TOOL_CONTRACT_VERSION) {
+      this.runtime.resetCopilotSession(session.id)
+      session = this.store.setCopilotToolContractVersion(session.id, account.id, CopilotService.TOOL_CONTRACT_VERSION)
+    }
     const workspace = this.store.getWorkspace(session.workspaceId)
     this.store.addCopilotMessage(session.id, 'user', content.trim())
     const answer = await this.runtime.executeCopilot({

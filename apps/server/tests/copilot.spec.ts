@@ -74,6 +74,32 @@ describe('CopilotService', () => {
     store.close()
   })
 
+  it('starts a fresh Codex thread when the Copilot tool contract changes while retaining visible history', async () => {
+    const store = new HubStore(':memory:')
+    const account = store.createAdminAccount({ loginName: 'admin', displayName: 'Admin', passwordHash: 'hash' })
+    const workspace = store.createWorkspace({ name: 'Copilot', path: '/tmp' })
+    const session = store.getOrCreateCopilotSession(account.id, workspace.id)
+    store.addCopilotMessage(session.id, 'assistant', 'existing history')
+    store.setCopilotCoreThread(session.id, 'stale-thread')
+    let resetId = ''
+    const runtime = {
+      resetCopilotSession: (id: string) => { resetId = id },
+      executeCopilot: async (input: { coreThreadId: string; onThreadResolved?: (threadId: string) => void }) => {
+        expect(input.coreThreadId).toBe('')
+        input.onThreadResolved?.('fresh-thread')
+        return 'resolved'
+      },
+    } as unknown as CodyBotRuntime
+    const service = new CopilotService(store, runtime)
+
+    const result = await service.ask(session.id, account, 'query')
+
+    expect(resetId).toBe(session.id)
+    expect(result.session).toMatchObject({ coreThreadId: 'fresh-thread', toolContractVersion: 1 })
+    expect(result.messages.map(item => item.content)).toEqual(['existing history', 'query', 'resolved'])
+    store.close()
+  })
+
   it('resolves an observed user in the target Bot application namespace', async () => {
     const store = new HubStore(':memory:')
     const account = store.createAdminAccount({ loginName: 'admin', displayName: 'Admin', passwordHash: 'hash' })

@@ -344,6 +344,7 @@ export interface CopilotSessionRecord {
   workspaceId: string
   workspaceName: string
   coreThreadId: string
+  toolContractVersion: number
   title: string
   createdAt: string
   updatedAt: string
