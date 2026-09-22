@@ -127,7 +127,13 @@ export class CopilotService {
     try {
       const { stdout } = await execFileAsync('lark-cli', ['contact', '+search-user', '--query', query, '--exclude-external-users', '--as', 'user', '--format', 'json'], { timeout: 25_000, maxBuffer: 2 * 1024 * 1024 })
       const value = JSON.parse(stdout) as { data?: { users?: Array<Record<string, unknown>>; has_more?: boolean } }
-      return { query, users: (value.data?.users ?? []).slice(0, 20).map(item => ({ openId: item.open_id, name: item.localized_name, enterpriseEmail: item.enterprise_email, department: item.department, activated: item.is_activated, hasChatted: item.has_chatted })), hasMore: Boolean(value.data?.has_more) }
+      return {
+        query,
+        users: (value.data?.users ?? []).slice(0, 20).map(item => ({ openId: item.open_id, name: item.localized_name, enterpriseEmail: item.enterprise_email, department: item.department, activated: item.is_activated, hasChatted: item.has_chatted })),
+        hasMore: Boolean(value.data?.has_more),
+        identityScope: 'lark-cli user application',
+        warning: '这里的 Open ID 属于 lark-cli 用户应用命名空间，不能直接用于 CodyBotHub Bot 的卡片审批或操作人授权。请使用卡片拒绝提示中的“当前 Bot 身份”，或当前飞书应用管理员 Open ID。',
+      }
     } catch (error) {
       return { query, users: [], unavailable: true, error: error instanceof Error ? error.message.slice(0, 500) : String(error) }
     }

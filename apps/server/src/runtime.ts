@@ -496,7 +496,7 @@ export class CodyBotRuntime {
       '你是 CodyBotHub 平台管理员 Copilot。使用简洁中文帮助管理员查询平台、查找飞书人员和生成配置草稿。',
       '所有平台事实必须通过 codybothub_admin 工具查询，不要猜测 ID、配置或人员信息。',
       '你运行在只读沙箱中。不得直接编辑工作区、数据库或平台配置。需要创建托管脚本时，先完成脚本、参数和 Schema 设计，再调用 propose_managed_script 生成待确认草稿。需要调整 Bot 操作人时，先确认唯一人员 Open ID 和 Bot，再调用 propose_bot_operator。所有草稿只有管理员点击应用后才会生效。',
-      '查找人员时调用 search_feishu_user；同名命中多条时列出姓名、企业邮箱、部门和 Open ID，让管理员自行确认。',
+      '查找人员时调用 search_feishu_user；同名命中多条时列出姓名、企业邮箱和部门让管理员确认。search_feishu_user 返回的 Open ID 属于 lark-cli 用户应用命名空间，不得直接用于 Bot 操作人或工具包审批人授权。必须改用目标 Bot 卡片回调提示中的当前 Bot 身份，或已验证的当前飞书应用管理员 Open ID。',
       '生成脚本时使用参数 argv，不把用户输入拼进 shell 命令；给出明确错误、超时和 JSON 输出。',
       `当前账号：${input.accountId}；当前工作区：${input.workspaceName}（${input.workspaceId}）。`,
       `平台概览：${input.platformContext}`,
@@ -512,8 +512,8 @@ export class CodyBotRuntime {
               name: { type: 'string' }, description: { type: 'string' }, language: { type: 'string', enum: ['python', 'shell', 'node'] }, scriptContent: { type: 'string' },
               argumentsTemplate: { type: 'array', items: { type: 'string' } }, inputSchema: { type: 'object' }, timeoutSeconds: { type: 'number' },
             }, required: ['name', 'description', 'language', 'scriptContent', 'argumentsTemplate', 'inputSchema'], additionalProperties: false } },
-            { type: 'function', name: 'propose_bot_operator', description: '创建添加或移除 Bot 操作人的配置草稿。调用前必须已确认准确的 Bot ID 和人员 Open ID。', inputSchema: { type: 'object', properties: {
-              botId: { type: 'string', description: 'inspect_platform 返回的 Bot ID' }, openId: { type: 'string', description: 'search_feishu_user 返回的 ou_ Open ID' }, personName: { type: 'string' }, action: { type: 'string', enum: ['add', 'remove'] },
+            { type: 'function', name: 'propose_bot_operator', description: '创建添加或移除 Bot 操作人的配置草稿。调用前必须已确认目标 Bot 应用命名空间下的准确 Open ID，不得使用 search_feishu_user 返回的个人应用 Open ID。', inputSchema: { type: 'object', properties: {
+              botId: { type: 'string', description: 'inspect_platform 返回的 Bot ID' }, openId: { type: 'string', description: '目标 Bot 卡片回调提示或当前飞书应用返回的 ou_ Open ID' }, personName: { type: 'string' }, action: { type: 'string', enum: ['add', 'remove'] },
             }, required: ['botId', 'openId', 'action'], additionalProperties: false } },
           ],
         }],

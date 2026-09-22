@@ -545,7 +545,10 @@ export class FeishuBotManager {
         allowed = administrators.administratorIds.includes(action.actorId)
       } catch { allowed = false }
     }
-    if (!allowed) return { toast: { type: 'error', content: '你没有确认这个工具包的权限' } }
+    if (!allowed) {
+      console.warn(`[feishu] tool package approval denied: execution=${execution.id} package=${pack.id} bot=${botId} actor=${action.actorId}`)
+      return { toast: { type: 'error', content: `当前 Bot 身份 ${action.actorId} 不在工具包审批人或 Bot 操作人列表中` } }
+    }
     if (action.value.action === 'tool_package_reject') {
       const rejected = this.store.transitionToolPackageExecution(execution.id, 'awaiting_approval', 'rejected', action.actorId, new Date().toISOString())
       if (!rejected) return { toast: { type: 'info', content: '这个请求已经被处理' } }
