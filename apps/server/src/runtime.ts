@@ -496,7 +496,7 @@ export class CodyBotRuntime {
       '你是 CodyBotHub 平台管理员 Copilot。使用简洁中文帮助管理员查询平台、查找飞书人员和生成配置草稿。',
       '所有平台事实必须通过 codybothub_admin 工具查询，不要猜测 ID、配置或人员信息。',
       '你运行在只读沙箱中。不得直接编辑工作区、数据库或平台配置。需要创建托管脚本时，先完成脚本、参数和 Schema 设计，再调用 propose_managed_script 生成待确认草稿。需要调整 Bot 操作人时，先确认唯一人员 Open ID 和 Bot，再调用 propose_bot_operator。所有草稿只有管理员点击应用后才会生效。',
-      '查找人员时调用 search_feishu_user；同名命中多条时列出姓名、企业邮箱和部门让管理员确认。search_feishu_user 返回的 Open ID 属于 lark-cli 用户应用命名空间，不得直接用于 Bot 操作人或工具包审批人授权。必须改用目标 Bot 卡片回调提示中的当前 Bot 身份，或已验证的当前飞书应用管理员 Open ID。',
+      '查找人员基本信息时调用 search_feishu_user。当用户询问“我或某人在指定 Bot 应用下的 Open ID”时，先用 inspect_platform 找到准确 Bot ID，再调用 resolve_feishu_bot_user；用户说“我”时 query 传 me。只有 resolve_feishu_bot_user 返回的 Open ID 可用于 Bot 操作人或工具包审批人授权。search_feishu_user 返回的 Open ID 属于 lark-cli 用户应用命名空间，不得直接授权。',
       '生成脚本时使用参数 argv，不把用户输入拼进 shell 命令；给出明确错误、超时和 JSON 输出。',
       `当前账号：${input.accountId}；当前工作区：${input.workspaceName}（${input.workspaceId}）。`,
       `平台概览：${input.platformContext}`,
@@ -508,6 +508,7 @@ export class CodyBotRuntime {
           type: 'namespace', name: 'codybothub_admin', description: 'CodyBotHub 平台管理查询与可确认草稿工具。', tools: [
             { type: 'function', name: 'inspect_platform', description: '查询平台工作区、Bot、场景、技能包、工具和工具包。', inputSchema: { type: 'object', properties: { resource: { type: 'string', enum: ['all', 'workspaces', 'bots', 'scenes', 'skillPackages', 'tools', 'toolPackages'] }, query: { type: 'string' } }, additionalProperties: false } },
             { type: 'function', name: 'search_feishu_user', description: '按姓名或邮箱搜索飞书员工并返回 Open ID、邮箱和部门。', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
+            { type: 'function', name: 'resolve_feishu_bot_user', description: '在指定 CodyBotHub Bot 的飞书应用命名空间下，从该 Bot 已收到消息的用户和应用管理员中按姓名解析可授权的 Open ID。用户说“我”时 query 传 me。', inputSchema: { type: 'object', properties: { botId: { type: 'string', description: 'inspect_platform 返回的目标 Bot ID' }, query: { type: 'string', description: '人员姓名，或 me 表示当前 lark-cli 登录用户' } }, required: ['botId', 'query'], additionalProperties: false } },
             { type: 'function', name: 'propose_managed_script', description: '创建平台托管脚本草稿。只生成待确认提案，不直接保存工具。', inputSchema: { type: 'object', properties: {
               name: { type: 'string' }, description: { type: 'string' }, language: { type: 'string', enum: ['python', 'shell', 'node'] }, scriptContent: { type: 'string' },
               argumentsTemplate: { type: 'array', items: { type: 'string' } }, inputSchema: { type: 'object' }, timeoutSeconds: { type: 'number' },

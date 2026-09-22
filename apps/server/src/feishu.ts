@@ -64,6 +64,29 @@ export class FeishuBotManager {
     return this.reload().then(() => { this.resumeToolExecutions() })
   }
 
+  async resolveObservedUserIdentities(botId: string, query: string): Promise<Array<{ openId: string; name: string; source: 'message' | 'application_admin'; messageCount: number; lastSeenAt: string }>> {
+    const managed = this.providers.get(botId)
+    if (!managed) throw new Error('目标飞书 Bot 当前未连接')
+    const normalized = query.trim().toLocaleLowerCase()
+    if (!normalized) throw new Error('需要提供人员姓名')
+    const observed = this.store.listObservedSenderIds(botId)
+    const candidates = new Map<string, { openId: string; messageCount: number; lastSeenAt: string; source: 'message' | 'application_admin' }>(observed.map(item => [item.openId, { ...item, source: 'message' }]))
+    try {
+      const administrators = await managed.provider.applicationAdministrators()
+      for (const openId of administrators.administratorIds) if (!candidates.has(openId)) candidates.set(openId, { openId, messageCount: 0, lastSeenAt: '', source: 'application_admin' })
+    } catch (error) {
+      console.warn(`[feishu] failed to load application administrators for identity lookup: ${managed.provider.classifyError(error).message}`)
+    }
+    const resolved = await Promise.allSettled([...candidates.values()].map(async candidate => ({
+      ...candidate,
+      name: (await managed.provider.userMetadata(candidate.openId)).name,
+    })))
+    const matches = resolved.flatMap(result => result.status === 'fulfilled' && result.value.name ? [result.value] : [])
+      .filter(item => item.name.toLocaleLowerCase().includes(normalized))
+    const exact = matches.filter(item => item.name.toLocaleLowerCase() === normalized)
+    return (exact.length ? exact : matches).slice(0, 20)
+  }
+
   stop(): void {
     if (this.queueTimer) clearInterval(this.queueTimer)
     this.queueTimer = null

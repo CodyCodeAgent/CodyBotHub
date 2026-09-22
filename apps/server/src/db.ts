@@ -1980,6 +1980,18 @@ export class HubStore {
     return String(row?.sender_id ?? '')
   }
 
+  listObservedSenderIds(botId: string, limit = 200): Array<{ openId: string; messageCount: number; lastSeenAt: string }> {
+    const boundedLimit = Math.min(500, Math.max(1, Math.trunc(limit)))
+    return (this.db.prepare(`SELECT sender_id, COUNT(*) AS message_count, MAX(received_at) AS last_seen_at
+      FROM message_logs
+      WHERE bot_id = ? AND sender_id LIKE 'ou\\_%' ESCAPE '\\'
+      GROUP BY sender_id
+      ORDER BY last_seen_at DESC
+      LIMIT ?`).all(botId, boundedLimit) as Row[]).map(row => ({
+      openId: String(row.sender_id), messageCount: Number(row.message_count), lastSeenAt: String(row.last_seen_at),
+    }))
+  }
+
   listConversationThreads(input: { limit?: number; offset?: number; botId?: string; query?: string } = {}): { items: ConversationThreadRecord[]; total: number } {
     const filters: string[] = [], params: Array<string | number> = []
     if (input.botId) { filters.push('cb.bot_id = ?'); params.push(input.botId) }

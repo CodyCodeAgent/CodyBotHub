@@ -7,6 +7,7 @@ import type { AdminAccountRecord, CopilotMessageRecord, CopilotProposalRecord, C
 
 const execFileAsync = promisify(execFile)
 type Json = Record<string, unknown>
+type BotIdentityResolver = (botId: string, query: string) => Promise<Array<{ openId: string; name: string; source: 'message' | 'application_admin'; messageCount: number; lastSeenAt: string }>>
 
 export type CopilotToolCall = {
   tool: string
@@ -26,7 +27,7 @@ const stringValue = (value: unknown): string => typeof value === 'string' ? valu
 const stringList = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean) : []
 
 export class CopilotService {
-  constructor(private readonly store: HubStore, private readonly runtime: CodyBotRuntime) {}
+  constructor(private readonly store: HubStore, private readonly runtime: CodyBotRuntime, private readonly resolveBotIdentities?: BotIdentityResolver) {}
 
   session(accountId: string, workspaceId: string): { session: CopilotSessionRecord; messages: CopilotMessageRecord[]; proposals: CopilotProposalRecord[] } {
     const session = this.store.getOrCreateCopilotSession(accountId, workspaceId)
@@ -65,6 +66,7 @@ export class CopilotService {
     if (session.workspaceId !== call.workspaceId) throw new Error('Copilot Workspace context changed')
     if (call.tool === 'inspect_platform') return this.inspectPlatform(stringValue(call.arguments.resource), stringValue(call.arguments.query))
     if (call.tool === 'search_feishu_user') return this.searchFeishuUser(stringValue(call.arguments.query))
+    if (call.tool === 'resolve_feishu_bot_user') return this.resolveFeishuBotUser(stringValue(call.arguments.botId), stringValue(call.arguments.query))
     if (call.tool === 'propose_managed_script') return this.proposeManagedScript(call, session)
     if (call.tool === 'propose_bot_operator') return this.proposeBotOperator(call, session)
     throw new Error(`Unknown admin Copilot tool: ${call.tool}`)
@@ -136,6 +138,37 @@ export class CopilotService {
       }
     } catch (error) {
       return { query, users: [], unavailable: true, error: error instanceof Error ? error.message.slice(0, 500) : String(error) }
+    }
+  }
+
+  private async resolveFeishuBotUser(botId: string, query: string): Promise<Json> {
+    const bot = this.store.listBots().find(item => item.id === botId)
+    if (!bot) throw new Error('Bot not found')
+    if (!this.resolveBotIdentities) throw new Error('Bot identity resolver is unavailable')
+    let resolvedQuery = query.trim()
+    let currentLarkUser: Record<string, unknown> | null = null
+    if (/^(我|me|myself)$/iu.test(resolvedQuery)) {
+      try {
+        const { stdout } = await execFileAsync('lark-cli', ['contact', '+search-user', '--user-ids', 'me', '--as', 'user', '--format', 'json'], { timeout: 25_000, maxBuffer: 2 * 1024 * 1024 })
+        const value = JSON.parse(stdout) as { data?: { users?: Array<Record<string, unknown>> } }
+        const user = value.data?.users?.[0]
+        resolvedQuery = stringValue(user?.localized_name)
+        currentLarkUser = user ? { name: user.localized_name, enterpriseEmail: user.enterprise_email } : null
+      } catch (error) {
+        throw new Error(`无法确定“我”对应的飞书账号：${error instanceof Error ? error.message.slice(0, 300) : String(error)}`)
+      }
+    }
+    if (!resolvedQuery) throw new Error('需要提供人员姓名，或使用 me 表示当前 lark-cli 登录用户')
+    const matches = await this.resolveBotIdentities(bot.id, resolvedQuery)
+    return {
+      bot: { id: bot.id, name: bot.name, appId: bot.appId },
+      requestedQuery: query,
+      resolvedQuery,
+      currentLarkUser,
+      identities: matches,
+      identityScope: 'target Feishu Bot application',
+      verified: true,
+      guidance: matches.length ? '返回的 Open ID 均由目标 Bot 应用从历史入站消息或应用管理员列表中验证。' : '没有匹配记录。请让该用户先在飞书中 @ 目标 Bot 发送一条消息，再重试。',
     }
   }
 

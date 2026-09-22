@@ -34,7 +34,7 @@ const feishu = new FeishuBotManager(store, vault, runtime, path.join(dataDir, 'a
 runtime.setToolPackageInvoker((call, binding) => feishu.invokeToolPackage(call, binding))
 const provisioning = new FeishuProvisioningService(store, vault, () => feishu.reload())
 const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))
-const copilot = new CopilotService(store, runtime)
+const copilot = new CopilotService(store, runtime, (botId, query) => feishu.resolveObservedUserIdentities(botId, query))
 runtime.setCopilotToolInvoker(call => copilot.invokeTool(call))
 const server = createHubServer({
   store, vault, runtime, webDist, provisioning, skills, copilot,
