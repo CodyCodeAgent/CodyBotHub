@@ -1378,11 +1378,28 @@ export class HubStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
 
-  botReplyDepthFor(message: ChannelInboundMessage): number {
+  botReplyDepthFor(botId: string, message: ChannelInboundMessage): number {
     if (message.sender.type === 'user') return 0
-    if (!message.replyTo) return 1
-    const parent = this.db.prepare('SELECT bot_reply_depth FROM outbound_messages WHERE message_id = ?').get(message.replyTo) as Row | undefined
-    return parent ? Number(parent.bot_reply_depth || 0) + 1 : 1
+    if (message.replyTo) {
+      const parent = this.db.prepare('SELECT bot_reply_depth FROM outbound_messages WHERE message_id = ?').get(message.replyTo) as Row | undefined
+      if (parent) return Number(parent.bot_reply_depth || 0) + 1
+    }
+    // Topic replies often point only at the topic root instead of the exact
+    // message they answer. In that shape Core intentionally omits replyTo, so
+    // recover the collaboration lineage from this Bot's latest outbound in the
+    // same visible conversation. The short window bounds false correlation
+    // while still covering a normal Bot handoff.
+    const atMs = Date.parse(message.createdAtIso)
+    const cutoff = new Date((Number.isFinite(atMs) ? atMs : Date.now()) - 2 * 60_000).toISOString()
+    const topicId = message.conversation.rootId ?? ''
+    const prior = this.db.prepare(`SELECT outbound.bot_reply_depth
+      FROM outbound_messages outbound
+      JOIN message_logs log ON log.id = outbound.message_log_id
+      WHERE outbound.bot_id = ? AND log.chat_id = ? AND outbound.created_at >= ?
+        AND (log.topic_id = ? OR log.topic_id = '')
+      ORDER BY CASE WHEN log.topic_id = ? THEN 0 ELSE 1 END,
+        outbound.created_at DESC, outbound.rowid DESC LIMIT 1`).get(botId, message.conversation.id, cutoff, topicId, topicId) as Row | undefined
+    return prior ? Number(prior.bot_reply_depth || 0) + 1 : 1
   }
 
   recordOutboundMessage(logId: string, botId: string, messageId: string, botReplyDepth: number): void {

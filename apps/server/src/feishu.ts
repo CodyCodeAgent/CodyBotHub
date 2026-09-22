@@ -28,6 +28,38 @@ export const shouldAcceptRoutedMessage = (
   return true
 }
 
+export type ReplyMentionSelection = { openIds: string[]; targetsBot: boolean }
+
+const senderOpenId = (message: ChannelInboundMessage): string => (
+  message.sender.idType === 'open_id' || (!message.sender.idType && message.sender.id.startsWith('ou_'))
+    ? message.sender.id
+    : message.sender.identities?.find(identity => identity.idType === 'open_id')?.id ?? ''
+)
+
+/** Select visible reply recipients without guessing from display names. A user
+ * who explicitly mentions peer Bots is orchestrating collaboration, so those
+ * Bots take precedence over the human sender. Other mentioned humans are not
+ * propagated. Bot-authored turns continue to address their source Bot when the
+ * Bot policy enables it. */
+export const selectReplyMentions = (
+  message: ChannelInboundMessage,
+  peerBotOpenIds: ReadonlySet<string>,
+  mentionSourceBot: boolean,
+): ReplyMentionSelection => {
+  if (message.conversation.scope === 'private' || !message.addressedToAgent) return { openIds: [], targetsBot: false }
+  if (message.sender.type !== 'user') {
+    if (!mentionSourceBot) return { openIds: [], targetsBot: false }
+    const openId = senderOpenId(message)
+    return { openIds: openId ? [openId] : [], targetsBot: Boolean(openId) }
+  }
+  const collaborators = [...new Set((message.mentions ?? [])
+    .filter(mention => !mention.isAgent && mention.idType === 'open_id' && peerBotOpenIds.has(mention.id))
+    .map(mention => mention.id))]
+  if (collaborators.length) return { openIds: collaborators, targetsBot: true }
+  const openId = senderOpenId(message)
+  return { openIds: openId ? [openId] : [], targetsBot: false }
+}
+
 export class FeishuBotManager {
   private readonly providers = new Map<string, ManagedProvider>()
   private readonly channelQueues = new Map<string, Promise<void>>()
@@ -301,7 +333,7 @@ export class FeishuBotManager {
       name: conversationName,
       mode: message.conversation.scope === 'topic' ? 'topic' : message.conversation.scope === 'private' ? 'p2p' : 'group',
     })
-    const botReplyDepth = this.store.botReplyDepthFor(message)
+    const botReplyDepth = this.store.botReplyDepthFor(botId, message)
     const route = this.prepareRoute(botId, provider, message, botReplyDepth)
     if (!route) return
     const accepted = this.store.acceptInboundMessage(botId, route, message, botReplyDepth)
@@ -412,13 +444,18 @@ export class FeishuBotManager {
     }
     if (message.sender.type === 'user' && !route.scene && message.conversation.scope !== 'private' && this.store.claimScenePicker(botId, message.conversation.id)) await this.sendScenePicker(botId, provider, message).catch(error => console.warn('[feishu] failed to send scene picker:', provider.classifyError(error).message))
     let note = this.responseNote(route)
-    const replyMention = this.replyMention(route, message)
+    const replyMention = await this.replyMention(provider, route, message)
     let streamMessageId = ''
-    try {
-      streamMessageId = await this.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', ...(replyMention ? { answer: `${replyMention}\n消息已进入处理队列…` } : {}), note }), route.replyInTopic, `${message.eventId}:answer`)
-      this.store.recordOutboundMessage(log.id, botId, streamMessageId, log.botReplyDepth)
-    } catch (error) {
-      console.warn('[feishu] failed to create streaming card:', provider.classifyError(error).message)
+    // A Bot mention must be sent only with the completed answer. Mentioning a
+    // peer in the initial streaming placeholder would wake it before this Bot
+    // has produced anything useful and can create an avoidable ping-pong turn.
+    if (!replyMention.targetsBot) {
+      try {
+        streamMessageId = await this.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', ...(replyMention.markdown ? { answer: `${replyMention.markdown}\n消息已进入处理队列…` } : {}), note }), route.replyInTopic, `${message.eventId}:answer`)
+        this.store.recordOutboundMessage(log.id, botId, streamMessageId, log.botReplyDepth)
+      } catch (error) {
+        console.warn('[feishu] failed to create streaming card:', provider.classifyError(error).message)
+      }
     }
     let patchTimer: ReturnType<typeof setTimeout> | null = null
     let latestProgress: RuntimeProgress = { phase: 'thinking', reasoning: '', answer: '' }
@@ -428,7 +465,7 @@ export class FeishuBotManager {
       const snapshot = latestProgress
       patchTail = patchTail.then(() => this.retryDelivery(provider, () => provider.updateCard(streamMessageId, feishuStreamingCard({
         state: snapshot.phase === 'answering' ? 'answering' : 'thinking',
-        answer: replyMention ? `${replyMention}\n${snapshot.answer || '正在思考…'}` : snapshot.answer,
+        answer: replyMention.markdown ? `${replyMention.markdown}\n${snapshot.answer || '正在思考…'}` : snapshot.answer,
         note,
       })))).catch(error => console.warn('[feishu] streaming card update failed:', provider.classifyError(error).message))
     }
@@ -455,7 +492,7 @@ export class FeishuBotManager {
       )
       if (patchTimer) { clearTimeout(patchTimer); patchTimer = null }
       await patchTail
-      const cards = feishuMarkdownCards(replyMention ? `${replyMention}\n${text}` : text, { note })
+      const cards = feishuMarkdownCards(replyMention.markdown ? `${replyMention.markdown}\n${text}` : text, { note })
       if (streamMessageId) {
         await this.retryDelivery(provider, () => provider.updateCard(streamMessageId, cards[0]!))
         for (let index = 1; index < cards.length; index += 1) {
@@ -475,7 +512,7 @@ export class FeishuBotManager {
       if (patchTimer) clearTimeout(patchTimer)
       await patchTail
       const detail = error instanceof Error ? error.message : String(error)
-      const errorCard = feishuStreamingCard({ state: 'failed', error: replyMention ? `${replyMention}\n${detail}` : detail, note })
+      const errorCard = feishuStreamingCard({ state: 'failed', error: replyMention.markdown ? `${replyMention.markdown}\n${detail}` : detail, note })
       const sendError = streamMessageId
         ? this.retryDelivery(provider, () => provider.updateCard(streamMessageId, errorCard))
         : this.replyCard(provider, message.messageId, errorCard, route.replyInTopic, `${message.eventId}:error`).then(outboundId => { this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth) })
@@ -486,13 +523,14 @@ export class FeishuBotManager {
     }
   }
 
-  private replyMention(route: ResolvedRoute, message: ChannelInboundMessage): string {
-    if (message.conversation.scope === 'private' || !message.addressedToAgent) return ''
-    if (message.sender.type !== 'user' && !route.bot.mentionSourceBot) return ''
-    const openId = message.sender.idType === 'open_id' || (!message.sender.idType && message.sender.id.startsWith('ou_'))
-      ? message.sender.id
-      : message.sender.identities?.find(identity => identity.idType === 'open_id')?.id ?? ''
-    return feishuCardMention(openId)
+  private async replyMention(provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage): Promise<{ markdown: string; targetsBot: boolean }> {
+    let peerBotOpenIds = new Set<string>()
+    if (message.sender.type === 'user' && message.mentionsOtherRecipient) {
+      try { peerBotOpenIds = new Set((await provider.chatBots(message.conversation.id)).map(bot => bot.id)) }
+      catch (error) { console.warn('[feishu] failed to resolve peer Bot mentions:', provider.classifyError(error).message) }
+    }
+    const selection = selectReplyMentions(message, peerBotOpenIds, route.bot.mentionSourceBot)
+    return { markdown: selection.openIds.map(feishuCardMention).filter(Boolean).join(' '), targetsBot: selection.targetsBot }
   }
 
   private async finishReaction(provider: FeishuProvider, messageId: string, receiptReactionId: string, finalEmoji: 'DONE' | 'ERROR'): Promise<void> {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
-import { shouldAcceptRoutedMessage } from '../src/feishu.js'
+import { selectReplyMentions, shouldAcceptRoutedMessage } from '../src/feishu.js'
 
 const message = (input: Partial<ChannelInboundMessage> = {}): ChannelInboundMessage => ({
   provider: 'feishu', accountId: 'bot-1', eventId: 'event-1', messageId: 'message-1',
@@ -56,5 +56,34 @@ describe('Feishu group message trigger policy', () => {
     expect(shouldAcceptRoutedMessage(fromBot, { ...base, ownSender: false, botSourceAllowlist: ['cli_other'] })).toBe(false)
     expect(shouldAcceptRoutedMessage(fromBot, { ...base, ownSender: false, botSourceAllowlist: ['cli_source'], botReplyDepth: 2 })).toBe(false)
     expect(shouldAcceptRoutedMessage(fromBot, { ...base, ownSender: true })).toBe(false)
+  })
+})
+
+describe('Feishu reply mention routing', () => {
+  it('addresses an explicitly mentioned peer Bot instead of the human orchestrator', () => {
+    const input = message({
+      addressedToAgent: true,
+      sender: { id: 'ou_human', type: 'user', idType: 'open_id' },
+      mentions: [
+        { id: 'ou_self', idType: 'open_id', type: 'user', name: '当前 Bot', isAgent: true },
+        { id: 'ou_peer', idType: 'open_id', type: 'user', name: '协作 Bot', isAgent: false },
+      ],
+    })
+    expect(selectReplyMentions(input, new Set(['ou_self', 'ou_peer']), true)).toEqual({ openIds: ['ou_peer'], targetsBot: true })
+  })
+
+  it('does not propagate mentions of other humans', () => {
+    const input = message({
+      addressedToAgent: true,
+      sender: { id: 'ou_sender', type: 'user', idType: 'open_id' },
+      mentions: [{ id: 'ou_colleague', idType: 'open_id', type: 'user', name: '同事', isAgent: false }],
+    })
+    expect(selectReplyMentions(input, new Set(['ou_self']), true)).toEqual({ openIds: ['ou_sender'], targetsBot: false })
+  })
+
+  it('addresses the source Bot only when Bot replies are configured to do so', () => {
+    const input = message({ addressedToAgent: true, sender: { id: 'ou_source_bot', type: 'app', idType: 'open_id' } })
+    expect(selectReplyMentions(input, new Set(), true)).toEqual({ openIds: ['ou_source_bot'], targetsBot: true })
+    expect(selectReplyMentions(input, new Set(), false)).toEqual({ openIds: [], targetsBot: false })
   })
 })

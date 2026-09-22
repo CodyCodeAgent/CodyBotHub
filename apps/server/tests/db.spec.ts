@@ -559,11 +559,33 @@ describe('HubStore invariants', () => {
     const log = store.createMessageLog(bot.id, route, userMessage)
     store.recordOutboundMessage(log.id, bot.id, 'om_bot_answer', 0)
     const firstBotReply = { ...userMessage, eventId: 'event-bot-1', messageId: 'message-bot-1', replyTo: 'om_bot_answer', sender: { id: 'cli_peer', type: 'app' as const, idType: 'app_id' as const } }
-    expect(store.botReplyDepthFor(firstBotReply)).toBe(1)
+    expect(store.botReplyDepthFor(bot.id, firstBotReply)).toBe(1)
     const botLog = store.createMessageLog(bot.id, route, firstBotReply, 1)
     store.recordOutboundMessage(botLog.id, bot.id, 'om_bot_followup', 1)
-    expect(store.botReplyDepthFor({ ...firstBotReply, eventId: 'event-bot-2', messageId: 'message-bot-2', replyTo: 'om_bot_followup' })).toBe(2)
+    expect(store.botReplyDepthFor(bot.id, { ...firstBotReply, eventId: 'event-bot-2', messageId: 'message-bot-2', replyTo: 'om_bot_followup' })).toBe(2)
     expect(store.getMessageLog(botLog.id).botReplyDepth).toBe(1)
+    store.close()
+  })
+
+  it('bounds Bot collaboration inside topics whose replies only reference the topic root', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Topic collaboration')
+    const bot = store.createBot({ name: 'Coordinator', defaultWorkspaceId: linked.id, maxBotReplyDepth: 1 })
+    const createdAtIso = new Date().toISOString()
+    const userMessage = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-user-topic', messageId: 'message-user-topic',
+      conversation: { id: 'oc_topic_collaboration', scope: 'topic' as const, rootId: 'om_topic_root' },
+      sender: { id: 'ou_user', type: 'user' as const, idType: 'open_id' as const }, content: { type: 'text' }, text: 'start', attachments: [],
+      addressedToAgent: true, mentionsOtherRecipient: true, createdAtIso,
+    }
+    const route = store.resolveThreadRouting(store.resolveRoute(bot.id, userMessage), userMessage)
+    const userLog = store.createMessageLog(bot.id, route, userMessage)
+    store.recordOutboundMessage(userLog.id, bot.id, 'om_topic_answer', 0)
+    const peerReply = { ...userMessage, eventId: 'event-peer-topic', messageId: 'message-peer-topic', sender: { id: 'ou_peer', type: 'bot' as const, idType: 'open_id' as const }, createdAtIso: new Date(Date.now() + 1_000).toISOString() }
+    expect(store.botReplyDepthFor(bot.id, peerReply)).toBe(1)
+    const peerLog = store.createMessageLog(bot.id, route, peerReply, 1)
+    store.recordOutboundMessage(peerLog.id, bot.id, 'om_topic_followup', 1)
+    expect(store.botReplyDepthFor(bot.id, { ...peerReply, eventId: 'event-peer-topic-2', messageId: 'message-peer-topic-2', createdAtIso: new Date(Date.now() + 2_000).toISOString() })).toBe(2)
     store.close()
   })
 })
