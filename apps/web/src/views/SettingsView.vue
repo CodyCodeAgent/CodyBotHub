@@ -72,7 +72,7 @@ const remove = async (source: SkillSource) => {
 
       <section class="panel">
         <div class="panel-header"><div><h2><GitPullRequest :size="16" />远程技能源</h2><p class="panel-description">平台在独立干净镜像中拉取代码，再把 Skill 和知识库安装到选定工作区的 .codex 目录。</p></div><button class="button" :disabled="!workspaces.length" @click="openSource()"><Plus :size="16" />添加技能源</button></div>
-        <div v-if="!sources.length" class="empty"><GitPullRequest :size="34" /><strong>还没有技能源</strong><span>添加 Git 仓库后，可在 Skill 中心搜索、安装和更新。</span></div>
+        <div v-if="!sources.length" class="empty"><GitPullRequest :size="34" /><strong>还没有技能源</strong><span>添加 Git 仓库后，可在“技能”页面搜索、安装和更新。</span></div>
         <div v-else class="source-list">
           <article v-for="source in sources" :key="source.id" class="source-card">
             <div><div class="source-title"><strong>{{ source.name }}</strong><span v-if="source.autoInstall" class="badge green">自动安装</span></div><div class="mono muted">{{ source.repositoryUrl }} · {{ source.branch }}</div><p>{{ source.workspaceName }} · Skill 根目录 {{ source.skillRoots.join('、') || '自动识别' }}</p><p v-if="source.lastSyncedAt" class="muted">最近同步 {{ new Date(source.lastSyncedAt).toLocaleString() }} · {{ source.lastCommit.slice(0, 10) }}</p><p v-if="source.lastError" class="source-error">{{ source.lastError }}</p></div>

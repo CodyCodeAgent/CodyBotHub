@@ -21,10 +21,10 @@ const groups = [
     { to: '/scenes', label: '场景路由', icon: Workflow },
   ] },
   { label: '能力', items: [
+    { to: '/skills', label: '技能', icon: LibraryBig },
     { to: '/packages', label: '技能包', icon: Puzzle },
     { to: '/tools', label: '工具', icon: Wrench },
     { to: '/tool-packages', label: '工具包', icon: PackageCheck },
-    { to: '/skills', label: 'Skill 中心', icon: LibraryBig },
   ] },
   { label: '可观测性', items: [
     { to: '/conversation-threads', label: '会话线程', icon: GitBranch },
