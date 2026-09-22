@@ -544,4 +544,25 @@ describe('HubStore invariants', () => {
     expect(() => store.deleteTool(tool.id)).toThrow()
     store.close()
   })
+
+  it('tracks bot collaboration depth through outbound reply message IDs', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Bot collaboration')
+    const bot = store.createBot({ name: 'Coordinator', defaultWorkspaceId: linked.id, maxBotReplyDepth: 1 })
+    const userMessage = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-user', messageId: 'message-user',
+      conversation: { id: 'oc_collaboration', scope: 'group' as const }, sender: { id: 'ou_user', type: 'user' as const, idType: 'open_id' as const },
+      content: { type: 'text' }, text: 'start', attachments: [], addressedToAgent: true, mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const route = store.resolveThreadRouting(store.resolveRoute(bot.id, userMessage), userMessage)
+    const log = store.createMessageLog(bot.id, route, userMessage)
+    store.recordOutboundMessage(log.id, bot.id, 'om_bot_answer', 0)
+    const firstBotReply = { ...userMessage, eventId: 'event-bot-1', messageId: 'message-bot-1', replyTo: 'om_bot_answer', sender: { id: 'cli_peer', type: 'app' as const, idType: 'app_id' as const } }
+    expect(store.botReplyDepthFor(firstBotReply)).toBe(1)
+    const botLog = store.createMessageLog(bot.id, route, firstBotReply, 1)
+    store.recordOutboundMessage(botLog.id, bot.id, 'om_bot_followup', 1)
+    expect(store.botReplyDepthFor({ ...firstBotReply, eventId: 'event-bot-2', messageId: 'message-bot-2', replyTo: 'om_bot_followup' })).toBe(2)
+    expect(store.getMessageLog(botLog.id).botReplyDepth).toBe(1)
+    store.close()
+  })
 })

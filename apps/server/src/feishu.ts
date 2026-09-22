@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import path from 'node:path'
-import { FeishuProvider, feishuMarkdownCards, feishuSelectionCard, feishuStreamingCard, feishuTextCard, type FeishuCard, type FeishuCardAction } from '@codycodeagent/cody-web-core/feishu'
+import { FeishuProvider, feishuCardMention, feishuMarkdownCards, feishuSelectionCard, feishuStreamingCard, feishuTextCard, type FeishuCard, type FeishuCardAction } from '@codycodeagent/cody-web-core/feishu'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import type { SecretVault } from './crypto.js'
 import type { HubStore } from './db.js'
@@ -12,9 +12,18 @@ type ManagedProvider = { provider: FeishuProvider; fingerprint: string; botName:
 
 export const shouldAcceptRoutedMessage = (
   message: ChannelInboundMessage,
-  options: { hasScene: boolean; independentlyMatches: boolean; ownSender: boolean },
+  options: { hasScene: boolean; independentlyMatches: boolean; ownSender: boolean; botMessagePolicy?: ResolvedRoute['bot']['botMessagePolicy']; botSourceAllowlist?: string[]; botReplyDepth?: number; maxBotReplyDepth?: number },
 ): boolean => {
-  if (message.sender.type !== 'user') return !options.ownSender && options.hasScene && options.independentlyMatches
+  if (options.ownSender) return false
+  if (message.sender.type !== 'user') {
+    const policy = options.botMessagePolicy ?? 'mentioned_or_scene'
+    if (policy === 'reject') return false
+    const senderIds = new Set([message.sender.id, ...(message.sender.identities ?? []).map(identity => identity.id)])
+    if (options.botSourceAllowlist?.length && !options.botSourceAllowlist.some(id => senderIds.has(id))) return false
+    if ((options.botReplyDepth ?? 1) > (options.maxBotReplyDepth ?? 1)) return false
+    if (policy === 'mentioned') return message.addressedToAgent
+    return message.addressedToAgent || (options.hasScene && options.independentlyMatches)
+  }
   if (message.conversation.scope !== 'private' && !message.addressedToAgent && !options.independentlyMatches) return false
   return true
 }
@@ -269,9 +278,10 @@ export class FeishuBotManager {
       name: conversationName,
       mode: message.conversation.scope === 'topic' ? 'topic' : message.conversation.scope === 'private' ? 'p2p' : 'group',
     })
-    const route = this.prepareRoute(botId, provider, message)
+    const botReplyDepth = this.store.botReplyDepthFor(message)
+    const route = this.prepareRoute(botId, provider, message, botReplyDepth)
     if (!route) return
-    const accepted = this.store.acceptInboundMessage(botId, route, message)
+    const accepted = this.store.acceptInboundMessage(botId, route, message, botReplyDepth)
     if (!accepted) return
     this.pendingReceipts.add(accepted.job.id)
     let receiptReactionId = ''
@@ -284,13 +294,17 @@ export class FeishuBotManager {
     return this.scheduleJob(accepted.job.id, accepted.log.id, botId, provider, route, message, receiptReactionId)
   }
 
-  private prepareRoute(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): ResolvedRoute | null {
+  private prepareRoute(botId: string, provider: FeishuProvider, message: ChannelInboundMessage, botReplyDepth: number): ResolvedRoute | null {
     const baseRoute = this.store.resolveRoute(botId, message)
     const independentlyMatches = baseRoute.scene ? this.store.messageMatchesScene(baseRoute.scene.id, message) : false
     if (!shouldAcceptRoutedMessage(message, {
       hasScene: Boolean(baseRoute.scene),
       independentlyMatches,
       ownSender: provider.isOwnSenderId(message.sender.id),
+      botMessagePolicy: baseRoute.bot.botMessagePolicy,
+      botSourceAllowlist: baseRoute.bot.botSourceAllowlist,
+      botReplyDepth,
+      maxBotReplyDepth: baseRoute.bot.maxBotReplyDepth,
     })) return null
     if (baseRoute.scene && baseRoute.routeSource === 'matcher' && baseRoute.topicId) this.store.rememberTopicRoute(botId, message.conversation.id, baseRoute.topicId, baseRoute.scene.id)
     return this.store.resolveThreadRouting(baseRoute, message)
@@ -373,11 +387,13 @@ export class FeishuBotManager {
       try { receiptReactionId = await provider.addReaction(message.messageId, 'GoGoGo') }
       catch (error) { console.warn('[feishu] failed to add receipt reaction:', provider.classifyError(error).message) }
     }
-    if (!route.scene && message.conversation.scope !== 'private' && this.store.claimScenePicker(botId, message.conversation.id)) await this.sendScenePicker(botId, provider, message).catch(error => console.warn('[feishu] failed to send scene picker:', provider.classifyError(error).message))
+    if (message.sender.type === 'user' && !route.scene && message.conversation.scope !== 'private' && this.store.claimScenePicker(botId, message.conversation.id)) await this.sendScenePicker(botId, provider, message).catch(error => console.warn('[feishu] failed to send scene picker:', provider.classifyError(error).message))
     let note = this.responseNote(route)
+    const replyMention = this.replyMention(route, message)
     let streamMessageId = ''
     try {
-      streamMessageId = await this.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', note }), route.replyInTopic, `${message.eventId}:answer`)
+      streamMessageId = await this.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', ...(replyMention ? { answer: `${replyMention}\n消息已进入处理队列…` } : {}), note }), route.replyInTopic, `${message.eventId}:answer`)
+      this.store.recordOutboundMessage(log.id, botId, streamMessageId, log.botReplyDepth)
     } catch (error) {
       console.warn('[feishu] failed to create streaming card:', provider.classifyError(error).message)
     }
@@ -389,7 +405,7 @@ export class FeishuBotManager {
       const snapshot = latestProgress
       patchTail = patchTail.then(() => this.retryDelivery(provider, () => provider.updateCard(streamMessageId, feishuStreamingCard({
         state: snapshot.phase === 'answering' ? 'answering' : 'thinking',
-        answer: snapshot.answer,
+        answer: replyMention ? `${replyMention}\n${snapshot.answer || '正在思考…'}` : snapshot.answer,
         note,
       })))).catch(error => console.warn('[feishu] streaming card update failed:', provider.classifyError(error).message))
     }
@@ -416,15 +432,17 @@ export class FeishuBotManager {
       )
       if (patchTimer) { clearTimeout(patchTimer); patchTimer = null }
       await patchTail
-      const cards = feishuMarkdownCards(text, { note })
+      const cards = feishuMarkdownCards(replyMention ? `${replyMention}\n${text}` : text, { note })
       if (streamMessageId) {
         await this.retryDelivery(provider, () => provider.updateCard(streamMessageId, cards[0]!))
         for (let index = 1; index < cards.length; index += 1) {
-          await this.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
+          const outboundId = await this.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
+          this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth)
         }
       } else {
         for (let index = 0; index < cards.length; index += 1) {
-          await this.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
+          const outboundId = await this.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
+          this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth)
         }
       }
       this.store.finishMessageLog(log.id, { responseContent: text })
@@ -434,15 +452,24 @@ export class FeishuBotManager {
       if (patchTimer) clearTimeout(patchTimer)
       await patchTail
       const detail = error instanceof Error ? error.message : String(error)
-      const errorCard = feishuStreamingCard({ state: 'failed', error: detail, note })
+      const errorCard = feishuStreamingCard({ state: 'failed', error: replyMention ? `${replyMention}\n${detail}` : detail, note })
       const sendError = streamMessageId
         ? this.retryDelivery(provider, () => provider.updateCard(streamMessageId, errorCard))
-        : this.replyCard(provider, message.messageId, errorCard, route.replyInTopic, `${message.eventId}:error`).then(() => undefined)
+        : this.replyCard(provider, message.messageId, errorCard, route.replyInTopic, `${message.eventId}:error`).then(outboundId => { this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth) })
       await sendError.catch(deliveryError => console.error('[feishu] failed to send error card:', deliveryError))
       this.store.finishMessageLog(log.id, { responseContent: latestProgress.answer, error: detail })
       await this.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
       return { ok: false, error: detail }
     }
+  }
+
+  private replyMention(route: ResolvedRoute, message: ChannelInboundMessage): string {
+    if (message.conversation.scope === 'private' || !message.addressedToAgent) return ''
+    if (message.sender.type !== 'user' && !route.bot.mentionSourceBot) return ''
+    const openId = message.sender.idType === 'open_id' || (!message.sender.idType && message.sender.id.startsWith('ou_'))
+      ? message.sender.id
+      : message.sender.identities?.find(identity => identity.idType === 'open_id')?.id ?? ''
+    return feishuCardMention(openId)
   }
 
   private async finishReaction(provider: FeishuProvider, messageId: string, receiptReactionId: string, finalEmoji: 'DONE' | 'ERROR'): Promise<void> {

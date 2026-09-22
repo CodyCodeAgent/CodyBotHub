@@ -36,4 +36,25 @@ describe('Feishu group message trigger policy', () => {
       hasScene: false, independentlyMatches: false, ownSender: false,
     })).toBe(true)
   })
+
+  it('accepts another bot only when the configured policy allows its trigger', () => {
+    const fromBot = message({ sender: { id: 'cli_source', type: 'app', idType: 'app_id' } })
+    expect(shouldAcceptRoutedMessage(fromBot, {
+      hasScene: true, independentlyMatches: true, ownSender: false, botMessagePolicy: 'reject', botReplyDepth: 1, maxBotReplyDepth: 1,
+    })).toBe(false)
+    expect(shouldAcceptRoutedMessage({ ...fromBot, addressedToAgent: true }, {
+      hasScene: true, independentlyMatches: false, ownSender: false, botMessagePolicy: 'mentioned', botReplyDepth: 1, maxBotReplyDepth: 1,
+    })).toBe(true)
+    expect(shouldAcceptRoutedMessage(fromBot, {
+      hasScene: true, independentlyMatches: true, ownSender: false, botMessagePolicy: 'mentioned_or_scene', botReplyDepth: 1, maxBotReplyDepth: 1,
+    })).toBe(true)
+  })
+
+  it('enforces source allowlists, loop depth, and own-sender rejection', () => {
+    const fromBot = message({ sender: { id: 'ou_source', type: 'app', idType: 'open_id', identities: [{ id: 'ou_source', idType: 'open_id' }, { id: 'cli_source', idType: 'app_id' }] }, addressedToAgent: true })
+    const base = { hasScene: true, independentlyMatches: true, botMessagePolicy: 'mentioned_or_scene' as const, botReplyDepth: 1, maxBotReplyDepth: 1 }
+    expect(shouldAcceptRoutedMessage(fromBot, { ...base, ownSender: false, botSourceAllowlist: ['cli_other'] })).toBe(false)
+    expect(shouldAcceptRoutedMessage(fromBot, { ...base, ownSender: false, botSourceAllowlist: ['cli_source'], botReplyDepth: 2 })).toBe(false)
+    expect(shouldAcceptRoutedMessage(fromBot, { ...base, ownSender: true })).toBe(false)
+  })
 })

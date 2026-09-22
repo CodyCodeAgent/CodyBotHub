@@ -11,8 +11,8 @@ importers:
   apps/server:
     dependencies:
       '@codycodeagent/cody-web-core':
-        specifier: github:CodyCodeAgent/CodyWebCore#v0.39.0
-        version: git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#61ff1d9ad1f7e9459c4ff066d3ec99ea60f4cad6(vue@3.5.42(typescript@6.0.3))
+        specifier: github:CodyCodeAgent/CodyWebCore#v0.39.2
+        version: git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#cd73b1c0ef63aa554370dc30ad79dd06a8a0d38b(vue@3.5.42(typescript@6.0.3))
       '@larksuiteoapi/node-sdk':
         specifier: ^1.73.2
         version: 1.74.0
@@ -98,9 +98,9 @@ packages:
     peerDependencies:
       vue: ^3.5.0
 
-  '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#61ff1d9ad1f7e9459c4ff066d3ec99ea60f4cad6':
-    resolution: {commit: 61ff1d9ad1f7e9459c4ff066d3ec99ea60f4cad6, repo: git@github.com:CodyCodeAgent/CodyWebCore.git, type: git}
-    version: 0.39.0
+  '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#cd73b1c0ef63aa554370dc30ad79dd06a8a0d38b':
+    resolution: {commit: cd73b1c0ef63aa554370dc30ad79dd06a8a0d38b, repo: git@github.com:CodyCodeAgent/CodyWebCore.git, type: git}
+    version: 0.39.2
     peerDependencies:
       vue: ^3.5.0
 
@@ -1502,7 +1502,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#61ff1d9ad1f7e9459c4ff066d3ec99ea60f4cad6(vue@3.5.42(typescript@6.0.3))':
+  '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#cd73b1c0ef63aa554370dc30ad79dd06a8a0d38b(vue@3.5.42(typescript@6.0.3))':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.74.0
       dompurify: 3.4.15

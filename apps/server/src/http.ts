@@ -6,7 +6,7 @@ import { FEISHU_MESSAGE_TYPES } from '@codycodeagent/cody-web-core/feishu'
 import { AuthService } from './auth.js'
 import { SecretVault } from './crypto.js'
 import { HubStore } from './db.js'
-import type { AgentRuntimeKind, DeploymentStatusRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord, ToolPackageRecord, ToolRecord } from './types.js'
+import type { AgentRuntimeKind, BotMessagePolicy, DeploymentStatusRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord, ToolPackageRecord, ToolRecord } from './types.js'
 import type { FeishuProvisioningService, ProvisioningRequest } from './provisioning.js'
 import { listBrowsableDirectories } from './directories.js'
 import type { CodyBotRuntime } from './runtime.js'
@@ -52,6 +52,7 @@ const stringList = (value: unknown): string[] => Array.isArray(value) ? value.fi
 const bool = (value: unknown, fallback = false): boolean => typeof value === 'boolean' ? value : fallback
 const number = (value: unknown, fallback: number): number => typeof value === 'number' && Number.isFinite(value) ? value : fallback
 const runtimeKind = (value: unknown): AgentRuntimeKind => value === 'traex' ? 'traex' : 'codex'
+const botMessagePolicy = (value: unknown): BotMessagePolicy => value === 'reject' || value === 'mentioned' ? value : 'mentioned_or_scene'
 const page = <T>(items: T[], url: URL, fallback = 20): { items: T[]; total: number } => {
   const requestedLimit = Number(url.searchParams.get('limit') ?? fallback)
   const requestedOffset = Number(url.searchParams.get('offset') ?? 0)
@@ -323,7 +324,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           if (!store.listWorkspaces().some(item => item.id === defaultWorkspaceId)) throw new HttpError(400, 'Workspace not found')
           const kind = runtimeKind(body.runtimeKind)
           await runtime.validateModelSelection(kind, optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const input: ProvisioningRequest = { name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId, workspaceIds: stringList(body.workspaceIds) }
+          const input: ProvisioningRequest = { name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', botMessagePolicy: botMessagePolicy(body.botMessagePolicy), mentionSourceBot: bool(body.mentionSourceBot, true), botSourceAllowlist: stringList(body.botSourceAllowlist), maxBotReplyDepth: Math.max(0, Math.min(10, Math.trunc(number(body.maxBotReplyDepth, 1)))), runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId, workspaceIds: stringList(body.workspaceIds) }
           const job = provisioning.start(input)
           audit('bot.provision', 'provisioning', job.id, `发起飞书 Bot 自动注册：${input.name}`)
           return sendJson(response, 202, job)
@@ -361,7 +362,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           const body = await readJson(request), secret = optional(body, 'appSecret')
           const kind = runtimeKind(body.runtimeKind)
           await runtime.validateModelSelection(kind, optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const result = store.createBot({ name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
+          const result = store.createBot({ name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', botMessagePolicy: botMessagePolicy(body.botMessagePolicy), mentionSourceBot: bool(body.mentionSourceBot, true), botSourceAllowlist: stringList(body.botSourceAllowlist), maxBotReplyDepth: Math.max(0, Math.min(10, Math.trunc(number(body.maxBotReplyDepth, 1)))), runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
           await onConfigurationChanged?.()
           audit('bot.create', 'bot', result.id, `创建飞书 Bot ${result.name}`, { appId: result.appId })
           return sendJson(response, 201, result)
@@ -371,7 +372,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           const body = await readJson(request), secret = optional(body, 'appSecret')
           const kind = runtimeKind(body.runtimeKind)
           await runtime.validateModelSelection(kind, optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const result = store.updateBot(botId, { name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
+          const result = store.updateBot(botId, { name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', botMessagePolicy: botMessagePolicy(body.botMessagePolicy), mentionSourceBot: bool(body.mentionSourceBot, true), botSourceAllowlist: stringList(body.botSourceAllowlist), maxBotReplyDepth: Math.max(0, Math.min(10, Math.trunc(number(body.maxBotReplyDepth, 1)))), runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
           await onConfigurationChanged?.()
           audit('bot.update', 'bot', result.id, `更新飞书 Bot ${result.name}`, { appId: result.appId, secretChanged: Boolean(secret) })
           return sendJson(response, 200, result)

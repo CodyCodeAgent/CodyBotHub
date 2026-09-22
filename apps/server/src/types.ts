@@ -8,6 +8,7 @@ export interface WorkspaceRecord {
 }
 
 export type AgentRuntimeKind = 'codex' | 'traex'
+export type BotMessagePolicy = 'reject' | 'mentioned' | 'mentioned_or_scene'
 
 export interface BotRecord {
   id: string
@@ -19,6 +20,10 @@ export interface BotRecord {
   permissions: string[]
   operatorIds: string[]
   conversationMode: 'chat' | 'topic'
+  botMessagePolicy: BotMessagePolicy
+  mentionSourceBot: boolean
+  botSourceAllowlist: string[]
+  maxBotReplyDepth: number
   runtimeKind: AgentRuntimeKind
   model: string
   reasoningEffort: string
@@ -299,6 +304,7 @@ export interface MessageLogRecord {
   startedAt: string
   completedAt: string
   durationMs: number | null
+  botReplyDepth: number
 }
 
 export interface MessageAttemptRecord {

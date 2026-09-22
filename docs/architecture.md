@@ -8,7 +8,7 @@ Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@cody
 
 ## Data flow
 
-1. `FeishuProvider` converts a Feishu event into `ChannelInboundMessage`.
+1. `FeishuProvider` converts a Feishu event into `ChannelInboundMessage`, preserving sender identity aliases and structured mentions.
 2. The SQLite inbox claim deduplicates `bot_id + message_id`, so Feishu retries with a new event id remain idempotent across restarts. Claims expire after the provider retry window.
 3. The Bot conversation mode derives a conversation key from the chat, or from the chat plus topic root.
 4. The router checks specific enabled Scene matchers, an inherited topic routing context, a saved group default, and finally a matcher-free fallback Scene. The selected Scene chooses the Workspace; no Scene uses the Bot default Workspace.
@@ -26,7 +26,7 @@ Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@cody
 7. The accepted message is recorded as a persistent Thread job. CodyBotHub immediately adds the receipt reaction, then queues the job by Thread Channel.
 8. The composed instructions are supplied as trusted per-turn application context. One Thread Channel is the Core binding id and owns one native Codex Thread. The selected Workspace becomes that turn’s cwd and runtime root; native Codex history remains the transcript source of truth.
 9. Jobs in one Thread Channel are serialized by CodyBotHub and again by `CodexSessionManager`. Different Channels still run concurrently.
-10. The final Core Turn outcome is replied as one or more Feishu Markdown cards. The Bot conversation mode selects direct or topic reply. Every card carries a footer with the effective Workspace, Scene, Skill Package and permission policy.
+10. The final Core Turn outcome is replied as one or more Feishu Markdown cards. The Bot conversation mode selects direct or topic reply. An explicitly addressed user receives a native mention in the reply; configured bot-to-bot replies do the same when Feishu supplies the source Bot Open ID. Every card carries a footer with the effective Workspace, Scene, Skill Package and permission policy.
 
 ## Model selection
 
@@ -45,7 +45,9 @@ Scene matcher fields are ANDed across populated categories and ORed within each 
 
 An empty category does not restrict the match. The first specifically matching scene in deterministic priority order wins. In topic mode, later addressed messages can inherit the most recent specifically matched Scene for that topic. A group binding is the group default, while a Scene with no matcher is the final Bot-level fallback.
 
-App-authored messages are accepted only when their content independently matches a Scene. A saved group binding does not make arbitrary bot output executable. This supports alert cards while preventing reply loops.
+App-authored messages follow the Bot-level policy: reject all, accept only explicit mentions, or accept explicit mentions plus independent Scene matches. An optional App ID/Open ID allowlist narrows accepted sources. Saved group bindings do not make arbitrary bot output executable.
+
+Every outbound answer message ID is persisted with its collaboration depth. A reply from another Bot inherits `parent depth + 1`; messages beyond the configured maximum are rejected before they enter the queue. The current Bot's own sender IDs are always rejected. This permits bounded bot handoffs while preventing two managed Bots from replying to each other indefinitely.
 
 A card selection creates a `group_scene_bindings` row. A bound scene supplies the group default until changed or deleted; a more specific message matcher can override it for the current message and topic routing context.
 

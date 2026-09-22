@@ -173,7 +173,9 @@ export class CopilotService {
     const operatorIds = action === 'add' ? [...new Set([...bot.operatorIds, openId])] : bot.operatorIds.filter(item => item !== openId)
     const updated = this.store.updateBot(bot.id, {
       name: bot.name, description: bot.description, appId: bot.appId, prompt: bot.prompt, permissions: bot.permissions, operatorIds,
-      conversationMode: bot.conversationMode, runtimeKind: bot.runtimeKind, model: bot.model, reasoningEffort: bot.reasoningEffort,
+      conversationMode: bot.conversationMode, botMessagePolicy: bot.botMessagePolicy, mentionSourceBot: bot.mentionSourceBot,
+      botSourceAllowlist: bot.botSourceAllowlist, maxBotReplyDepth: bot.maxBotReplyDepth,
+      runtimeKind: bot.runtimeKind, model: bot.model, reasoningEffort: bot.reasoningEffort,
       defaultWorkspaceId: bot.defaultWorkspaceId, workspaceIds: bot.workspaceIds,
     })
     return {

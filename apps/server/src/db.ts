@@ -133,6 +133,10 @@ export class HubStore {
         prompt TEXT NOT NULL DEFAULT '',
         permissions_json TEXT NOT NULL DEFAULT '[]',
         conversation_mode TEXT NOT NULL DEFAULT 'chat' CHECK (conversation_mode IN ('chat', 'topic')),
+        bot_message_policy TEXT NOT NULL DEFAULT 'mentioned_or_scene' CHECK (bot_message_policy IN ('reject', 'mentioned', 'mentioned_or_scene')),
+        mention_source_bot INTEGER NOT NULL DEFAULT 1 CHECK (mention_source_bot IN (0, 1)),
+        bot_source_allowlist_json TEXT NOT NULL DEFAULT '[]',
+        max_bot_reply_depth INTEGER NOT NULL DEFAULT 1,
         runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex')),
         model TEXT NOT NULL DEFAULT '',
         reasoning_effort TEXT NOT NULL DEFAULT '',
@@ -428,7 +432,15 @@ export class HubStore {
         started_at TEXT NOT NULL,
         completed_at TEXT NOT NULL DEFAULT '',
         duration_ms INTEGER,
+        bot_reply_depth INTEGER NOT NULL DEFAULT 0,
         UNIQUE (bot_id, message_id)
+      );
+      CREATE TABLE IF NOT EXISTS outbound_messages (
+        message_id TEXT PRIMARY KEY,
+        message_log_id TEXT NOT NULL REFERENCES message_logs(id) ON DELETE CASCADE,
+        bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        bot_reply_depth INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS thread_jobs (
         id TEXT PRIMARY KEY,
@@ -514,6 +526,7 @@ export class HubStore {
       CREATE INDEX IF NOT EXISTS idx_message_logs_received ON message_logs(received_at DESC);
       CREATE INDEX IF NOT EXISTS idx_message_logs_bot ON message_logs(bot_id, received_at DESC);
       CREATE INDEX IF NOT EXISTS idx_message_logs_scene ON message_logs(scene_id, received_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_outbound_messages_log ON outbound_messages(message_log_id);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_created ON audit_logs(created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_account_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_skill_sources_workspace ON skill_sources(workspace_id, name);
@@ -529,6 +542,12 @@ export class HubStore {
     if (!botColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE bots ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if (!botColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE bots ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
     if (!botColumns.some(column => String(column.name) === 'runtime_kind')) this.db.exec("ALTER TABLE bots ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'codex' CHECK (runtime_kind IN ('codex', 'traex'))")
+    if (!botColumns.some(column => String(column.name) === 'bot_message_policy')) this.db.exec("ALTER TABLE bots ADD COLUMN bot_message_policy TEXT NOT NULL DEFAULT 'mentioned_or_scene' CHECK (bot_message_policy IN ('reject', 'mentioned', 'mentioned_or_scene'))")
+    if (!botColumns.some(column => String(column.name) === 'mention_source_bot')) this.db.exec('ALTER TABLE bots ADD COLUMN mention_source_bot INTEGER NOT NULL DEFAULT 1 CHECK (mention_source_bot IN (0, 1))')
+    if (!botColumns.some(column => String(column.name) === 'bot_source_allowlist_json')) this.db.exec("ALTER TABLE bots ADD COLUMN bot_source_allowlist_json TEXT NOT NULL DEFAULT '[]'")
+    if (!botColumns.some(column => String(column.name) === 'max_bot_reply_depth')) this.db.exec('ALTER TABLE bots ADD COLUMN max_bot_reply_depth INTEGER NOT NULL DEFAULT 1')
+    const messageLogMentionColumns = this.db.prepare('PRAGMA table_info(message_logs)').all() as Row[]
+    if (!messageLogMentionColumns.some(column => String(column.name) === 'bot_reply_depth')) this.db.exec('ALTER TABLE message_logs ADD COLUMN bot_reply_depth INTEGER NOT NULL DEFAULT 0')
     const settingsColumns = this.db.prepare('PRAGMA table_info(platform_settings)').all() as Row[]
     if (!settingsColumns.some(column => String(column.name) === 'default_model')) this.db.exec("ALTER TABLE platform_settings ADD COLUMN default_model TEXT NOT NULL DEFAULT ''")
     if (!settingsColumns.some(column => String(column.name) === 'default_reasoning_effort')) this.db.exec("ALTER TABLE platform_settings ADD COLUMN default_reasoning_effort TEXT NOT NULL DEFAULT ''")
@@ -894,14 +913,14 @@ export class HubStore {
   listBots(): BotRecord[] {
     return (this.db.prepare('SELECT * FROM bots ORDER BY name COLLATE NOCASE').all() as Row[]).map(row => this.bot(row))
   }
-  createBot(input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; runtimeKind?: AgentRuntimeKind; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+  createBot(input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; botMessagePolicy?: BotRecord['botMessagePolicy']; mentionSourceBot?: boolean; botSourceAllowlist?: string[]; maxBotReplyDepth?: number; runtimeKind?: AgentRuntimeKind; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
     const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
     this.assertWorkspaces(workspaceIds)
     const id = randomUUID(), timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`INSERT INTO bots (id, name, description, app_id, app_secret_encrypted, prompt, permissions_json, conversation_mode, runtime_kind, model, reasoning_effort, default_workspace_id, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.description ?? '', input.appId ?? '', input.appSecretEncrypted ?? '', input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.runtimeKind ?? 'codex', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, timestamp, timestamp)
+      this.db.prepare(`INSERT INTO bots (id, name, description, app_id, app_secret_encrypted, prompt, permissions_json, conversation_mode, bot_message_policy, mention_source_bot, bot_source_allowlist_json, max_bot_reply_depth, runtime_kind, model, reasoning_effort, default_workspace_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, input.name, input.description ?? '', input.appId ?? '', input.appSecretEncrypted ?? '', input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.botMessagePolicy ?? 'mentioned_or_scene', input.mentionSourceBot === false ? 0 : 1, JSON.stringify(input.botSourceAllowlist ?? []), Math.max(0, Math.min(10, Math.trunc(input.maxBotReplyDepth ?? 1))), input.runtimeKind ?? 'codex', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, timestamp, timestamp)
       const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
       for (const workspaceId of workspaceIds) add.run(id, workspaceId)
       this.setBotOperators(id, input.operatorIds ?? [])
@@ -909,7 +928,7 @@ export class HubStore {
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getBot(id)
   }
-  updateBot(id: string, input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string | null; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; runtimeKind?: AgentRuntimeKind; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
+  updateBot(id: string, input: { name: string; description?: string; appId?: string; appSecretEncrypted?: string | null; prompt?: string; permissions?: string[]; operatorIds?: string[]; conversationMode?: 'chat' | 'topic'; botMessagePolicy?: BotRecord['botMessagePolicy']; mentionSourceBot?: boolean; botSourceAllowlist?: string[]; maxBotReplyDepth?: number; runtimeKind?: AgentRuntimeKind; model?: string; reasoningEffort?: string; defaultWorkspaceId: string; workspaceIds?: string[] }): BotRecord {
     const workspaceIds = [...new Set([input.defaultWorkspaceId, ...(input.workspaceIds ?? [])])]
     this.assertWorkspaces(workspaceIds)
     const current = this.db.prepare('SELECT app_secret_encrypted FROM bots WHERE id = ?').get(id) as Row | undefined
@@ -919,8 +938,8 @@ export class HubStore {
     const secret = input.appSecretEncrypted === null || input.appSecretEncrypted === undefined ? String(current.app_secret_encrypted) : input.appSecretEncrypted
     this.db.exec('BEGIN IMMEDIATE')
     try {
-      this.db.prepare(`UPDATE bots SET name = ?, description = ?, app_id = ?, app_secret_encrypted = ?, prompt = ?, permissions_json = ?, conversation_mode = ?, runtime_kind = ?, model = ?, reasoning_effort = ?, default_workspace_id = ?, updated_at = ? WHERE id = ?`)
-        .run(input.name, input.description ?? '', input.appId ?? '', secret, input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.runtimeKind ?? 'codex', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, now(), id)
+      this.db.prepare(`UPDATE bots SET name = ?, description = ?, app_id = ?, app_secret_encrypted = ?, prompt = ?, permissions_json = ?, conversation_mode = ?, bot_message_policy = ?, mention_source_bot = ?, bot_source_allowlist_json = ?, max_bot_reply_depth = ?, runtime_kind = ?, model = ?, reasoning_effort = ?, default_workspace_id = ?, updated_at = ? WHERE id = ?`)
+        .run(input.name, input.description ?? '', input.appId ?? '', secret, input.prompt ?? '', JSON.stringify(input.permissions ?? []), input.conversationMode ?? 'chat', input.botMessagePolicy ?? 'mentioned_or_scene', input.mentionSourceBot === false ? 0 : 1, JSON.stringify(input.botSourceAllowlist ?? []), Math.max(0, Math.min(10, Math.trunc(input.maxBotReplyDepth ?? 1))), input.runtimeKind ?? 'codex', input.model ?? '', input.reasoningEffort ?? '', input.defaultWorkspaceId, now(), id)
       this.db.prepare('DELETE FROM bot_workspaces WHERE bot_id = ?').run(id)
       const add = this.db.prepare('INSERT INTO bot_workspaces (bot_id, workspace_id) VALUES (?, ?)')
       for (const workspaceId of workspaceIds) add.run(id, workspaceId)
@@ -941,7 +960,7 @@ export class HubStore {
   private bot(row: Row): BotRecord {
     const workspaceIds = (this.db.prepare('SELECT workspace_id FROM bot_workspaces WHERE bot_id = ? ORDER BY workspace_id').all(String(row.id)) as Row[]).map(item => String(item.workspace_id))
     const operatorIds = (this.db.prepare('SELECT feishu_open_id FROM bot_operators WHERE bot_id = ? ORDER BY feishu_open_id').all(String(row.id)) as Row[]).map(item => String(item.feishu_open_id))
-    return { id: String(row.id), name: String(row.name), description: String(row.description), appId: String(row.app_id), hasAppSecret: Boolean(row.app_secret_encrypted), prompt: String(row.prompt), permissions: list(row.permissions_json), operatorIds, conversationMode: String(row.conversation_mode) as BotRecord['conversationMode'], runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, model: String(row.model), reasoningEffort: String(row.reasoning_effort), defaultWorkspaceId: String(row.default_workspace_id), workspaceIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { id: String(row.id), name: String(row.name), description: String(row.description), appId: String(row.app_id), hasAppSecret: Boolean(row.app_secret_encrypted), prompt: String(row.prompt), permissions: list(row.permissions_json), operatorIds, conversationMode: String(row.conversation_mode) as BotRecord['conversationMode'], botMessagePolicy: String(row.bot_message_policy || 'mentioned_or_scene') as BotRecord['botMessagePolicy'], mentionSourceBot: Boolean(row.mention_source_bot), botSourceAllowlist: list(row.bot_source_allowlist_json), maxBotReplyDepth: Math.max(0, Number(row.max_bot_reply_depth ?? 1)), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, model: String(row.model), reasoningEffort: String(row.reasoning_effort), defaultWorkspaceId: String(row.default_workspace_id), workspaceIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
   }
   private setBotOperators(botId: string, ids: string[]): void {
     const add = this.db.prepare('INSERT OR IGNORE INTO bot_operators (bot_id, feishu_open_id) VALUES (?, ?)')
@@ -1311,7 +1330,7 @@ export class HubStore {
     }
   }
 
-  createMessageLog(botId: string, route: ResolvedRoute, message: ChannelInboundMessage): MessageLogRecord {
+  createMessageLog(botId: string, route: ResolvedRoute, message: ChannelInboundMessage, botReplyDepth = 0): MessageLogRecord {
     const id = randomUUID()
     const startedAt = now()
     const channel = this.db.prepare('SELECT core_thread_id FROM thread_channels WHERE id = ?').get(route.threadChannelId) as Row | undefined
@@ -1321,8 +1340,8 @@ export class HubStore {
       message_type, inbound_content, inbound_raw_json, status, workspace_id, workspace_name,
       scene_id, scene_name, skill_packages_json, investigation_json, model, reasoning_effort, model_source,
       reasoning_effort_source, model_fallback, core_thread_id, thread_route_type, matched_thread_id,
-      thread_match_score, thread_match_reason, thread_channel_id, received_at, started_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      thread_match_score, thread_match_reason, thread_channel_id, received_at, started_at, bot_reply_depth
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         id, message.eventId, message.messageId, botId, route.bot.name, route.bot.runtimeKind,
         message.conversation.id, route.topicId, message.sender.id,
@@ -1331,12 +1350,12 @@ export class HubStore {
         JSON.stringify(route.skillPackages.map(item => ({ id: item.id, name: item.name }))),
         route.modelConfig.model, route.modelConfig.reasoningEffort, route.modelConfig.modelSource, route.modelConfig.reasoningEffortSource, coreThreadId,
         route.threadRouting.type, route.threadRouting.matchedThreadId, route.threadRouting.score, route.threadRouting.reason,
-        route.threadChannelId, message.createdAtIso, startedAt,
+        route.threadChannelId, message.createdAtIso, startedAt, botReplyDepth,
       )
     return this.getMessageLog(id)
   }
 
-  acceptInboundMessage(botId: string, route: ResolvedRoute, message: ChannelInboundMessage): { log: MessageLogRecord; job: ThreadJobRecord } | null {
+  acceptInboundMessage(botId: string, route: ResolvedRoute, message: ChannelInboundMessage, botReplyDepth = 0): { log: MessageLogRecord; job: ThreadJobRecord } | null {
     this.db.exec('BEGIN IMMEDIATE')
     try {
       this.db.prepare('DELETE FROM inbound_events WHERE received_at < ?').run(new Date(Date.now() - 8 * 60 * 60_000).toISOString())
@@ -1344,11 +1363,24 @@ export class HubStore {
       if (duplicate) { this.db.exec('ROLLBACK'); return null }
       const claim = this.db.prepare('INSERT OR IGNORE INTO inbound_events (bot_id, event_id, message_id, received_at) VALUES (?, ?, ?, ?)').run(botId, message.eventId, message.messageId, now())
       if (!claim.changes) { this.db.exec('ROLLBACK'); return null }
-      const log = this.createMessageLog(botId, route, message)
+      const log = this.createMessageLog(botId, route, message, botReplyDepth)
       const job = this.enqueueThreadJob(botId, route.threadChannelId, message, log.id)
       this.db.exec('COMMIT')
       return { log, job }
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
+  }
+
+  botReplyDepthFor(message: ChannelInboundMessage): number {
+    if (message.sender.type === 'user') return 0
+    if (!message.replyTo) return 1
+    const parent = this.db.prepare('SELECT bot_reply_depth FROM outbound_messages WHERE message_id = ?').get(message.replyTo) as Row | undefined
+    return parent ? Number(parent.bot_reply_depth || 0) + 1 : 1
+  }
+
+  recordOutboundMessage(logId: string, botId: string, messageId: string, botReplyDepth: number): void {
+    if (!messageId) return
+    this.db.prepare(`INSERT OR IGNORE INTO outbound_messages (message_id, message_log_id, bot_id, bot_reply_depth, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run(messageId, logId, botId, Math.max(0, Math.trunc(botReplyDepth)), now())
   }
 
   finishMessageLog(id: string, update: { responseContent?: string; error?: string }): MessageLogRecord {
@@ -1651,6 +1683,7 @@ export class HubStore {
     threadRouting: { type: String(row.thread_route_type || 'fixed') as ThreadRoutingDecision['type'], matchedThreadId: String(row.matched_thread_id || ''), score: Number(row.thread_match_score || 0), reason: String(row.thread_match_reason || '') },
     receivedAt: String(row.received_at), startedAt: String(row.started_at), completedAt: String(row.completed_at),
     durationMs: row.duration_ms === null || row.duration_ms === undefined ? null : Number(row.duration_ms),
+    botReplyDepth: Number(row.bot_reply_depth || 0),
   })
 
   getBotSecret(botId: string): string {
