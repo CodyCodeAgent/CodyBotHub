@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@codycodeagent/cody-web-core": "github:CodyCodeAgent/CodyWebCore#v0.39.6",
+    "@codycodeagent/cody-web-core": "github:CodyCodeAgent/CodyWebCore#v0.39.8",
     "@larksuiteoapi/node-sdk": "^1.73.2",
     "@node-rs/argon2": "^2.0.2"
   },
