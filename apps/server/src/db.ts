@@ -776,7 +776,7 @@ export class HubStore {
   }
   listCopilotMessages(sessionId: string, accountId: string): CopilotMessageRecord[] {
     this.getCopilotSession(sessionId, accountId)
-    return (this.db.prepare('SELECT * FROM copilot_messages WHERE session_id = ? ORDER BY created_at, id').all(sessionId) as Row[]).map(row => ({ id: String(row.id), sessionId: String(row.session_id), role: String(row.role) as CopilotMessageRecord['role'], content: String(row.content), createdAt: String(row.created_at) }))
+    return (this.db.prepare('SELECT * FROM copilot_messages WHERE session_id = ? ORDER BY created_at, rowid').all(sessionId) as Row[]).map(row => ({ id: String(row.id), sessionId: String(row.session_id), role: String(row.role) as CopilotMessageRecord['role'], content: String(row.content), createdAt: String(row.created_at) }))
   }
   createCopilotProposal(sessionId: string, kind: CopilotProposalRecord['kind'], title: string, payload: Record<string, unknown>): CopilotProposalRecord {
     this.getCopilotSession(sessionId)
