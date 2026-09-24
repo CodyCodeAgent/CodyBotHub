@@ -174,7 +174,7 @@ export class FeishuBotManager {
     let cardMessageId = ''
     try { cardMessageId = await this.replyCard(provider, log.messageId, card, Boolean(log.topicId), `tool-package:${execution.id}`) }
     catch (error) {
-      const detail = error instanceof Error ? error.message : String(error)
+      const detail = provider.classifyError(error).message
       this.store.updateToolPackageExecution(execution.id, { status: 'failed', error: `无法发送工具包卡片：${detail}`, completedAt: new Date().toISOString() })
       throw error
     }
@@ -511,7 +511,7 @@ export class FeishuBotManager {
     } catch (error) {
       if (patchTimer) clearTimeout(patchTimer)
       await patchTail
-      const detail = error instanceof Error ? error.message : String(error)
+      const detail = provider.classifyError(error).message
       const errorCard = feishuStreamingCard({ state: 'failed', error: replyMention.markdown ? `${replyMention.markdown}\n${detail}` : detail, note })
       const sendError = streamMessageId
         ? this.retryDelivery(provider, () => provider.updateCard(streamMessageId, errorCard))

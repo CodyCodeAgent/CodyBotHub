@@ -11,8 +11,8 @@ importers:
   apps/server:
     dependencies:
       '@codycodeagent/cody-web-core':
-        specifier: github:CodyCodeAgent/CodyWebCore#v0.39.5
-        version: https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/d6ede8af12659fb4f61abf39498f62cf2c08bde5(vue@3.5.42(typescript@6.0.3))
+        specifier: github:CodyCodeAgent/CodyWebCore#v0.39.6
+        version: https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/53dd024cf6c36d1538a27b3966988d5b63122dab(vue@3.5.42(typescript@6.0.3))
       '@larksuiteoapi/node-sdk':
         specifier: ^1.73.2
         version: 1.74.0
@@ -98,9 +98,9 @@ packages:
     peerDependencies:
       vue: ^3.5.0
 
-  '@codycodeagent/cody-web-core@https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/d6ede8af12659fb4f61abf39498f62cf2c08bde5':
-    resolution: {gitHosted: true, integrity: sha512-Utj4UqnAJdBvEfh/Kso6IDq+LJ2c0eOHwiUVjVBIWToYWxLcngKeRgeM6GbTbbESvh4CBsb3Pu993rtIZ7JCCg==, tarball: https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/d6ede8af12659fb4f61abf39498f62cf2c08bde5}
-    version: 0.39.5
+  '@codycodeagent/cody-web-core@https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/53dd024cf6c36d1538a27b3966988d5b63122dab':
+    resolution: {gitHosted: true, integrity: sha512-Rmk/A/zDelPJ9jk1rlo5wwjDO0SzAEbtBK4+y44TY17Q8WH4JjhPTulAxjPvw/SCwIkMFSjAT9f/SULicD6cVg==, tarball: https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/53dd024cf6c36d1538a27b3966988d5b63122dab}
+    version: 0.39.6
     peerDependencies:
       vue: ^3.5.0
 
@@ -1502,7 +1502,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@codycodeagent/cody-web-core@https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/d6ede8af12659fb4f61abf39498f62cf2c08bde5(vue@3.5.42(typescript@6.0.3))':
+  '@codycodeagent/cody-web-core@https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/53dd024cf6c36d1538a27b3966988d5b63122dab(vue@3.5.42(typescript@6.0.3))':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.74.0
       dompurify: 3.4.15
