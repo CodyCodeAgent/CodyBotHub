@@ -6,13 +6,15 @@ import { FEISHU_MESSAGE_TYPES } from '@codycodeagent/cody-web-core/feishu'
 import { AuthService } from './auth.js'
 import { SecretVault } from './crypto.js'
 import { HubStore } from './db.js'
-import type { AgentRuntimeKind, BotMessagePolicy, DeploymentStatusRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord, ToolPackageRecord, ToolRecord } from './types.js'
+import type { AgentRuntimeKind, BotMessagePolicy, DeploymentStatusRecord, HubTaskRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord, ToolPackageRecord, ToolRecord } from './types.js'
 import type { FeishuProvisioningService, ProvisioningRequest } from './provisioning.js'
 import { listBrowsableDirectories } from './directories.js'
 import type { CodyBotRuntime } from './runtime.js'
 import type { SkillSyncService } from './skills.js'
 import { removeToolSource, syncToolSource } from './tool-source.js'
 import type { CopilotService } from './copilot.js'
+import type { HubTaskService } from './tasks.js'
+import { createMcpEndpoint } from './mcp.js'
 
 type Json = Record<string, unknown>
 
@@ -73,15 +75,20 @@ export interface HubServerOptions {
   provisioning: FeishuProvisioningService
   skills: SkillSyncService
   copilot: CopilotService
+  tasks: HubTaskService
+  mcpToken?: string
+  mcpPrincipal?: string
 }
 
-export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, getSystemHealth, getDeploymentStatus, provisioning, skills, copilot }: HubServerOptions) => {
+export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, getSystemHealth, getDeploymentStatus, provisioning, skills, copilot, tasks, mcpToken = '', mcpPrincipal = 'mcp-client' }: HubServerOptions) => {
   const auth = new AuthService(store)
+  const mcp = createMcpEndpoint(tasks, mcpToken, mcpPrincipal)
 
-  return createServer(async (request, response) => {
+  const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
       const method = request.method ?? 'GET'
+      if (url.pathname === '/mcp') return await mcp.handle(request, response)
       if (url.pathname.startsWith('/api/')) {
         if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
           const origin = request.headers.origin
@@ -103,6 +110,13 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         const audit = (action: string, targetType: string, targetId: string, summary: string, details: Record<string, unknown> = {}) => store.createAuditLog({ actor, action, targetType, targetId, summary, details, ipAddress: requestIp(request) })
 
         if (method === 'GET' && url.pathname === '/api/system-health') return sendJson(response, 200, getSystemHealth?.() ?? null)
+        if (method === 'GET' && url.pathname === '/api/tasks/page') {
+          const requestedStatus = url.searchParams.get('status') ?? ''
+          const status = ['queued', 'running', 'awaiting_approval', 'completed', 'failed', 'cancelled'].includes(requestedStatus) ? requestedStatus as HubTaskRecord['status'] : undefined
+          return sendJson(response, 200, page(store.listHubTasks({ ...(status ? { status } : {}), ...(url.searchParams.get('origin') ? { origin: url.searchParams.get('origin')! } : {}), limit: 500 }), url))
+        }
+        const taskId = matchId(url.pathname, '/api/tasks/')
+        if (taskId && method === 'GET') return sendJson(response, 200, store.getHubTask(taskId))
 
         if (method === 'GET' && url.pathname === '/api/copilot/session') {
           const workspaceId = url.searchParams.get('workspaceId') ?? store.listWorkspaces()[0]?.id ?? ''
@@ -425,6 +439,8 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
       sendJson(response, status, { error: error instanceof Error ? error.message : 'Unexpected error' })
     }
   })
+  server.on('close', () => { void mcp.close() })
+  return server
 }
 
 const matchId = (pathname: string, prefix: string): string | null => {

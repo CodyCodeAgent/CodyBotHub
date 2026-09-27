@@ -9,6 +9,7 @@ import { FeishuBotManager } from './feishu.js'
 import { FeishuProvisioningService } from './provisioning.js'
 import { SkillSyncService } from './skills.js'
 import { CopilotService } from './copilot.js'
+import { HubTaskService } from './tasks.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = path.resolve(here, '../../..')
@@ -20,7 +21,7 @@ const startedAt = new Date()
 
 const store = new HubStore(path.join(dataDir, 'cody-bot-hub.sqlite'))
 const interrupted = store.recoverInterruptedWork()
-if (interrupted.jobs || interrupted.messages) console.warn(`[startup] recovered interrupted work: jobs=${interrupted.jobs} messages=${interrupted.messages}; queued jobs will resume`)
+if (interrupted.jobs || interrupted.messages || interrupted.tasks) console.warn(`[startup] recovered interrupted work: jobs=${interrupted.jobs} messages=${interrupted.messages} tasks=${interrupted.tasks}; queued jobs will resume`)
 const interruptedTools = store.recoverInterruptedToolExecutions()
 if (interruptedTools) console.warn(`[startup] marked ${interruptedTools} interrupted tool executions as failed; external state requires manual review`)
 const vault = await SecretVault.open(dataDir)
@@ -36,11 +37,16 @@ const provisioning = new FeishuProvisioningService(store, vault, () => feishu.re
 const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))
 const copilot = new CopilotService(store, runtime, (botId, query) => feishu.resolveObservedUserIdentities(botId, query))
 runtime.setCopilotToolInvoker(call => copilot.invokeTool(call))
+const tasks = new HubTaskService(store, runtime)
 const server = createHubServer({
-  store, vault, runtime, webDist, provisioning, skills, copilot,
+  store, vault, runtime, webDist, provisioning, skills, copilot, tasks,
+  mcpToken: process.env.CODY_BOT_HUB_MCP_TOKEN ?? '', mcpPrincipal: process.env.CODY_BOT_HUB_MCP_PRINCIPAL ?? 'mcp-client',
   onConfigurationChanged: () => feishu.reload(),
   onMessageRetry: () => feishu.resumeQueuedJobs(),
-  getDeploymentStatus: () => ({ ...feishu.deploymentStatus(), queuedJobs: store.systemHealth().queue.queued }),
+  getDeploymentStatus: () => {
+    const status = feishu.deploymentStatus(), taskHealth = tasks.health()
+    return { ...status, draining: status.draining || taskHealth.draining, activeJobs: status.activeJobs + taskHealth.activeTasks, queuedJobs: store.systemHealth().queue.queued + taskHealth.queuedTasks }
+  },
   getSystemHealth: () => {
     const checkedAt = new Date(), storeHealth = store.systemHealth(), feishuHealth = feishu.health(), runtimeHealth = runtime.health()
     const attention = feishuHealth.draining || !storeHealth.database.ok || storeHealth.queue.staleProcessing > 0 || feishuHealth.connectedProviders < feishuHealth.configuredBots
@@ -70,6 +76,7 @@ setImmediate(refreshThreadProfiles)
 server.listen(port, host, () => {
   console.log(`CodyBotHub listening on http://${host}:${port}`)
   void feishu.start()
+  tasks.resumeQueuedTasks()
 })
 
 let shuttingDown = false
@@ -78,8 +85,9 @@ const shutdown = async (signal: string) => {
   shuttingDown = true
   clearInterval(threadProfileTimer)
   feishu.beginDrain()
-  console.info(`[shutdown] ${signal} received; waiting for ${feishu.deploymentStatus().activeJobs} active jobs`)
-  await feishu.waitForIdle()
+  tasks.beginDrain()
+  console.info(`[shutdown] ${signal} received; waiting for ${feishu.deploymentStatus().activeJobs + tasks.health().activeTasks} active jobs`)
+  await Promise.all([feishu.waitForIdle(), tasks.waitForIdle()])
   console.info('[shutdown] active jobs completed; stopping providers and runtime')
   feishu.stop()
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
@@ -87,7 +95,7 @@ const shutdown = async (signal: string) => {
   store.close()
   process.exit(0)
 }
-process.on('SIGUSR2', () => feishu.beginDrain())
-process.on('SIGUSR1', () => { if (!shuttingDown) feishu.cancelDrain() })
+process.on('SIGUSR2', () => { feishu.beginDrain(); tasks.beginDrain() })
+process.on('SIGUSR1', () => { if (!shuttingDown) { feishu.cancelDrain(); tasks.cancelDrain() } })
 process.on('SIGINT', () => { void shutdown('SIGINT').catch(error => { console.error('[shutdown] failed:', error); process.exit(1) }) })
 process.on('SIGTERM', () => { void shutdown('SIGTERM').catch(error => { console.error('[shutdown] failed:', error); process.exit(1) }) })

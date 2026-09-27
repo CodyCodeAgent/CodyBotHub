@@ -2,9 +2,11 @@
 
 ## Boundaries
 
-CodyBotHub owns the management product and its domain entities: Workspace, Bot, Scene, Skill Package, Tool, Tool Package, tool execution, group binding, topic routing context, provisioning job, Thread Channel, conversation binding and Thread job. CodyWebCore remains the single owner of Codex protocol, session lifecycle, dynamic-tool request routing, normalized conversation events and provider-neutral channel primitives.
+CodyBotHub owns the management product and its domain entities: Workspace, Bot, Scene, Skill Package, Tool, Tool Package, tool execution, group binding, topic routing context, provisioning job, Thread Channel, conversation binding, Thread job and durable Hub Task. CodyWebCore remains the single owner of Codex protocol, session lifecycle, dynamic-tool request routing, normalized conversation events, provider-neutral channel primitives and the reusable Task lifecycle state machine.
 
 Feishu message parsing, cards, WebSocket lifecycle and delivery calls use `@codycodeagent/cody-web-core/feishu`. CodyBotHub adds only product routing and policy.
+
+Feishu and MCP are two presentations of the same durable Task lifecycle. Feishu keeps its high-frequency streaming card projection while persisting coarser progress snapshots; MCP returns task handles and bounded waits. Neither layer creates a second Codex Turn state machine.
 
 ## Data flow
 

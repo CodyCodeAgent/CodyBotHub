@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { AdminAccountRecord, AgentRuntimeKind, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, CopilotMessageRecord, CopilotProposalRecord, CopilotSessionRecord, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, StoreHealthRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, ToolPackageExecutionRecord, ToolPackageRecord, ToolRecord, ToolScriptVersionRecord, WorkspaceRecord } from './types.js'
+import type { AdminAccountRecord, AgentRuntimeKind, AuditLogRecord, BotRecord, ChatMetadataRecord, ConversationThreadRecord, CopilotMessageRecord, CopilotProposalRecord, CopilotSessionRecord, HubTaskProgress, HubTaskRecord, HubTaskResult, InvestigationTraceRecord, MessageAttemptRecord, MessageLogRecord, ModelConfigSource, PlatformSettingsRecord, ProvisioningJobRecord, ResolvedRoute, SceneRecord, SkillInstallationRecord, SkillPackageRecord, SkillSourceRecord, StoreHealthRecord, ThreadChannelRecord, ThreadJobRecord, ThreadProfileRecord, ThreadRoutingDecision, ThreadRoutingRuleRecord, ToolPackageExecutionRecord, ToolPackageRecord, ToolRecord, ToolScriptVersionRecord, WorkspaceRecord } from './types.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
+import { createTaskSnapshot, transitionTask, type TaskEvent } from '@codycodeagent/cody-web-core/task'
 import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
 type Row = Record<string, unknown>
@@ -20,6 +21,9 @@ const list = (value: unknown): string[] => {
 }
 const object = (value: unknown): Record<string, unknown> => {
   try { const parsed = JSON.parse(String(value)); return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {} } catch { return {} }
+}
+const jsonValue = <T>(value: unknown, fallback: T): T => {
+  try { return JSON.parse(String(value)) as T } catch { return fallback }
 }
 
 export class HubStore {
@@ -461,6 +465,29 @@ export class HubStore {
         updated_at TEXT NOT NULL,
         UNIQUE (bot_id, message_id)
       );
+      CREATE TABLE IF NOT EXISTS hub_tasks (
+        id TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        origin TEXT NOT NULL,
+        principal TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'awaiting_approval', 'completed', 'failed', 'cancelled')),
+        input_json TEXT NOT NULL DEFAULT '{}',
+        progress_json TEXT NOT NULL DEFAULT 'null',
+        result_json TEXT NOT NULL DEFAULT 'null',
+        error TEXT,
+        revision INTEGER NOT NULL DEFAULT 0,
+        bot_id TEXT NOT NULL DEFAULT '',
+        scene_id TEXT NOT NULL DEFAULT '',
+        thread_channel_id TEXT NOT NULL DEFAULT '',
+        source_kind TEXT NOT NULL DEFAULT '',
+        source_id TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        UNIQUE (origin, idempotency_key)
+      );
       CREATE TABLE IF NOT EXISTS message_attempts (
         id TEXT PRIMARY KEY,
         log_id TEXT NOT NULL REFERENCES message_logs(id) ON DELETE CASCADE,
@@ -516,6 +543,8 @@ export class HubStore {
       CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_channels_core ON thread_channels(core_thread_id) WHERE core_thread_id <> '';
       CREATE INDEX IF NOT EXISTS idx_conversation_bindings_channel ON conversation_bindings(thread_channel_id);
       CREATE INDEX IF NOT EXISTS idx_thread_jobs_channel ON thread_jobs(thread_channel_id, status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_hub_tasks_status ON hub_tasks(status, created_at);
+      CREATE INDEX IF NOT EXISTS idx_hub_tasks_source ON hub_tasks(source_kind, source_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_message_attempts_log ON message_attempts(log_id, attempt_number);
       CREATE INDEX IF NOT EXISTS idx_thread_profiles_scope ON thread_profiles(bot_id, workspace_id, scene_id, last_active_at DESC);
       CREATE INDEX IF NOT EXISTS idx_thread_profile_jobs_created ON thread_profile_jobs(created_at);
@@ -1338,6 +1367,88 @@ export class HubStore {
     }
   }
 
+  createHubTask(input: {
+    id?: string
+    kind: string
+    origin: string
+    principal: string
+    idempotencyKey: string
+    taskInput: Record<string, unknown>
+    botId?: string
+    sceneId?: string
+    threadChannelId?: string
+    sourceKind?: string
+    sourceId?: string
+  }): HubTaskRecord {
+    const task = createTaskSnapshot({
+      ...(input.id ? { id: input.id } : {}),
+      kind: input.kind,
+      origin: input.origin,
+      principal: input.principal,
+      idempotencyKey: input.idempotencyKey,
+      input: input.taskInput,
+    })
+    this.db.prepare(`INSERT INTO hub_tasks (
+      id, kind, origin, principal, idempotency_key, status, input_json, progress_json, result_json, error, revision,
+      bot_id, scene_id, thread_channel_id, source_kind, source_id, created_at, updated_at, started_at, completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'null', 'null', NULL, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`)
+      .run(task.id, task.kind, task.origin, task.principal, task.idempotencyKey, task.status, JSON.stringify(task.input).slice(0, 1_000_000), task.revision,
+        input.botId ?? '', input.sceneId ?? '', input.threadChannelId ?? '', input.sourceKind ?? '', input.sourceId ?? '', task.createdAtIso, task.updatedAtIso)
+    return this.getHubTask(task.id)
+  }
+
+  getHubTask(id: string): HubTaskRecord {
+    const row = this.db.prepare('SELECT * FROM hub_tasks WHERE id = ?').get(id) as Row | undefined
+    if (!row) throw new Error('Task not found')
+    return this.hubTask(row)
+  }
+
+  findHubTask(origin: string, idempotencyKey: string): HubTaskRecord | null {
+    const row = this.db.prepare('SELECT * FROM hub_tasks WHERE origin = ? AND idempotency_key = ?').get(origin, idempotencyKey) as Row | undefined
+    return row ? this.hubTask(row) : null
+  }
+
+  listHubTasks(input: { status?: HubTaskRecord['status']; origin?: string; limit?: number } = {}): HubTaskRecord[] {
+    const filters: string[] = [], params: Array<string | number> = []
+    if (input.status) { filters.push('status = ?'); params.push(input.status) }
+    if (input.origin) { filters.push('origin = ?'); params.push(input.origin) }
+    params.push(Math.min(500, Math.max(1, input.limit ?? 100)))
+    return (this.db.prepare(`SELECT * FROM hub_tasks ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''} ORDER BY created_at DESC LIMIT ?`).all(...params) as Row[]).map(this.hubTask)
+  }
+
+  latestHubTaskForSource(sourceKind: string, sourceId: string): HubTaskRecord | null {
+    const row = this.db.prepare('SELECT * FROM hub_tasks WHERE source_kind = ? AND source_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1').get(sourceKind, sourceId) as Row | undefined
+    return row ? this.hubTask(row) : null
+  }
+
+  transitionHubTask(id: string, event: TaskEvent<HubTaskProgress, HubTaskResult>): HubTaskRecord {
+    const current = this.getHubTask(id)
+    const next = transitionTask(current, event)
+    const changed = this.db.prepare(`UPDATE hub_tasks SET status = ?, progress_json = ?, result_json = ?, error = ?, revision = ?, updated_at = ?, started_at = ?, completed_at = ?
+      WHERE id = ? AND revision = ?`).run(
+        next.status, JSON.stringify(next.progress), JSON.stringify(next.result), next.error, next.revision, next.updatedAtIso,
+        next.startedAtIso ?? null, next.completedAtIso ?? null, id, current.revision,
+      ).changes
+    if (!changed) throw new Error('Task was updated concurrently')
+    return this.getHubTask(id)
+  }
+
+  updateHubTaskProgressForSource(sourceKind: string, sourceId: string, progress: HubTaskProgress): HubTaskRecord | null {
+    const task = this.latestHubTaskForSource(sourceKind, sourceId)
+    if (!task || (task.status !== 'running' && task.status !== 'awaiting_approval')) return task
+    return this.transitionHubTask(task.id, { type: 'progress', progress })
+  }
+
+  private hubTask = (row: Row): HubTaskRecord => ({
+    id: String(row.id), kind: String(row.kind), origin: String(row.origin), principal: String(row.principal), idempotencyKey: String(row.idempotency_key),
+    status: String(row.status) as HubTaskRecord['status'], input: jsonValue<Record<string, unknown>>(row.input_json, {}),
+    progress: jsonValue<HubTaskProgress | null>(row.progress_json, null), result: jsonValue<HubTaskResult | null>(row.result_json, null),
+    error: row.error === null || row.error === undefined ? null : String(row.error), revision: Number(row.revision),
+    botId: String(row.bot_id), sceneId: String(row.scene_id), threadChannelId: String(row.thread_channel_id), sourceKind: String(row.source_kind), sourceId: String(row.source_id),
+    createdAtIso: String(row.created_at), updatedAtIso: String(row.updated_at),
+    ...(row.started_at ? { startedAtIso: String(row.started_at) } : {}), ...(row.completed_at ? { completedAtIso: String(row.completed_at) } : {}),
+  })
+
   createMessageLog(botId: string, route: ResolvedRoute, message: ChannelInboundMessage, botReplyDepth = 0): MessageLogRecord {
     const id = randomUUID()
     const startedAt = now()
@@ -1373,6 +1484,11 @@ export class HubStore {
       if (!claim.changes) { this.db.exec('ROLLBACK'); return null }
       const log = this.createMessageLog(botId, route, message, botReplyDepth)
       const job = this.enqueueThreadJob(botId, route.threadChannelId, message, log.id)
+      this.createHubTask({
+        kind: 'agent_turn', origin: 'feishu', principal: message.sender.id || 'unknown', idempotencyKey: `${botId}:${message.messageId}:attempt:1`,
+        taskInput: { text: message.text, messageId: message.messageId, conversationId: message.conversation.id },
+        botId, sceneId: route.scene?.id ?? '', threadChannelId: route.threadChannelId, sourceKind: 'thread_job', sourceId: job.id,
+      })
       this.db.exec('COMMIT')
       return { log, job }
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
@@ -1473,12 +1589,14 @@ export class HubStore {
     return this.getThreadJob(id)
   }
 
-  recoverInterruptedWork(error = '服务在任务完成前重启，执行已中断'): { jobs: number; messages: number } {
+  recoverInterruptedWork(error = '服务在任务完成前重启，执行已中断'): { jobs: number; messages: number; tasks: number } {
     const timestamp = now()
     this.db.exec('BEGIN IMMEDIATE')
     try {
       const jobs = Number(this.db.prepare(`UPDATE thread_jobs SET status = 'failed', error = ?, completed_at = ?, updated_at = ? WHERE status = 'processing'`)
         .run(error, timestamp, timestamp).changes)
+      const tasks = Number(this.db.prepare(`UPDATE hub_tasks SET status = 'failed', error = ?, completed_at = ?, updated_at = ?, revision = revision + 1
+        WHERE status IN ('running', 'awaiting_approval')`).run(error, timestamp, timestamp).changes)
       const pending = this.db.prepare(`SELECT m.id, m.started_at FROM message_logs m WHERE m.status = 'processing' AND NOT EXISTS (
         SELECT 1 FROM thread_jobs tj WHERE tj.log_id = m.id AND tj.status IN ('queued', 'processing')
       )`).all() as Row[]
@@ -1492,7 +1610,7 @@ export class HubStore {
         updateAttempt.run(error, timestamp, durationMs, timestamp, id, id)
       }
       this.db.exec('COMMIT')
-      return { jobs, messages }
+      return { jobs, messages, tasks }
     } catch (cause) { this.db.exec('ROLLBACK'); throw cause }
   }
 
@@ -1511,6 +1629,10 @@ export class HubStore {
     if (changed) this.db.prepare(`UPDATE message_attempts SET status = 'processing', started_at = ?, updated_at = ?
       WHERE log_id = (SELECT log_id FROM thread_jobs WHERE id = ?) AND attempt_number = (SELECT attempts FROM thread_jobs WHERE id = ?)`)
       .run(timestamp, timestamp, id, id)
+    if (changed) {
+      const task = this.latestHubTaskForSource('thread_job', id)
+      if (task?.status === 'queued') this.transitionHubTask(task.id, { type: 'start' })
+    }
     return changed
   }
 
@@ -1518,6 +1640,14 @@ export class HubStore {
     const timestamp = now()
     this.db.prepare('UPDATE thread_jobs SET status = ?, error = ?, completed_at = ?, updated_at = ? WHERE id = ?')
       .run(status, error.slice(0, 20_000), timestamp, timestamp, id)
+    const task = this.latestHubTaskForSource('thread_job', id)
+    if (task && !['completed', 'failed', 'cancelled'].includes(task.status)) {
+      if (status === 'failed') this.transitionHubTask(task.id, { type: 'fail', error: error || 'Task failed' })
+      else {
+        const job = this.getThreadJob(id), log = this.getMessageLog(job.logId)
+        this.transitionHubTask(task.id, { type: 'complete', result: { text: log.responseContent } })
+      }
+    }
   }
 
   failThreadJob(id: string, error: string): void {
@@ -1593,6 +1723,11 @@ export class HubStore {
           String(channel.core_thread_id), String(channel.core_thread_id), timestamp, id)
       this.db.prepare(`UPDATE thread_jobs SET status = 'queued', receipt_reaction_id = '', error = '', started_at = '', completed_at = '', updated_at = ? WHERE id = ?`)
         .run(timestamp, String(jobRow.id))
+      this.createHubTask({
+        kind: 'agent_turn', origin: 'feishu', principal: actor.id, idempotencyKey: `${String(jobRow.bot_id)}:${String(jobRow.message_id)}:attempt:${nextAttempt}`,
+        taskInput: { text: message.text, messageId: message.messageId, conversationId: message.conversation.id, retryOf: id },
+        botId: String(jobRow.bot_id), sceneId: baseRoute.scene?.id ?? '', threadChannelId: String(jobRow.thread_channel_id), sourceKind: 'thread_job', sourceId: String(jobRow.id),
+      })
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return { log: this.getMessageLog(id), job: this.getThreadJob(String(jobRow.id)), attempts: this.listMessageAttempts(id) }
@@ -1737,7 +1872,7 @@ export class HubStore {
       .run(botId, chatId, topicId, sceneId, timestamp, timestamp)
   }
 
-  resolveRoute(botId: string, message: ChannelInboundMessage): ResolvedRoute {
+  resolveRoute(botId: string, message: ChannelInboundMessage, options: { sceneId?: string } = {}): ResolvedRoute {
     const bot = this.getBot(botId)
     const topicId = bot.conversationMode === 'topic' && message.conversation.scope !== 'private'
       ? (message.conversation.rootId || message.messageId)
@@ -1747,12 +1882,14 @@ export class HubStore {
       : undefined
     const groupBinding = this.db.prepare('SELECT scene_id FROM group_scene_bindings WHERE bot_id = ? AND chat_id = ?').get(botId, message.conversation.id) as Row | undefined
     const candidates = this.listScenes().filter(scene => scene.botId === botId && scene.enabled)
+    const explicit = options.sceneId ? candidates.find(scene => scene.id === options.sceneId) ?? null : null
+    if (options.sceneId && !explicit) throw new Error('Scene not found, disabled, or does not belong to this Bot')
     const topicBound = topicContext ? candidates.find(scene => scene.id === String(topicContext.scene_id)) ?? null : null
     const groupBound = groupBinding ? candidates.find(scene => scene.id === String(groupBinding.scene_id)) ?? null : null
     const matched = candidates.find(candidate => this.hasMatcher(candidate) && this.sceneMatches(candidate, message)) ?? null
     const fallback = candidates.find(candidate => !this.hasMatcher(candidate)) ?? null
-    const scene = matched ?? topicBound ?? groupBound ?? fallback
-    const routeSource: ResolvedRoute['routeSource'] = matched ? 'matcher' : topicBound ? 'topic_context' : groupBound ? 'group_binding' : 'default'
+    const scene = explicit ?? matched ?? topicBound ?? groupBound ?? fallback
+    const routeSource: ResolvedRoute['routeSource'] = explicit ? 'explicit' : matched ? 'matcher' : topicBound ? 'topic_context' : groupBound ? 'group_binding' : 'default'
     const workspace = this.getWorkspace(scene?.workspaceId ?? bot.defaultWorkspaceId)
     const packages = scene ? this.listSkillPackages().filter(item => scene.skillPackageIds.includes(item.id)) : []
     const conversationKey = topicId ? `bot:${bot.id}:chat:${message.conversation.id}:topic:${topicId}` : `bot:${bot.id}:chat:${message.conversation.id}`
@@ -1775,7 +1912,7 @@ export class HubStore {
     return { bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, threadChannelId: '', topicId, turnInstructions: layers.join('\n\n'), modelConfig: { model, reasoningEffort, modelSource, reasoningEffortSource, fallbackEnabled: settings.modelFallbackEnabled }, threadRouting: { type: 'fixed', matchedThreadId: '', score: 0, reason: '当前会话固定映射' } }
   }
 
-  resolveThreadRouting(route: ResolvedRoute, message: ChannelInboundMessage): ResolvedRoute {
+  resolveThreadRouting(route: ResolvedRoute, message: ChannelInboundMessage, options: { allowProfileReuse?: boolean } = {}): ResolvedRoute {
     const existing = this.db.prepare(`SELECT cb.thread_channel_id, tc.core_thread_id, tc.runtime_kind FROM conversation_bindings cb
       JOIN thread_channels tc ON tc.id = cb.thread_channel_id WHERE cb.conversation_key = ?`).get(route.conversationKey) as Row | undefined
     if (existing && String(existing.runtime_kind || 'codex') === route.bot.runtimeKind) {
@@ -1787,6 +1924,10 @@ export class HubStore {
     if (!route.scene) {
       const channel = this.bindConversationToChannel(route, message)
       return { ...route, threadChannelId: channel.id, threadRouting: { type: 'new', matchedThreadId: channel.coreThreadId, score: 0, reason: '默认路由创建新的 Thread Channel' } }
+    }
+    if (options.allowProfileReuse === false) {
+      const channel = this.bindConversationToChannel(route, message)
+      return { ...route, threadChannelId: channel.id, threadRouting: { type: 'new', matchedThreadId: channel.coreThreadId, score: 0, reason: '当前入口要求会话隔离，不复用其他会话的 Thread Channel' } }
     }
     const rule = this.getThreadRoutingRule(route.scene.id)
     if (!rule.enabled) {

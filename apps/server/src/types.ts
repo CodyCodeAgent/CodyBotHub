@@ -1,3 +1,5 @@
+import type { TaskSnapshot } from '@codycodeagent/cody-web-core/task'
+
 export interface WorkspaceRecord {
   id: string
   name: string
@@ -40,7 +42,7 @@ export interface ResolvedRoute {
   skillPackages: SkillPackageRecord[]
   conversationMode: 'chat' | 'topic'
   replyInTopic: boolean
-  routeSource: 'topic_context' | 'group_binding' | 'matcher' | 'default'
+  routeSource: 'explicit' | 'topic_context' | 'group_binding' | 'matcher' | 'default'
   conversationKey: string
   threadChannelId: string
   topicId: string
@@ -482,6 +484,26 @@ export interface ThreadJobRecord {
   startedAt: string
   completedAt: string
   updatedAt: string
+}
+
+export type HubTaskProgress = {
+  phase: string
+  message?: string
+  answer?: string
+  details?: unknown
+}
+
+export type HubTaskResult = {
+  text?: string
+  data?: unknown
+}
+
+export type HubTaskRecord = TaskSnapshot<Record<string, unknown>, HubTaskProgress, HubTaskResult> & {
+  botId: string
+  sceneId: string
+  threadChannelId: string
+  sourceKind: string
+  sourceId: string
 }
 
 export interface StoreHealthRecord {

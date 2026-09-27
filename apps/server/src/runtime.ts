@@ -195,7 +195,7 @@ export class CodyBotRuntime {
     }
   }
 
-  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true): Promise<string> {
+  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true, executionMode: 'default' | 'read_only' = 'default'): Promise<string> {
     const channel = this.store.getThreadChannel(route.threadChannelId)
     if (channel.runtimeKind !== route.bot.runtimeKind) throw new Error(`Thread Channel runtime mismatch: ${channel.runtimeKind} != ${route.bot.runtimeKind}`)
     const engine = await this.ensureEngine(route.bot.runtimeKind)
@@ -218,7 +218,7 @@ export class CodyBotRuntime {
       }),
       runtimeWorkspaceRoots: [realpathSync.native(route.workspace.path)],
       approvalPolicy: 'never',
-      ...this.permissions(route),
+      ...(executionMode === 'read_only' ? { sandboxPolicy: { type: 'readOnly' as const } } : this.permissions(route)),
       ...(model.model ? { model: model.model } : {}),
       ...(model.reasoningEffort ? { effort: model.reasoningEffort as TurnInput['effort'] } : {}),
     }

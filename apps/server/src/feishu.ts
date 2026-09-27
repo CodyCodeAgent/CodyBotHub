@@ -398,7 +398,7 @@ export class FeishuBotManager {
     const current = previous.catch(() => undefined).then(async () => {
       if (!this.store.startThreadJob(jobId)) return
       try {
-        const result = await this.onMessage(botId, provider, route, message, logId, receiptReactionId)
+        const result = await this.onMessage(jobId, botId, provider, route, message, logId, receiptReactionId)
         this.store.finishThreadJob(jobId, result.ok ? 'completed' : 'failed', result.error)
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
@@ -435,7 +435,7 @@ export class FeishuBotManager {
     }
   }
 
-  private async onMessage(botId: string, provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage, logId: string, existingReceiptReactionId: string): Promise<{ ok: boolean; error: string }> {
+  private async onMessage(jobId: string, botId: string, provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage, logId: string, existingReceiptReactionId: string): Promise<{ ok: boolean; error: string }> {
     const log = this.store.getMessageLog(logId)
     let receiptReactionId = existingReceiptReactionId
     if (!receiptReactionId) {
@@ -459,6 +459,7 @@ export class FeishuBotManager {
     }
     let patchTimer: ReturnType<typeof setTimeout> | null = null
     let latestProgress: RuntimeProgress = { phase: 'thinking', reasoning: '', answer: '' }
+    let lastTaskProgressAt = 0
     let patchTail = Promise.resolve()
     const enqueuePatch = () => {
       if (!streamMessageId) return
@@ -471,6 +472,11 @@ export class FeishuBotManager {
     }
     const schedulePatch = (progress: RuntimeProgress) => {
       latestProgress = progress
+      if (Date.now() - lastTaskProgressAt >= 2_000) {
+        lastTaskProgressAt = Date.now()
+        try { this.store.updateHubTaskProgressForSource('thread_job', jobId, { phase: progress.phase, answer: progress.answer.slice(-50_000) }) }
+        catch (error) { console.warn('[feishu] failed to persist task progress:', error) }
+      }
       if (patchTimer) return
       patchTimer = setTimeout(() => { patchTimer = null; enqueuePatch() }, 450)
       patchTimer.unref?.()

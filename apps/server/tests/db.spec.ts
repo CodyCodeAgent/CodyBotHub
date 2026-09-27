@@ -8,6 +8,31 @@ import { HubStore } from '../src/db.js'
 const workspace = (store: HubStore, name = 'Workspace') => store.createWorkspace({ name, path: `/tmp/${name.toLowerCase().replaceAll(' ', '-')}` })
 
 describe('HubStore invariants', () => {
+  it('projects a Feishu message through the durable Task lifecycle', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Task lifecycle')
+    const bot = store.createBot({ name: 'Assistant', defaultWorkspaceId: linked.id })
+    const message = {
+      provider: 'feishu' as const, accountId: bot.id, eventId: 'event-task', messageId: 'message-task',
+      conversation: { id: 'oc_task', scope: 'group' as const }, sender: { id: 'ou_task', type: 'user' as const },
+      content: { type: 'text' as const }, text: 'investigate', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+    const accepted = store.acceptInboundMessage(bot.id, route, message)!
+    const queued = store.latestHubTaskForSource('thread_job', accepted.job.id)!
+    expect(queued).toMatchObject({ origin: 'feishu', status: 'queued', botId: bot.id, input: { text: 'investigate' } })
+
+    expect(store.startThreadJob(accepted.job.id)).toBe(true)
+    store.updateHubTaskProgressForSource('thread_job', accepted.job.id, { phase: 'answering', answer: 'partial' })
+    expect(store.getHubTask(queued.id)).toMatchObject({ status: 'running', progress: { answer: 'partial' } })
+    store.finishMessageLog(accepted.log.id, { responseContent: 'done' })
+    store.finishThreadJob(accepted.job.id, 'completed')
+    expect(store.getHubTask(queued.id)).toMatchObject({ status: 'completed', result: { text: 'done' } })
+    expect(() => store.transitionHubTask(queued.id, { type: 'progress', progress: { phase: 'late' } })).toThrow('Invalid task transition')
+    store.close()
+  })
+
   it('migrates legacy Thread Channels with an explicit tool contract version', () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'codybothub-thread-contract-'))
     const filename = path.join(directory, 'hub.sqlite')
@@ -340,12 +365,20 @@ describe('HubStore invariants', () => {
     const routed = store.resolveThreadRouting(store.resolveRoute(bot.id, next), next)
     expect(routed).toMatchObject({ conversationKey: `bot:${bot.id}:chat:oc_new:topic:root-new`, threadChannelId: historicalRoute.threadChannelId, threadRouting: { type: 'reused', matchedThreadId: 'thread-history' } })
     expect(routed.threadRouting.score).toBeGreaterThanOrEqual(0.85)
+    const isolated = { ...base, eventId: 'event-isolated', messageId: 'message-isolated', conversation: { id: 'mcp:dot:session-1', scope: 'private' as const }, createdAtIso: new Date().toISOString() }
+    const isolatedRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, isolated), isolated, { allowProfileReuse: false })
+    expect(isolatedRoute).toMatchObject({ threadRouting: { type: 'new' } })
+    expect(isolatedRoute.threadChannelId).not.toBe(historicalRoute.threadChannelId)
+    const isolatedFollowUp = { ...isolated, eventId: 'event-isolated-2', messageId: 'message-isolated-2' }
+    const isolatedFollowUpRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, isolatedFollowUp), isolatedFollowUp, { allowProfileReuse: false })
+    expect(isolatedFollowUpRoute).toMatchObject({ threadChannelId: isolatedRoute.threadChannelId, threadRouting: { type: 'fixed' } })
     const followUp = { ...next, eventId: 'event-follow-up', messageId: 'message-follow-up', text: '继续看一下这个问题' }
     const followUpRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, followUp), followUp)
     expect(followUpRoute).toMatchObject({ conversationKey: routed.conversationKey, threadChannelId: historicalRoute.threadChannelId, threadRouting: { type: 'fixed', matchedThreadId: 'thread-history' } })
-    expect(store.listConversationThreads()).toMatchObject({ total: 2, items: expect.arrayContaining([
+    expect(store.listConversationThreads()).toMatchObject({ total: 3, items: expect.arrayContaining([
       expect.objectContaining({ id: historicalRoute.conversationKey, threadChannelId: historicalRoute.threadChannelId, coreThreadId: 'thread-history' }),
       expect.objectContaining({ id: routed.conversationKey, threadChannelId: historicalRoute.threadChannelId, coreThreadId: 'thread-history' }),
+      expect.objectContaining({ id: isolatedRoute.conversationKey, threadChannelId: isolatedRoute.threadChannelId }),
     ]) })
     store.close()
     const reopened = new HubStore(filename)
@@ -380,7 +413,7 @@ describe('HubStore invariants', () => {
       database: { ok: true, result: 'ok' },
       queue: { queued: 1, processing: 1, staleProcessing: 0 },
     })
-    expect(store.recoverInterruptedWork()).toEqual({ jobs: 1, messages: 1 })
+    expect(store.recoverInterruptedWork()).toEqual({ jobs: 1, messages: 1, tasks: 0 })
     expect(store.getThreadJob(runningJob.id)).toMatchObject({ status: 'failed', attempts: 1 })
     expect(store.listQueuedThreadJobs()).toMatchObject([{ job: { id: queuedJob.id, status: 'queued' }, message: { messageId: 'message-waiting' } }])
     expect(store.getMessageLog(runningLog.id)).toMatchObject({ status: 'failed' })
@@ -391,6 +424,19 @@ describe('HubStore invariants', () => {
     store.finishMessageLog(queuedLog.id, { responseContent: '处理完成' })
     expect(store.getThreadJob(queuedJob.id)).toMatchObject({ status: 'completed', attempts: 1 })
     expect(store.listMessageLogs({ query: route.threadChannelId })).toMatchObject({ total: 2 })
+    store.close()
+  })
+
+  it('fails interrupted durable Tasks while preserving queued Tasks for restart recovery', () => {
+    const store = new HubStore(':memory:')
+    const running = store.createHubTask({ kind: 'agent_turn', origin: 'mcp', principal: 'dot', idempotencyKey: 'running', taskInput: {} })
+    const queued = store.createHubTask({ kind: 'agent_turn', origin: 'mcp', principal: 'dot', idempotencyKey: 'queued', taskInput: {} })
+    store.transitionHubTask(running.id, { type: 'start' })
+
+    expect(store.recoverInterruptedWork('restart interrupted task')).toEqual({ jobs: 0, messages: 0, tasks: 1 })
+    expect(store.getHubTask(running.id)).toMatchObject({ status: 'failed', error: 'restart interrupted task', revision: 2 })
+    expect(store.getHubTask(running.id).completedAtIso).toBeTruthy()
+    expect(store.getHubTask(queued.id)).toMatchObject({ status: 'queued', revision: 0 })
     store.close()
   })
 
@@ -482,7 +528,7 @@ describe('HubStore invariants', () => {
     expect(store.listMessageLogs({ query: '01a0-test-thread' })).toMatchObject({ total: 1, items: [{ id: log.id }] })
     const interruptedMessage = { ...message, eventId: 'event-interrupted', messageId: 'message-interrupted' }
     const interrupted = store.createMessageLog(bot.id, route, interruptedMessage)
-    expect(store.recoverInterruptedWork()).toEqual({ jobs: 0, messages: 1 })
+    expect(store.recoverInterruptedWork()).toEqual({ jobs: 0, messages: 1, tasks: 0 })
     expect(store.getMessageLog(interrupted.id)).toMatchObject({ status: 'failed', error: '服务在任务完成前重启，执行已中断' })
     expect(store.getMessageLog(interrupted.id).completedAt).not.toBe('')
     expect(store.stats()).toMatchObject({

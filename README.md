@@ -45,6 +45,8 @@ CodyBotHub 是一个独立的飞书 Bot 管理平台。它以工作区为运行�
 - 工具包按原 Thread Channel 串行执行，真实结果会自动续写原 Codex Thread，再由 Agent 输出最终说明
 - 全局“平台 Copilot”复用 CodyWebCore，为每个管理员和工作区保存独立 Codex Thread，可查询平台配置、检索飞书员工 Open ID、生成托管脚本和 Bot 操作人变更草稿
 - Copilot 默认运行在只读沙箱；脚本与配置修改只生成可审查草稿，管理员在页面确认后才会落库，并完整记录操作审计
+- 飞书消息和 MCP 调用统一投影为持久 Task；飞书继续使用原有流式卡片展示过程，Task 状态用于幂等、恢复和跨入口查询
+- 提供 Bearer 认证的 Streamable HTTP MCP 端点，可从 OpenDot 等客户端提交只读 Bot 任务并查询结果
 
 完整的数据流、匹配规则和线程规则见 [docs/architecture.md](docs/architecture.md)。
 
@@ -105,6 +107,31 @@ Copilot 不能直接编辑数据库、工作区文件或平台配置。查询走
 
 所有调用可在“工具包”的最近执行区域查看，包括执行 ID、状态、确认人、Codex Thread、结果和错误。已有的老 Thread 不包含新注册的动态工具定义；当它首次命中带工具包的场景时，平台会自动创建具备最新工具契约的新 Codex Thread，并把同一 Thread Channel 最近的已完成对话作为迁移上下文，用户无需手工清理绑定或重建话题。
 
+## MCP 与统一 Task
+
+服务在 `/mcp` 暴露 Streamable HTTP MCP。配置 `CODY_BOT_HUB_MCP_TOKEN` 后可使用四个工具：
+
+- `inspect_platform`：以已完成 Task 返回可用 Bot、场景和能力边界。
+- `submit_agent_task`：向指定 Bot 提交持久化只读任务；可传 `sceneId` 精确选择能力，也可省略后使用原有场景匹配；可立即返回 `task.id`，也可通过 `waitMs` 最多等待 25 秒。
+- `get_task`：读取 Task 最新快照。
+- `wait_task`：长轮询等待 Task 完成，单次最多 25 秒。
+
+所有入口共用 `queued → running → completed/failed` 生命周期。飞书的卡片仍约每 450ms 更新以保持顺滑，SQLite 中的 Task 进度约每 2 秒落盘并在终态强制保存，因此流式体验不会被数据库写入频率拖慢。
+
+MCP Agent Task 强制使用只读沙箱，并移除当前场景的 Tool Package 动态调用。MCP 会话只在相同 principal/session 内续接，不参与飞书的跨会话智能 Thread 复用，避免不同入口之间泄漏历史上下文。需要写配置、发起 RPC 或执行其他外部副作用时，Agent 会提示改走飞书的确认卡片流程；MCP 工具不会把有副作用的操作错误标记成 `readOnlyHint`。
+
+OpenDot 配置示例：
+
+```toml
+[mcp_servers.codybothub]
+url = "https://<可被数字员工访问的域名>/mcp"
+bearer_token_env_var = "CODYBOTHUB_MCP_TOKEN"
+```
+
+数字员工运行环境中的 `CODYBOTHUB_MCP_TOKEN` 与服务端的 `CODY_BOT_HUB_MCP_TOKEN` 使用同一秘密值。不要把 Token 写入仓库或 TOML；远端数字员工也不能访问本机 `127.0.0.1`，必须通过受控的内网域名或代理暴露该端点。
+
+OpenDot 本地调试时，自定义 MCP Token 应写入不会发布的 `.env`；实测 v0.18 的 Executor 不会从 `.env.dev` 透传这个自定义变量。OpenDot 发布会过滤 `.env*`，因此线上实例必须由运行平台注入同名 Secret，或在 CodyBotHub 前增加能校验实例身份的受控网关。若当前平台不支持这两种方式，不应把长期 Token 明文写入 `config.toml` 来绕过限制。
+
 ## 开发
 
 要求 Node.js 22.16+ 与 pnpm 11.7+。
@@ -124,6 +151,8 @@ pnpm dev
 - `CODY_BOT_HUB_WEB_DIST`：生产环境静态资源目录
 - `CODY_BOT_HUB_CODEX_COMMAND`：Codex CLI 可执行文件；macOS 会自动尝试 ChatGPT.app 内置的 Codex
 - `CODY_BOT_HUB_TRAEX_COMMAND`：TraeX CLI 可执行文件，默认 `traex`
+- `CODY_BOT_HUB_MCP_TOKEN`：启用 `/mcp` 的 Bearer Token；未设置时 MCP 端点返回 503，飞书与管理端不受影响
+- `CODY_BOT_HUB_MCP_PRINCIPAL`：与上述 Token 绑定的稳定调用方身份，默认 `mcp-client`；客户端请求头不能覆盖该身份
 
 ## Codex 与 TraeX
 
@@ -141,7 +170,7 @@ Linux systemd 模板默认使用 `/home/gouchao/.local/bin/traex`，并将 `~/.l
 
 ## Core 依赖
 
-`@codycodeagent/cody-web-core` 固定到经过验证的 Git Tag，确保不同机器安装到相同的 Feishu 与 Agent 会话底座。Core 提供 Codex/TraeX Runtime Profile、App Server 生命周期、协议归一化与 Session Manager；Hub 负责 Bot 选择、持久路由、队列和管理界面。
+`@codycodeagent/cody-web-core` 固定到经过验证的 Git Tag，确保不同机器安装到相同的 Feishu 与 Agent 会话底座。Core 提供 Codex/TraeX Runtime Profile、App Server 生命周期、协议归一化、Session Manager 与通用 Task 状态机；Hub 负责 Task 持久化、Bot 选择、路由、队列、权限和管理界面。
 
 ## 部署
 
