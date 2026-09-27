@@ -11,8 +11,8 @@ importers:
   apps/server:
     dependencies:
       '@codycodeagent/cody-web-core':
-        specifier: link:../../../CodyWebCore
-        version: link:../../../CodyWebCore
+        specifier: github:CodyCodeAgent/CodyWebCore#v0.40.0
+        version: https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/09fe63df2085d648f50a4261c38751c49513988d(vue@3.5.42(typescript@6.0.3))
       '@larksuiteoapi/node-sdk':
         specifier: ^1.73.2
         version: 1.74.0
@@ -107,6 +107,12 @@ packages:
   '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#42981496d3df9f3fa153b4ef87061a73af731f18':
     resolution: {commit: 42981496d3df9f3fa153b4ef87061a73af731f18, repo: git@github.com:CodyCodeAgent/CodyWebCore.git, type: git}
     version: 0.38.14
+    peerDependencies:
+      vue: ^3.5.0
+
+  '@codycodeagent/cody-web-core@https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/09fe63df2085d648f50a4261c38751c49513988d':
+    resolution: {gitHosted: true, integrity: sha512-eySDA177y4q0OJ0/JfTHnuwo0n42gis1ANfwaXkkr13JXhSUx+Rjha6y3G24/ccGAjlRaKQq/iTssTDRICPD/Q==, tarball: https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/09fe63df2085d648f50a4261c38751c49513988d}
+    version: 0.40.0
     peerDependencies:
       vue: ^3.5.0
 
@@ -1567,6 +1573,22 @@ snapshots:
   '@chevrotain/types@11.1.2': {}
 
   '@codycodeagent/cody-web-core@git+ssh://git@github.com/CodyCodeAgent/CodyWebCore.git#42981496d3df9f3fa153b4ef87061a73af731f18(vue@3.5.42(typescript@6.0.3))':
+    dependencies:
+      '@larksuiteoapi/node-sdk': 1.74.0
+      dompurify: 3.4.15
+      highlight.js: 11.12.0
+      markdown-it: 14.3.2
+      markdown-it-footnote: 4.0.0
+      markdown-it-task-lists: 2.1.1
+      mermaid: 11.17.2
+      vue: 3.5.42(typescript@6.0.3)
+    transitivePeerDependencies:
+      - bufferutil
+      - debug
+      - supports-color
+      - utf-8-validate
+
+  '@codycodeagent/cody-web-core@https://codeload.github.com/CodyCodeAgent/CodyWebCore/tar.gz/09fe63df2085d648f50a4261c38751c49513988d(vue@3.5.42(typescript@6.0.3))':
     dependencies:
       '@larksuiteoapi/node-sdk': 1.74.0
       dompurify: 3.4.15
