@@ -9,6 +9,60 @@ import type { ResolvedRoute } from '../src/types.js'
 afterEach(() => vi.useRealTimers())
 
 describe('Feishu Task streaming projection', () => {
+  it.each(['completed', 'failed', 'notification-failed', 'delivery-failed'] as const)('notifies humans after result delivery: %s', async scenario => {
+    const store = new HubStore(':memory:')
+    try {
+      const workspace = store.createWorkspace({ name: 'Notify workspace', path: '/tmp/codybothub-notify' })
+      const bot = store.createBot({ name: 'Notify Bot', defaultWorkspaceId: workspace.id })
+      const message: ChannelInboundMessage = {
+        provider: 'feishu', accountId: bot.id, eventId: 'notify-event', messageId: 'notify-message',
+        conversation: { id: 'oc_group', scope: 'group' }, sender: { id: 'ou_user', type: 'user' },
+        content: { type: 'text' }, text: 'run', attachments: [], addressedToAgent: true,
+        mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+      }
+      const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+      // Scene selection is independent of answer/notification sequencing.
+      store.claimScenePicker(bot.id, message.conversation.id)
+      const accepted = store.acceptInboundMessage(bot.id, route, message)!
+      const events: Array<{ kind: string; content: string }> = []
+      const provider = {
+        addReaction: vi.fn(async () => 'reaction'), removeReaction: vi.fn(async () => undefined),
+        replyCard: vi.fn(async (_id: string, card: unknown) => {
+          const content = JSON.stringify(card)
+          events.push({ kind: 'reply', content })
+          if (scenario === 'notification-failed' && content.includes('<at')) throw new Error('notification unavailable')
+          if (scenario === 'delivery-failed' && content.includes('处理失败')) throw new Error('delivery unavailable')
+          return `outbound-${events.length}`
+        }),
+        updateCard: vi.fn(async (_id: string, card: unknown) => {
+          events.push({ kind: 'update', content: JSON.stringify(card) })
+          if (scenario === 'delivery-failed') throw new Error('delivery unavailable')
+        }),
+        classifyError: (error: unknown) => ({ message: String(error), retryable: false }),
+      } as unknown as FeishuProvider
+      const runtime = { execute: vi.fn(async () => {
+        if (scenario === 'failed' || scenario === 'delivery-failed') throw new Error('runtime failed')
+        return '最终答案\n'.repeat(6000)
+      }) } as unknown as CodyBotRuntime
+      const manager = new FeishuBotManager(store, {} as never, runtime, '/tmp/codybothub-attachments')
+      const result = await (manager as unknown as {
+        onMessage: (jobId: string, botId: string, provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage, logId: string, reaction: string) => Promise<{ ok: boolean; error: string }>
+      }).onMessage(accepted.job.id, bot.id, provider, route, message, accepted.log.id, '')
+      const mentions = events.filter(event => event.content.includes('<at'))
+      expect(events[0]?.content).not.toContain('<at')
+      if (scenario === 'delivery-failed') {
+        expect(mentions).toHaveLength(0)
+        expect(result.ok).toBe(false)
+      } else {
+        expect(mentions).toHaveLength(1)
+        expect(events.at(-1)).toBe(mentions[0])
+        expect(mentions[0]?.content).toContain(scenario === 'failed' ? '处理失败' : '处理完成')
+        expect(result.ok).toBe(scenario !== 'failed')
+        if (scenario !== 'failed') expect(events.filter(event => event.content.includes('最终答案')).length).toBeGreaterThan(1)
+      }
+    } finally { store.close() }
+  })
+
   it('streams partial output to the card, persists Task progress, and finalizes the same card', async () => {
     vi.useFakeTimers()
     const store = new HubStore(':memory:')
