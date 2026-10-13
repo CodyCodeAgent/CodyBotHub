@@ -31,7 +31,7 @@ describe('Feishu Task streaming projection', () => {
           expect(uuid.length).toBeLessThanOrEqual(50)
           const content = JSON.stringify(card)
           events.push({ kind: 'reply', content })
-          if (scenario === 'notification-failed' && content.includes('<at')) throw new Error('notification unavailable')
+          if (scenario === 'notification-failed' && content.includes('处理完成')) throw new Error('notification unavailable')
           if (scenario === 'delivery-failed' && content.includes('处理失败')) throw new Error('delivery unavailable')
           return `outbound-${events.length}`
         }),
@@ -55,9 +55,10 @@ describe('Feishu Task streaming projection', () => {
         expect(mentions).toHaveLength(0)
         expect(result.ok).toBe(false)
       } else {
-        expect(mentions).toHaveLength(1)
-        expect(events.at(-1)).toBe(mentions[0])
-        expect(mentions[0]?.content).toContain(scenario === 'failed' ? '处理失败' : '处理完成')
+        expect(mentions).toHaveLength(scenario === 'failed' ? 1 : 2)
+        expect(events.at(-1)).toBe(mentions.at(-1))
+        expect(mentions.at(-1)?.content).toContain(scenario === 'failed' ? '处理失败' : '处理完成')
+        if (scenario !== 'failed') expect(mentions[0]?.content).toContain('回复 <at')
         expect(result.ok).toBe(scenario !== 'failed')
         if (scenario !== 'failed') expect(events.filter(event => event.content.includes('最终答案')).length).toBeGreaterThan(1)
       }

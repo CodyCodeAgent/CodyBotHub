@@ -515,6 +515,14 @@ export class FeishuBotManager {
       if (patchTimer) { clearTimeout(patchTimer); patchTimer = null }
       await patchTail
       const cards = feishuMarkdownCards(answerMention ? `${answerMention}\n${text}` : text, { note })
+      if (replyMention.markdown && !replyMention.targetsBot) {
+        // Place the recipient in the final card's metadata footer only. Earlier
+        // pages and streaming updates must not mention the recipient.
+        const body = cards.at(-1)!.body as { elements: unknown[] }
+        body.elements[body.elements.length - 1] = {
+          tag: 'markdown', content: `---\n回复 ${replyMention.markdown}\n${note}`,
+        }
+      }
       if (streamMessageId) {
         await this.retryDelivery(provider, () => provider.updateCard(streamMessageId, cards[0]!))
         for (let index = 1; index < cards.length; index += 1) {
