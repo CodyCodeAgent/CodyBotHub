@@ -9,7 +9,7 @@ import type { ResolvedRoute } from '../src/types.js'
 afterEach(() => vi.useRealTimers())
 
 describe('Feishu Task streaming projection', () => {
-  it.each(['completed', 'failed', 'notification-failed', 'delivery-failed'] as const)('notifies humans after result delivery: %s', async scenario => {
+  it.each(['completed', 'failed', 'delivery-failed'] as const)('mentions humans only in the final result card: %s', async scenario => {
     const store = new HubStore(':memory:')
     try {
       const workspace = store.createWorkspace({ name: 'Notify workspace', path: '/tmp/codybothub-notify' })
@@ -31,7 +31,6 @@ describe('Feishu Task streaming projection', () => {
           expect(uuid.length).toBeLessThanOrEqual(50)
           const content = JSON.stringify(card)
           events.push({ kind: 'reply', content })
-          if (scenario === 'notification-failed' && content.includes('处理完成')) throw new Error('notification unavailable')
           if (scenario === 'delivery-failed' && content.includes('处理失败')) throw new Error('delivery unavailable')
           return `outbound-${events.length}`
         }),
@@ -51,17 +50,12 @@ describe('Feishu Task streaming projection', () => {
       }).onMessage(accepted.job.id, bot.id, provider, route, message, accepted.log.id, '')
       const mentions = events.filter(event => event.content.includes('<at'))
       expect(events[0]?.content).not.toContain('<at')
-      if (scenario === 'delivery-failed') {
-        expect(mentions).toHaveLength(0)
-        expect(result.ok).toBe(false)
-      } else {
-        expect(mentions).toHaveLength(scenario === 'failed' ? 1 : 2)
-        expect(events.at(-1)).toBe(mentions.at(-1))
-        expect(mentions.at(-1)?.content).toContain(scenario === 'failed' ? '处理失败' : '处理完成')
-        if (scenario !== 'failed') expect(mentions[0]?.content).toContain('回复 <at')
-        expect(result.ok).toBe(scenario !== 'failed')
-        if (scenario !== 'failed') expect(events.filter(event => event.content.includes('最终答案')).length).toBeGreaterThan(1)
-      }
+      expect(mentions).toHaveLength(1)
+      expect(events.at(-1)).toBe(mentions[0])
+      expect(mentions[0]?.content).toContain('回复 <at')
+      expect(events.some(event => event.content.includes('请查看上方'))).toBe(false)
+      expect(result.ok).toBe(scenario === 'completed')
+      if (scenario === 'completed') expect(events.filter(event => event.content.includes('最终答案')).length).toBeGreaterThan(1)
     } finally { store.close() }
   })
 

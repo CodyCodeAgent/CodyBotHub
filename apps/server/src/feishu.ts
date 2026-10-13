@@ -446,21 +446,6 @@ export class FeishuBotManager {
     let note = this.responseNote(route)
     const replyMention = await this.replyMention(provider, route, message)
     const answerMention = replyMention.targetsBot ? replyMention.markdown : ''
-    const notifyHuman = async (failed: boolean) => {
-      if (!replyMention.markdown || replyMention.targetsBot) return
-      try {
-        const outboundId = await this.replyCard(provider, message.messageId, feishuTextCard(
-          failed ? '处理失败' : '处理完成',
-          `${replyMention.markdown}\n${failed ? '处理失败，请查看上方错误详情。' : '处理完成，请查看上方完整结果。'}`,
-          { color: failed ? 'red' : 'green' },
-        ), route.replyInTopic, createHash('sha256').update(`${message.eventId}:notification:${failed ? 'failed' : 'completed'}`).digest('hex').slice(0, 40))
-        this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth)
-      } catch (error) {
-        // Notification delivery must not turn an already delivered answer into
-        // a failed execution or trigger a second, contradictory notification.
-        console.warn('[feishu] completion notification failed:', provider.classifyError(error).message)
-      }
-    }
     let streamMessageId = ''
     // A Bot mention must be sent only with the completed answer. Mentioning a
     // peer in the initial streaming placeholder would wake it before this Bot
@@ -536,23 +521,21 @@ export class FeishuBotManager {
         }
       }
       this.store.finishMessageLog(log.id, { responseContent: text })
-      await notifyHuman(false)
       await this.finishReaction(provider, message.messageId, receiptReactionId, 'DONE')
       return { ok: true, error: '' }
     } catch (error) {
       if (patchTimer) clearTimeout(patchTimer)
       await patchTail
       const detail = provider.classifyError(error).message
-      const errorCard = feishuStreamingCard({ state: 'failed', error: answerMention ? `${answerMention}\n${detail}` : detail, note })
+      const errorNote = replyMention.markdown && !replyMention.targetsBot ? `回复 ${replyMention.markdown}\n${note}` : note
+      const errorCard = feishuStreamingCard({ state: 'failed', error: answerMention ? `${answerMention}\n${detail}` : detail, note: errorNote })
       const sendError = streamMessageId
         ? this.retryDelivery(provider, () => provider.updateCard(streamMessageId, errorCard))
         : this.replyCard(provider, message.messageId, errorCard, route.replyInTopic, `${message.eventId}:error`).then(outboundId => { this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth) })
-      const errorDelivered = await sendError.then(() => true, deliveryError => {
+      await sendError.catch(deliveryError => {
         console.error('[feishu] failed to send error card:', deliveryError)
-        return false
       })
       this.store.finishMessageLog(log.id, { responseContent: latestProgress.answer, error: detail })
-      if (errorDelivered) await notifyHuman(true)
       await this.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
       return { ok: false, error: detail }
     }
