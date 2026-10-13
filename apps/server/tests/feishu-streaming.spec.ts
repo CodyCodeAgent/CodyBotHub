@@ -15,7 +15,7 @@ describe('Feishu Task streaming projection', () => {
       const workspace = store.createWorkspace({ name: 'Notify workspace', path: '/tmp/codybothub-notify' })
       const bot = store.createBot({ name: 'Notify Bot', defaultWorkspaceId: workspace.id })
       const message: ChannelInboundMessage = {
-        provider: 'feishu', accountId: bot.id, eventId: 'notify-event', messageId: 'notify-message',
+        provider: 'feishu', accountId: bot.id, eventId: '0123456789abcdef0123456789abcdef', messageId: 'notify-message',
         conversation: { id: 'oc_group', scope: 'group' }, sender: { id: 'ou_user', type: 'user' },
         content: { type: 'text' }, text: 'run', attachments: [], addressedToAgent: true,
         mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
@@ -27,7 +27,8 @@ describe('Feishu Task streaming projection', () => {
       const events: Array<{ kind: string; content: string }> = []
       const provider = {
         addReaction: vi.fn(async () => 'reaction'), removeReaction: vi.fn(async () => undefined),
-        replyCard: vi.fn(async (_id: string, card: unknown) => {
+        replyCard: vi.fn(async (_id: string, card: unknown, _topic: boolean, uuid: string) => {
+          expect(uuid.length).toBeLessThanOrEqual(50)
           const content = JSON.stringify(card)
           events.push({ kind: 'reply', content })
           if (scenario === 'notification-failed' && content.includes('<at')) throw new Error('notification unavailable')

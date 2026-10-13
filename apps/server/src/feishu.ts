@@ -453,7 +453,7 @@ export class FeishuBotManager {
           failed ? '处理失败' : '处理完成',
           `${replyMention.markdown}\n${failed ? '处理失败，请查看上方错误详情。' : '处理完成，请查看上方完整结果。'}`,
           { color: failed ? 'red' : 'green' },
-        ), route.replyInTopic, `${message.eventId}:notification:${failed ? 'failed' : 'completed'}`)
+        ), route.replyInTopic, createHash('sha256').update(`${message.eventId}:notification:${failed ? 'failed' : 'completed'}`).digest('hex').slice(0, 40))
         this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth)
       } catch (error) {
         // Notification delivery must not turn an already delivered answer into
