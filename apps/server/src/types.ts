@@ -124,6 +124,7 @@ export interface ProvisioningJobRecord {
 }
 
 export interface SceneRecord {
+  completionStatisticsEnabled: boolean
   id: string
   botId: string
   workspaceId: string

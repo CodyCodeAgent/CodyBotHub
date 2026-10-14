@@ -7,6 +7,7 @@ import type { HubStore } from './db.js'
 import type { CodyBotRuntime, RuntimeAttachment, RuntimeProgress, RuntimeResolvedModel } from './runtime.js'
 import type { FeishuManagerHealthRecord, ResolvedRoute } from './types.js'
 import { ToolPackageRunner } from './tool-execution.js'
+import { taskStatisticsMarkdown, type TaskTokenUsage } from './task-statistics.js'
 
 type ManagedProvider = { provider: FeishuProvider; fingerprint: string; botName: string; state: string; error: string }
 
@@ -29,6 +30,11 @@ export const shouldAcceptRoutedMessage = (
 }
 
 export type ReplyMentionSelection = { openIds: string[]; targetsBot: boolean }
+
+export const shouldSendTaskStatistics = (route: ResolvedRoute, message: ChannelInboundMessage): boolean => Boolean(
+  route.scene?.completionStatisticsEnabled && message.sender.type === 'user'
+  && message.addressedToAgent && message.mentions?.some(mention => mention.isAgent)
+)
 
 const senderOpenId = (message: ChannelInboundMessage): string => (
   message.sender.idType === 'open_id' || (!message.sender.idType && message.sender.id.startsWith('ou_'))
@@ -436,6 +442,8 @@ export class FeishuBotManager {
   }
 
   private async onMessage(jobId: string, botId: string, provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage, logId: string, existingReceiptReactionId: string): Promise<{ ok: boolean; error: string }> {
+    let processingStartedAt = Date.now()
+    let tokenUsage: TaskTokenUsage | null = null
     const log = this.store.getMessageLog(logId)
     let receiptReactionId = existingReceiptReactionId
     if (!receiptReactionId) {
@@ -496,6 +504,12 @@ export class FeishuBotManager {
         trace => this.store.setMessageLogInvestigation(log.id, trace),
         threadId => this.store.setMessageLogThread(log.id, threadId),
         log.id,
+        true,
+        'default',
+        statistics => {
+          tokenUsage = statistics.tokenUsage
+          if (statistics.startedAt !== null) processingStartedAt = statistics.startedAt
+        },
       )
       if (patchTimer) { clearTimeout(patchTimer); patchTimer = null }
       await patchTail
@@ -521,6 +535,17 @@ export class FeishuBotManager {
         }
       }
       this.store.finishMessageLog(log.id, { responseContent: text })
+      const statisticsMention = shouldSendTaskStatistics(route, message) ? feishuCardMention(senderOpenId(message)) : ''
+      if (statisticsMention) {
+        try {
+          const statisticsCard = feishuTextCard('处理完成 · 任务统计', taskStatisticsMarkdown(statisticsMention, Date.now() - processingStartedAt, message.text, text, tokenUsage), { color: 'green' })
+          const uuid = createHash('sha256').update(`${botId}:${message.eventId}:statistics`).digest('hex').slice(0, 40)
+          const outboundId = await this.replyCard(provider, message.messageId, statisticsCard, route.replyInTopic, uuid)
+          this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth)
+        } catch (error) {
+          console.warn('[feishu] task statistics notification failed:', provider.classifyError(error).message)
+        }
+      }
       await this.finishReaction(provider, message.messageId, receiptReactionId, 'DONE')
       return { ok: true, error: '' }
     } catch (error) {

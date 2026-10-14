@@ -5,6 +5,7 @@ import type { CodexEvent } from '@codycodeagent/cody-web-core/conversation'
 import { createRuntimeAppServerHost, type AppServerHost } from '@codycodeagent/cody-web-core/runtime'
 import { buildTurnUserInput, CodexSessionManager, type CodexModelOption, type CodexSkillOption, type DynamicToolProvider, type ExecutionContext, type ExecutionPolicyProvider, type ThreadBinding, type TurnInput, type TurnInputSkill, type TurnOutcome } from '@codycodeagent/cody-web-core/session'
 import type { HubStore } from './db.js'
+import { TaskTokenUsageTracker, threadTokenCounters, type TaskTokenUsage } from './task-statistics.js'
 import { readSkillSearchTags, relevance, WorkspaceResourceIndex, type KnowledgeResource } from './resources.js'
 import type { AgentRuntimeKind, InvestigationSkillRecord, InvestigationTraceRecord, InvestigationToolRecord, ModelConfigSource, ResolvedModelConfig, ResolvedRoute, ToolPackageRecord } from './types.js'
 
@@ -19,6 +20,11 @@ export type RuntimeProgress = {
   phase: 'thinking' | 'answering'
   reasoning: string
   answer: string
+}
+
+export type RuntimeTaskStatistics = {
+  tokenUsage: TaskTokenUsage | null
+  startedAt: number | null
 }
 
 export type RuntimeResolvedModel = {
@@ -68,6 +74,7 @@ type EngineState = {
   manager: CodexSessionManager
   attached: Set<string>
   attaching: Map<string, Promise<void>>
+  tokenTotals: Map<string, TaskTokenUsage>
 }
 
 export const resolveRuntimeModel = (requested: ResolvedModelConfig, models: CodexModelOption[], configuredModel = '', configuredEffort = '', runtimeDefaultSource: ModelConfigSource = 'codex'): RuntimeResolvedModel => {
@@ -195,7 +202,7 @@ export class CodyBotRuntime {
     }
   }
 
-  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true, executionMode: 'default' | 'read_only' = 'default'): Promise<string> {
+  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true, executionMode: 'default' | 'read_only' = 'default', onTaskStatistics?: (statistics: RuntimeTaskStatistics) => void): Promise<string> {
     const channel = this.store.getThreadChannel(route.threadChannelId)
     if (channel.runtimeKind !== route.bot.runtimeKind) throw new Error(`Thread Channel runtime mismatch: ${channel.runtimeKind} != ${route.bot.runtimeKind}`)
     const engine = await this.ensureEngine(route.bot.runtimeKind)
@@ -251,16 +258,30 @@ export class CodyBotRuntime {
       }
     }
     const unsubscribe = manager.subscribe(applyProgress)
+    let tokenTracker: TaskTokenUsageTracker | null = null
+    let startedAt: number | null = null
+    const unsubscribeTokens = engine.host.subscribe(notification => {
+      if (notification.method !== 'thread/tokenUsage/updated') return
+      const counters = threadTokenCounters(notification.params)
+      if (!counters || !turnId || counters.threadId !== activeThreadId || counters.turnId !== turnId) return
+      tokenTracker?.update(counters.total, counters.last)
+    })
     if (sourceLogId) this.activeToolContexts.set(channel.id, { sourceLogId, invocationAllowed: toolInvocationAllowed })
     try {
       const submission = manager.submit(channel.id, turn, 'queue', channelCommandId(message))
       turnId = (await submission.started).turnId
+      startedAt = Date.now()
+      // Capture the baseline at native admission, after any earlier queued
+      // turn finishes, so another task's tokens cannot enter this task.
+      tokenTracker = new TaskTokenUsageTracker(engine.tokenTotals.get(activeThreadId) ?? null)
       const outcome = await this.waitForCompletion(manager, channel.id, submission.completed, route.bot.runtimeKind)
       if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || `${route.bot.runtimeKind === 'traex' ? 'TraeX' : 'Codex'} Turn failed`))
       return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
     } finally {
+      unsubscribeTokens()
       unsubscribe()
       if (this.activeToolContexts.get(channel.id)?.sourceLogId === sourceLogId) this.activeToolContexts.delete(channel.id)
+      onTaskStatistics?.({ tokenUsage: tokenTracker?.result() ?? null, startedAt })
     }
   }
 
@@ -367,7 +388,12 @@ export class CodyBotRuntime {
       return { contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: result.status !== 'failed' }
     } }
     const manager = new CodexSessionManager({ host, policy, dynamicTools })
-    const state: EngineState = { kind, host, manager, attached: new Set(), attaching: new Map() }
+    const state: EngineState = { kind, host, manager, attached: new Set(), attaching: new Map(), tokenTotals: new Map() }
+    host.subscribe(notification => {
+      if (notification.method !== 'thread/tokenUsage/updated') return
+      const counters = threadTokenCounters(notification.params)
+      if (counters) state.tokenTotals.set(counters.threadId, counters.total)
+    })
     this.engines.set(kind, state)
     try {
       await host.ensureInitialized()

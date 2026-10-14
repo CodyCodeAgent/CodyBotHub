@@ -3,12 +3,69 @@ import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel
 import type { FeishuProvider } from '@codycodeagent/cody-web-core/feishu'
 import { HubStore } from '../src/db.js'
 import { FeishuBotManager } from '../src/feishu.js'
-import type { CodyBotRuntime, RuntimeProgress } from '../src/runtime.js'
+import type { CodyBotRuntime, RuntimeProgress, RuntimeTaskStatistics } from '../src/runtime.js'
 import type { ResolvedRoute } from '../src/types.js'
 
 afterEach(() => vi.useRealTimers())
 
 describe('Feishu Task streaming projection', () => {
+  it.each(['explicit', 'flat-group', 'disabled', 'automatic', 'private-no-mention', 'no-scene', 'other-bot', 'bot-sender', 'missing-usage', 'notify-failed', 'runtime-failed', 'result-delivery-failed'] as const)('sends optional scene statistics only after full delivery: %s', async scenario => {
+    const store = new HubStore(':memory:')
+    try {
+      const workspace = store.createWorkspace({ name: 'Statistics workspace', path: '/tmp/statistics-workspace' })
+      const bot = store.createBot({ name: 'Statistics Bot', defaultWorkspaceId: workspace.id, conversationMode: 'topic' })
+      if (scenario !== 'no-scene') store.createScene({ botId: bot.id, workspaceId: workspace.id, name: 'Statistics scene', prompt: '', priority: 100, enabled: true, completionStatisticsEnabled: scenario !== 'disabled', matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
+      const message: ChannelInboundMessage = {
+        provider: 'feishu', accountId: bot.id, eventId: '0123456789abcdef0123456789abcdef', messageId: 'stats-message',
+        conversation: { id: 'oc_stats', scope: scenario === 'private-no-mention' ? 'private' : scenario === 'flat-group' ? 'group' : 'topic', ...(scenario === 'flat-group' || scenario === 'private-no-mention' ? {} : { rootId: 'topic-root' }) }, sender: { id: 'ou_actor', type: scenario === 'bot-sender' ? 'app' : 'user' },
+        content: { type: 'text' }, text: '你好🙂', attachments: [], addressedToAgent: scenario !== 'automatic',
+        mentions: scenario === 'automatic' || scenario === 'private-no-mention' ? [] : [{ id: 'ou_bot', idType: 'open_id', type: 'app', isAgent: scenario !== 'other-bot' }],
+        mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+      }
+      const route = store.resolveThreadRouting(store.resolveRoute(bot.id, message), message)
+      store.claimScenePicker(bot.id, message.conversation.id)
+      const accepted = store.acceptInboundMessage(bot.id, route, message)!
+      const delivered: string[] = []
+      const provider = {
+        addReaction: vi.fn(async () => 'reaction'), removeReaction: vi.fn(async () => undefined),
+        updateCard: vi.fn(async (_id: string, card: unknown) => { delivered.push(JSON.stringify(card)) }),
+        replyCard: vi.fn(async (_id: string, card: unknown, topic: boolean, uuid: string) => {
+          expect(topic).toBe(route.replyInTopic)
+          expect(uuid.length).toBeLessThanOrEqual(50)
+          const content = JSON.stringify(card)
+          delivered.push(content)
+          if (scenario === 'result-delivery-failed' && content.includes('最终回复')) throw new Error('answer delivery failure')
+          if (scenario === 'notify-failed' && content.includes('任务统计')) throw new Error('notification failure')
+          return `message-${delivered.length}`
+        }),
+        classifyError: (error: unknown) => ({ message: String(error), retryable: false }),
+      } as unknown as FeishuProvider
+      const answer = '最终回复\n'.repeat(6000)
+      const runtime = { execute: vi.fn(async (...args: unknown[]) => {
+        if (scenario === 'runtime-failed') throw new Error('runtime failure')
+        const callback = args[10] as (value: RuntimeTaskStatistics) => void
+        callback({ startedAt: Date.now(), tokenUsage: scenario === 'missing-usage' ? null : { inputTokens: 2000, outputTokens: 300, totalTokens: 2300 } })
+        return answer
+      }) } as unknown as CodyBotRuntime
+      const manager = new FeishuBotManager(store, {} as never, runtime, '/tmp/statistics-attachments')
+      const result = await (manager as unknown as {
+        onMessage: (jobId: string, botId: string, provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage, logId: string, reaction: string) => Promise<{ ok: boolean; error: string }>
+      }).onMessage(accepted.job.id, bot.id, provider, route, message, accepted.log.id, 'reaction')
+      const statistics = delivered.filter(card => card.includes('任务统计'))
+      const expected = ['explicit', 'flat-group', 'missing-usage', 'notify-failed'].includes(scenario)
+      expect(statistics).toHaveLength(expected ? 1 : 0)
+      expect(result.ok).toBe(scenario !== 'runtime-failed' && scenario !== 'result-delivery-failed')
+      if (expected) {
+        expect(delivered.at(-1)).toBe(statistics[0])
+        expect(statistics[0]).toContain('<at id=ou_actor>')
+        expect(statistics[0]).toContain('输入字符**：3')
+        expect(statistics[0]).toContain('输出字符**：30,000')
+        expect(statistics[0]).toContain(scenario === 'missing-usage' ? '暂无数据' : '合计 2,300')
+        expect(delivered.slice(0, -1).filter(card => card.includes('最终回复')).length).toBeGreaterThan(1)
+      }
+    } finally { store.close() }
+  })
+
   it.each(['completed', 'failed', 'delivery-failed'] as const)('mentions humans only in the final result card: %s', async scenario => {
     const store = new HubStore(':memory:')
     try {
