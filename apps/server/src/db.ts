@@ -8,7 +8,8 @@ import { createTaskSnapshot, transitionTask, type TaskEvent } from '@codycodeage
 import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
 type Row = Record<string, unknown>
-type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'model' | 'reasoningEffort' | 'retrieval' | 'completionStatisticsEnabled' | 'requireMention'> & {
+type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'model' | 'reasoningEffort' | 'retrieval' | 'completionStatisticsEnabled' | 'requireMention' | 'turnTimeoutMinutes'> & {
+  turnTimeoutMinutes?: number
   requireMention?: boolean
   completionStatisticsEnabled?: boolean
   model?: string
@@ -18,6 +19,9 @@ type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'mod
 }
 type ToolWriteInput = Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt' | 'rpcConfig' | 'scriptLanguage' | 'scriptContent' | 'scriptVersion'> & Partial<Pick<ToolRecord, 'rpcConfig' | 'scriptLanguage' | 'scriptContent' | 'scriptVersion'>>
 const now = () => new Date().toISOString()
+const validateSceneTimeout = (value?: number) => {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 1 || value > 35791)) throw new Error('任务超时必须为 1–35791 分钟的整数')
+}
 const list = (value: unknown): string[] => {
   try { return JSON.parse(String(value)) as string[] } catch { return [] }
 }
@@ -587,6 +591,7 @@ export class HubStore {
     if (!settingsColumns.some(column => String(column.name) === 'thread_profile_refresh_interval_seconds')) this.db.exec('ALTER TABLE platform_settings ADD COLUMN thread_profile_refresh_interval_seconds INTEGER NOT NULL DEFAULT 5')
     if (!settingsColumns.some(column => String(column.name) === 'thread_profile_batch_size')) this.db.exec('ALTER TABLE platform_settings ADD COLUMN thread_profile_batch_size INTEGER NOT NULL DEFAULT 20')
     const sceneColumns = this.db.prepare('PRAGMA table_info(scenes)').all() as Row[]
+    if (!sceneColumns.some(column => String(column.name) === 'turn_timeout_minutes')) this.db.exec('ALTER TABLE scenes ADD COLUMN turn_timeout_minutes INTEGER NOT NULL DEFAULT 15')
     // Existing alert Scenes retain automatic handling; newly created Scenes
     // require an explicit mention unless the operator opts into auto-replies.
     if (!sceneColumns.some(column => String(column.name) === 'require_mention')) this.db.exec('ALTER TABLE scenes ADD COLUMN require_mention INTEGER NOT NULL DEFAULT 0')
@@ -1019,6 +1024,7 @@ export class HubStore {
     return (this.db.prepare('SELECT * FROM scenes ORDER BY priority ASC, name COLLATE NOCASE').all() as Row[]).map(row => this.scene(row))
   }
   createScene(input: SceneWriteInput): SceneRecord & { skillPackageIds: string[] } {
+    validateSceneTimeout(input.turnTimeoutMinutes)
     this.assertBotWorkspace(input.botId, input.workspaceId)
     this.assertScenePackages(input.workspaceId, input.skillPackageIds ?? [])
     const id = randomUUID(), timestamp = now()
@@ -1029,11 +1035,13 @@ export class HubStore {
       this.setScenePackages(id, input.skillPackageIds ?? [])
       this.db.prepare('UPDATE scenes SET completion_statistics_enabled = ? WHERE id = ?').run(input.completionStatisticsEnabled ? 1 : 0, id)
       this.db.prepare('UPDATE scenes SET require_mention = ? WHERE id = ?').run(input.requireMention === false ? 0 : 1, id)
+      this.db.prepare('UPDATE scenes SET turn_timeout_minutes = ? WHERE id = ?').run(input.turnTimeoutMinutes ?? 15, id)
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getScene(id)
   }
   updateScene(id: string, input: SceneWriteInput): SceneRecord & { skillPackageIds: string[] } {
+    validateSceneTimeout(input.turnTimeoutMinutes)
     this.assertBotWorkspace(input.botId, input.workspaceId)
     this.assertScenePackages(input.workspaceId, input.skillPackageIds ?? [])
     this.db.exec('BEGIN IMMEDIATE')
@@ -1045,6 +1053,7 @@ export class HubStore {
       this.setScenePackages(id, input.skillPackageIds ?? [])
       this.db.prepare('UPDATE scenes SET completion_statistics_enabled = ? WHERE id = ?').run(input.completionStatisticsEnabled === undefined ? (this.getScene(id).completionStatisticsEnabled ? 1 : 0) : input.completionStatisticsEnabled ? 1 : 0, id)
       if (input.requireMention !== undefined) this.db.prepare('UPDATE scenes SET require_mention = ? WHERE id = ?').run(input.requireMention ? 1 : 0, id)
+      if (input.turnTimeoutMinutes !== undefined) this.db.prepare('UPDATE scenes SET turn_timeout_minutes = ? WHERE id = ?').run(input.turnTimeoutMinutes, id)
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getScene(id)
@@ -1060,7 +1069,7 @@ export class HubStore {
     let retrieval: Partial<SceneRecord['retrieval']> = {}
     try { retrieval = JSON.parse(String(row.retrieval_config_json)) as Partial<SceneRecord['retrieval']> } catch { /* use defaults */ }
     const skillPackageIds = (this.db.prepare('SELECT skill_package_id FROM scene_skill_packages WHERE scene_id = ? ORDER BY position').all(String(row.id)) as Row[]).map(item => String(item.skill_package_id))
-    return { requireMention: Boolean(row.require_mention), completionStatisticsEnabled: Boolean(row.completion_statistics_enabled), id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), model: String(row.model), reasoningEffort: String(row.reasoning_effort), retrieval: this.normalizeRetrieval(retrieval), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { turnTimeoutMinutes: Number(row.turn_timeout_minutes), requireMention: Boolean(row.require_mention), completionStatisticsEnabled: Boolean(row.completion_statistics_enabled), id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), model: String(row.model), reasoningEffort: String(row.reasoning_effort), retrieval: this.normalizeRetrieval(retrieval), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
   }
   private normalizeRetrieval(value?: Partial<SceneRecord['retrieval']>): SceneRecord['retrieval'] {
     const skillBoosts = Array.isArray(value?.skillBoosts) ? value.skillBoosts

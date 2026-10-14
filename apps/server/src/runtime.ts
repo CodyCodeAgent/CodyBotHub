@@ -274,7 +274,7 @@ export class CodyBotRuntime {
       // Capture the baseline at native admission, after any earlier queued
       // turn finishes, so another task's tokens cannot enter this task.
       tokenTracker = new TaskTokenUsageTracker(engine.tokenTotals.get(activeThreadId) ?? null)
-      const outcome = await this.waitForCompletion(manager, channel.id, submission.completed, route.bot.runtimeKind)
+      const outcome = await this.waitForCompletion(manager, channel.id, submission.completed, route.bot.runtimeKind, route.scene?.turnTimeoutMinutes)
       if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || `${route.bot.runtimeKind === 'traex' ? 'TraeX' : 'Codex'} Turn failed`))
       return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
     } finally {
@@ -285,8 +285,8 @@ export class CodyBotRuntime {
     }
   }
 
-  private waitForCompletion(manager: CodexSessionManager, bindingId: string, completed: Promise<TurnOutcome>, kind: AgentRuntimeKind): Promise<TurnOutcome> {
-    const timeoutMs = Number.isFinite(this.turnTimeoutMs) && this.turnTimeoutMs > 0 ? this.turnTimeoutMs : 15 * 60 * 1000
+  private waitForCompletion(manager: CodexSessionManager, bindingId: string, completed: Promise<TurnOutcome>, kind: AgentRuntimeKind, sceneTimeoutMinutes?: number): Promise<TurnOutcome> {
+    const timeoutMs = Number.isSafeInteger(sceneTimeoutMinutes) && sceneTimeoutMinutes! > 0 ? sceneTimeoutMinutes! * 60_000 : Number.isFinite(this.turnTimeoutMs) && this.turnTimeoutMs > 0 ? this.turnTimeoutMs : 15 * 60 * 1000
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         void manager.interrupt(bindingId).catch(error => console.warn('[runtime] failed to interrupt timed out turn:', error))

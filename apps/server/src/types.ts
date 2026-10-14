@@ -125,6 +125,7 @@ export interface ProvisioningJobRecord {
 
 export interface SceneRecord {
   requireMention: boolean
+  turnTimeoutMinutes: number
   completionStatisticsEnabled: boolean
   id: string
   botId: string

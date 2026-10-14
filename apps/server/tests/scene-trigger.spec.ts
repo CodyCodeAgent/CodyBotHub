@@ -41,13 +41,16 @@ describe('Scene mention-only configuration', () => {
       const input = { botId: bot.id, workspaceId: workspace.id, name: 'Legacy automatic Scene', prompt: '', priority: 100, enabled: true, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } }
       const scene = store.createScene({ ...input, requireMention: false })
       store.db.exec('ALTER TABLE scenes DROP COLUMN require_mention')
+      store.db.exec('ALTER TABLE scenes DROP COLUMN turn_timeout_minutes')
       store.close()
       store = new HubStore(dbPath)
       expect(store.listScenes()[0]?.requireMention).toBe(false)
-      store.updateScene(scene.id, { ...input, requireMention: true })
+      expect(store.listScenes()[0]?.turnTimeoutMinutes).toBe(15)
+      store.updateScene(scene.id, { ...input, requireMention: true, turnTimeoutMinutes: 60 })
       store.close()
       store = new HubStore(dbPath)
       expect(store.listScenes()[0]?.requireMention).toBe(true)
+      expect(store.listScenes()[0]?.turnTimeoutMinutes).toBe(60)
       expect(store.createScene({ ...input, name: 'New Scene' }).requireMention).toBe(true)
     } finally { store.close(); rmSync(root, { recursive: true, force: true }) }
   })
