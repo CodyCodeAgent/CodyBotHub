@@ -13,9 +13,10 @@ type ManagedProvider = { provider: FeishuProvider; fingerprint: string; botName:
 
 export const shouldAcceptRoutedMessage = (
   message: ChannelInboundMessage,
-  options: { hasScene: boolean; independentlyMatches: boolean; ownSender: boolean; botMessagePolicy?: ResolvedRoute['bot']['botMessagePolicy']; botSourceAllowlist?: string[]; botReplyDepth?: number; maxBotReplyDepth?: number },
+  options: { hasScene: boolean; independentlyMatches: boolean; ownSender: boolean; requireMention?: boolean; botMessagePolicy?: ResolvedRoute['bot']['botMessagePolicy']; botSourceAllowlist?: string[]; botReplyDepth?: number; maxBotReplyDepth?: number },
 ): boolean => {
   if (options.ownSender) return false
+  if (message.conversation.scope !== 'private' && options.requireMention && !message.addressedToAgent) return false
   if (message.sender.type !== 'user') {
     const policy = options.botMessagePolicy ?? 'mentioned_or_scene'
     if (policy === 'reject') return false
@@ -360,6 +361,7 @@ export class FeishuBotManager {
     const independentlyMatches = baseRoute.scene ? this.store.messageMatchesScene(baseRoute.scene.id, message) : false
     if (!shouldAcceptRoutedMessage(message, {
       hasScene: Boolean(baseRoute.scene),
+      requireMention: baseRoute.scene?.requireMention ?? true,
       independentlyMatches,
       ownSender: provider.isOwnSenderId(message.sender.id),
       botMessagePolicy: baseRoute.bot.botMessagePolicy,

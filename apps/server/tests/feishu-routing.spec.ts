@@ -13,6 +13,16 @@ const message = (input: Partial<ChannelInboundMessage> = {}): ChannelInboundMess
 })
 
 describe('Feishu group message trigger policy', () => {
+  it.each(['group', 'topic'] as const)('requires an explicit mention before matching a %s Scene', scope => {
+    const options = { hasScene: true, independentlyMatches: true, ownSender: false, requireMention: true }
+    expect(shouldAcceptRoutedMessage(message({ conversation: { id: 'chat', scope } }), options)).toBe(false)
+    expect(shouldAcceptRoutedMessage(message({ conversation: { id: 'chat', scope }, addressedToAgent: true }), options)).toBe(true)
+    expect(shouldAcceptRoutedMessage(message({ conversation: { id: 'chat', scope } }), { ...options, requireMention: false })).toBe(true)
+    expect(shouldAcceptRoutedMessage(message({ conversation: { id: 'chat', scope }, sender: { id: 'ou_other_bot', type: 'app' } }), { ...options, botMessagePolicy: 'mentioned_or_scene' })).toBe(false)
+  })
+  it('keeps private chat available even when the Scene requires mentions', () => {
+    expect(shouldAcceptRoutedMessage(message({ conversation: { id: 'private', scope: 'private' } }), { hasScene: true, independentlyMatches: true, ownSender: false, requireMention: true })).toBe(true)
+  })
   it('ignores ordinary group chat even when the group is bound to a Scene', () => {
     expect(shouldAcceptRoutedMessage(message(), {
       hasScene: true, independentlyMatches: false, ownSender: false,

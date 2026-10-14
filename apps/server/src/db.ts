@@ -8,7 +8,8 @@ import { createTaskSnapshot, transitionTask, type TaskEvent } from '@codycodeage
 import { extractThreadFeatures, scoreThreadSimilarity } from './thread-routing.js'
 
 type Row = Record<string, unknown>
-type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'model' | 'reasoningEffort' | 'retrieval' | 'completionStatisticsEnabled'> & {
+type SceneWriteInput = Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'model' | 'reasoningEffort' | 'retrieval' | 'completionStatisticsEnabled' | 'requireMention'> & {
+  requireMention?: boolean
   completionStatisticsEnabled?: boolean
   model?: string
   reasoningEffort?: string
@@ -586,6 +587,9 @@ export class HubStore {
     if (!settingsColumns.some(column => String(column.name) === 'thread_profile_refresh_interval_seconds')) this.db.exec('ALTER TABLE platform_settings ADD COLUMN thread_profile_refresh_interval_seconds INTEGER NOT NULL DEFAULT 5')
     if (!settingsColumns.some(column => String(column.name) === 'thread_profile_batch_size')) this.db.exec('ALTER TABLE platform_settings ADD COLUMN thread_profile_batch_size INTEGER NOT NULL DEFAULT 20')
     const sceneColumns = this.db.prepare('PRAGMA table_info(scenes)').all() as Row[]
+    // Existing alert Scenes retain automatic handling; newly created Scenes
+    // require an explicit mention unless the operator opts into auto-replies.
+    if (!sceneColumns.some(column => String(column.name) === 'require_mention')) this.db.exec('ALTER TABLE scenes ADD COLUMN require_mention INTEGER NOT NULL DEFAULT 0')
     if (!sceneColumns.some(column => String(column.name) === 'completion_statistics_enabled')) this.db.exec('ALTER TABLE scenes ADD COLUMN completion_statistics_enabled INTEGER NOT NULL DEFAULT 0')
     if (!sceneColumns.some(column => String(column.name) === 'model')) this.db.exec("ALTER TABLE scenes ADD COLUMN model TEXT NOT NULL DEFAULT ''")
     if (!sceneColumns.some(column => String(column.name) === 'reasoning_effort')) this.db.exec("ALTER TABLE scenes ADD COLUMN reasoning_effort TEXT NOT NULL DEFAULT ''")
@@ -1024,6 +1028,7 @@ export class HubStore {
         .run(id, input.botId, input.workspaceId, input.name, input.prompt, input.priority, input.enabled ? 1 : 0, input.model ?? '', input.reasoningEffort ?? '', JSON.stringify(this.normalizeRetrieval(input.retrieval)), JSON.stringify(input.matcher), timestamp, timestamp)
       this.setScenePackages(id, input.skillPackageIds ?? [])
       this.db.prepare('UPDATE scenes SET completion_statistics_enabled = ? WHERE id = ?').run(input.completionStatisticsEnabled ? 1 : 0, id)
+      this.db.prepare('UPDATE scenes SET require_mention = ? WHERE id = ?').run(input.requireMention === false ? 0 : 1, id)
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getScene(id)
@@ -1039,6 +1044,7 @@ export class HubStore {
       this.db.prepare('DELETE FROM scene_skill_packages WHERE scene_id = ?').run(id)
       this.setScenePackages(id, input.skillPackageIds ?? [])
       this.db.prepare('UPDATE scenes SET completion_statistics_enabled = ? WHERE id = ?').run(input.completionStatisticsEnabled === undefined ? (this.getScene(id).completionStatisticsEnabled ? 1 : 0) : input.completionStatisticsEnabled ? 1 : 0, id)
+      if (input.requireMention !== undefined) this.db.prepare('UPDATE scenes SET require_mention = ? WHERE id = ?').run(input.requireMention ? 1 : 0, id)
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getScene(id)
@@ -1054,7 +1060,7 @@ export class HubStore {
     let retrieval: Partial<SceneRecord['retrieval']> = {}
     try { retrieval = JSON.parse(String(row.retrieval_config_json)) as Partial<SceneRecord['retrieval']> } catch { /* use defaults */ }
     const skillPackageIds = (this.db.prepare('SELECT skill_package_id FROM scene_skill_packages WHERE scene_id = ? ORDER BY position').all(String(row.id)) as Row[]).map(item => String(item.skill_package_id))
-    return { completionStatisticsEnabled: Boolean(row.completion_statistics_enabled), id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), model: String(row.model), reasoningEffort: String(row.reasoning_effort), retrieval: this.normalizeRetrieval(retrieval), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { requireMention: Boolean(row.require_mention), completionStatisticsEnabled: Boolean(row.completion_statistics_enabled), id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), model: String(row.model), reasoningEffort: String(row.reasoning_effort), retrieval: this.normalizeRetrieval(retrieval), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
   }
   private normalizeRetrieval(value?: Partial<SceneRecord['retrieval']>): SceneRecord['retrieval'] {
     const skillBoosts = Array.isArray(value?.skillBoosts) ? value.skillBoosts
