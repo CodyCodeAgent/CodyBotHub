@@ -1,4 +1,4 @@
-import type { AdminAccount, AgentRuntimeKind, AuditLog, Bot, ChatMetadata, ConversationThread, CopilotProposal, CopilotState, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, SystemHealth, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Tool, ToolPackage, ToolPackageExecution, ToolScriptVersion, Workspace, WorkspaceResources } from './types'
+import type { AdminAccount, AgentRuntimeKind, AuditLog, Bot, ChatMetadata, ConversationThread, CopilotProposal, CopilotState, DashboardDimensions, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, SystemHealth, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Tool, ToolPackage, ToolPackageExecution, ToolScriptVersion, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
 export interface SkillOption { name: string; path: string; displayName: string; description: string; scope: 'repo' | 'user' | 'system' | 'admin'; enabled: boolean }
@@ -39,7 +39,12 @@ export const api = {
     return request<{ items: AuditLog[]; total: number }>(`/audit-logs${params.size ? `?${params.toString()}` : ''}`)
   },
   auditLog: (id: string) => request<AuditLog>(`/audit-logs/${encodeURIComponent(id)}`),
-  dashboard: () => request<DashboardOverview>('/dashboard'),
+  dashboard: (filters: { fromDate?: string; toDate?: string; botId?: string; chatId?: string; threadChannelId?: string } = {}) => {
+    const params = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value)
+    return request<DashboardOverview>(`/dashboard${params.size ? `?${params.toString()}` : ''}`)
+  },
+  dashboardDimensions: () => request<DashboardDimensions>('/dashboard/dimensions'),
   systemHealth: () => request<SystemHealth>('/system-health'),
   chats: (filters: { botId?: string; query?: string; limit?: number } = {}) => {
     const params = new URLSearchParams()

@@ -44,6 +44,7 @@ export interface DashboardOverview {
   today: { received: number; completed: number; failed: number; processing: number; reused: number; experience: number; created: number; averageDurationMs: number }
   threads: { channels: number; bindings: number; profiles: number; queuedJobs: number; processingJobs: number }
   analytics: {
+    range: { fromDate: string; toDate: string; days: number; botId: string; chatId: string; threadChannelId: string }
     total: { received: number; completed: number; failed: number; processing: number; uniqueChats: number; averageDurationMs: number }
     daily: Array<{ date: string; received: number; completed: number; failed: number; reused: number; experience: number }>
     chats: Array<{ botId: string; botName: string; chatId: string; chatName: string; chatMode: string; received: number; completed: number; failed: number; averageDurationMs: number; lastActiveAt: string }>
@@ -56,6 +57,10 @@ export interface DashboardOverview {
       toolPackages: Array<{ id: string; name: string; requests: number; awaitingApproval: number; queued: number; running: number; completed: number; failed: number; rejected: number; successfulToolCalls: number }>
     }
   }
+}
+export interface DashboardDimensions {
+  groups: Array<{ botId: string; botName: string; chatId: string; chatName: string; chatMode: string; lastActiveAt: string }>
+  conversations: Array<{ botId: string; botName: string; chatId: string; chatName: string; topicId: string; threadChannelId: string; coreThreadId: string; lastActiveAt: string }>
 }
 export interface SystemHealth {
   status: 'healthy'|'attention'

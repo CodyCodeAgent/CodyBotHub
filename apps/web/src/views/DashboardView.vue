@@ -1,14 +1,21 @@
 <script setup lang="ts">
-import { Activity, BarChart3, Bot, Boxes, CheckCircle2, Clock3, Gauge, GitBranch, PackageCheck, RefreshCw, Sparkles, UsersRound, WandSparkles, Workflow, Wrench } from 'lucide-vue-next'
+import { Activity, BarChart3, Bot, Boxes, CalendarRange, CheckCircle2, Clock3, Gauge, GitBranch, MessageSquareText, PackageCheck, RefreshCw, RotateCcw, Sparkles, UsersRound, WandSparkles, Workflow, Wrench } from 'lucide-vue-next'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api } from '../api'
-import type { DashboardOverview, SystemHealth } from '../types'
+import type { DashboardDimensions, DashboardOverview, SystemHealth } from '../types'
+
+const localDateKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+const today = new Date(); today.setHours(0, 0, 0, 0)
+const defaultStart = new Date(today); defaultStart.setDate(defaultStart.getDate() - 13)
+const defaultFromDate = localDateKey(defaultStart)
+const defaultToDate = localDateKey(today)
 
 const emptyStats: DashboardOverview = {
   workspaces: 0, bots: 0, scenes: 0, skillPackages: 0, messageLogs: 0,
   today: { received: 0, completed: 0, failed: 0, processing: 0, reused: 0, experience: 0, created: 0, averageDurationMs: 0 },
   threads: { channels: 0, bindings: 0, profiles: 0, queuedJobs: 0, processingJobs: 0 },
   analytics: {
+    range: { fromDate: defaultFromDate, toDate: defaultToDate, days: 14, botId: '', chatId: '', threadChannelId: '' },
     total: { received: 0, completed: 0, failed: 0, processing: 0, uniqueChats: 0, averageDurationMs: 0 }, daily: [], chats: [], scenes: [], routes: [],
     capabilities: { configuredTools: 0, configuredToolPackages: 0, skillPackageUses: 0, toolPackageRequests: 0, successfulToolCalls: 0, status: { awaitingApproval: 0, queued: 0, running: 0, completed: 0, failed: 0, rejected: 0 }, skillPackages: [], toolPackages: [] },
   },
@@ -21,22 +28,42 @@ const emptyHealth: SystemHealth = {
   runtime: { initialized: false, attachedChannels: 0, engines: [] },
 }
 const health = ref<SystemHealth>(emptyHealth)
+const dimensions = ref<DashboardDimensions>({ groups: [], conversations: [] })
+const fromDate = ref(defaultFromDate)
+const toDate = ref(defaultToDate)
+const selectedGroupKey = ref('')
+const selectedConversationKey = ref('')
 const loading = ref(false)
 const error = ref('')
 const hoveredDailyIndex = ref<number | null>(null)
 let loadInFlight = false
+let loadQueued = false
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 const load = async (silent = false) => {
-  if (loadInFlight) return
+  if (loadInFlight) { loadQueued = true; return }
   loadInFlight = true
   if (!silent) loading.value = true
   error.value = ''
-  try { [stats.value, health.value] = await Promise.all([api.dashboard(), api.systemHealth()]) }
+  try {
+    const group = dimensions.value.groups.find(item => groupKey(item) === selectedGroupKey.value)
+    const conversation = dimensions.value.conversations.find(item => conversationKey(item) === selectedConversationKey.value)
+    const [nextStats, nextHealth, nextDimensions] = await Promise.all([api.dashboard({
+      fromDate: fromDate.value,
+      toDate: toDate.value,
+      botId: conversation?.botId ?? group?.botId ?? '',
+      chatId: conversation?.chatId ?? group?.chatId ?? '',
+      threadChannelId: conversation?.threadChannelId ?? '',
+    }), api.systemHealth(), api.dashboardDimensions()])
+    stats.value = nextStats
+    health.value = nextHealth
+    dimensions.value = nextDimensions
+  }
   catch (value) { error.value = value instanceof Error ? value.message : '读取运行状态失败' }
   finally {
     loadInFlight = false
     if (!silent) loading.value = false
+    if (loadQueued) { loadQueued = false; void load(true) }
   }
 }
 onMounted(() => {
@@ -68,11 +95,46 @@ const maxChat = computed(() => Math.max(1, ...stats.value.analytics.chats.map(it
 const maxScene = computed(() => Math.max(1, ...stats.value.analytics.scenes.map(item => item.received)))
 const maxSkillUses = computed(() => Math.max(1, ...stats.value.analytics.capabilities.skillPackages.map(item => item.uses)))
 const maxToolPackageRequests = computed(() => Math.max(1, ...stats.value.analytics.capabilities.toolPackages.map(item => item.requests)))
-const daily14Total = computed(() => stats.value.analytics.daily.reduce((sum, item) => sum + item.received, 0))
-const recentSeven = computed(() => stats.value.analytics.daily.slice(-7).reduce((sum, item) => sum + item.received, 0))
-const previousSeven = computed(() => stats.value.analytics.daily.slice(0, 7).reduce((sum, item) => sum + item.received, 0))
-const sevenDayDelta = computed(() => previousSeven.value ? Math.round((recentSeven.value - previousSeven.value) / previousSeven.value * 100) : null)
+const rangeTotal = computed(() => stats.value.analytics.daily.reduce((sum, item) => sum + item.received, 0))
+const comparisonDays = computed(() => Math.min(7, Math.floor(stats.value.analytics.daily.length / 2)))
+const recentPeriod = computed(() => stats.value.analytics.daily.slice(-comparisonDays.value).reduce((sum, item) => sum + item.received, 0))
+const previousPeriod = computed(() => comparisonDays.value ? stats.value.analytics.daily.slice(-comparisonDays.value * 2, -comparisonDays.value).reduce((sum, item) => sum + item.received, 0) : 0)
+const periodDelta = computed(() => previousPeriod.value ? Math.round((recentPeriod.value - previousPeriod.value) / previousPeriod.value * 100) : null)
 const routeTotal = computed(() => stats.value.analytics.routes.reduce((sum, item) => sum + item.count, 0))
+
+const groupKey = (item: { botId: string; chatId: string }) => JSON.stringify([item.botId, item.chatId])
+const conversationKey = (item: { botId: string; chatId: string; threadChannelId: string }) => JSON.stringify([item.botId, item.chatId, item.threadChannelId])
+const groupLabel = (item: DashboardDimensions['groups'][number]) => `${item.chatName && item.chatName !== item.chatId ? item.chatName : item.chatMode === 'p2p' ? '单聊会话' : '未命名群'} · ${item.botName}`
+const conversationLabel = (item: DashboardDimensions['conversations'][number]) => `${item.topicId ? `话题 ${item.topicId.slice(-8)}` : '群会话'} · ${item.coreThreadId ? `Thread ${item.coreThreadId.slice(0, 8)}` : item.threadChannelId.slice(0, 8)}`
+const visibleConversations = computed(() => {
+  if (!selectedGroupKey.value) return dimensions.value.conversations
+  const group = dimensions.value.groups.find(item => groupKey(item) === selectedGroupKey.value)
+  return group ? dimensions.value.conversations.filter(item => item.botId === group.botId && item.chatId === group.chatId) : dimensions.value.conversations
+})
+const filtersActive = computed(() => fromDate.value !== defaultFromDate || toDate.value !== defaultToDate || Boolean(selectedGroupKey.value || selectedConversationKey.value))
+const rangeLabel = computed(() => stats.value.analytics.range.days === 1 ? stats.value.analytics.range.fromDate : `${stats.value.analytics.range.fromDate} 至 ${stats.value.analytics.range.toDate}`)
+const applyFilters = () => {
+  if (fromDate.value > toDate.value) toDate.value = fromDate.value
+  hoveredDailyIndex.value = null
+  void load()
+}
+const selectGroup = () => {
+  const allowed = new Set(visibleConversations.value.map(conversationKey))
+  if (selectedConversationKey.value && !allowed.has(selectedConversationKey.value)) selectedConversationKey.value = ''
+  applyFilters()
+}
+const selectConversation = () => {
+  const conversation = dimensions.value.conversations.find(item => conversationKey(item) === selectedConversationKey.value)
+  if (conversation) selectedGroupKey.value = groupKey(conversation)
+  applyFilters()
+}
+const resetFilters = () => {
+  fromDate.value = defaultFromDate
+  toDate.value = defaultToDate
+  selectedGroupKey.value = ''
+  selectedConversationKey.value = ''
+  applyFilters()
+}
 
 const chart = { width: 760, height: 240, left: 42, right: 16, top: 18, bottom: 34 }
 const plotWidth = chart.width - chart.left - chart.right
@@ -83,6 +145,7 @@ const chartPoints = (key: 'received'|'completed'|'failed') => stats.value.analyt
 const chartArea = computed(() => `${chart.left},${chart.top + plotHeight} ${chartPoints('received')} ${chart.left + plotWidth},${chart.top + plotHeight}`)
 const yTicks = computed(() => [1, .75, .5, .25, 0].map(ratio => ({ value: Math.round(maxDaily.value * ratio), y: chart.top + plotHeight * (1 - ratio) })))
 const hoveredDaily = computed(() => hoveredDailyIndex.value === null ? null : stats.value.analytics.daily[hoveredDailyIndex.value] ?? null)
+const xLabelEvery = computed(() => Math.max(1, Math.ceil(stats.value.analytics.daily.length / 8)))
 
 const updateDailyHover = (event: PointerEvent) => {
   const count = stats.value.analytics.daily.length
@@ -111,8 +174,17 @@ const chatDisplayName = (item: DashboardOverview['analytics']['chats'][number]) 
 
 <template>
   <div class="page dashboard-page">
-    <header class="page-header"><div><p class="eyebrow">Operations analytics</p><h1>运行总览</h1><p class="page-description">查看累计使用量、每日趋势、群与场景分布，以及当前运行健康状态。</p></div><button class="ghost-button" :disabled="loading" @click="load()"><RefreshCw :size="16" :class="{ spinning: loading }" />刷新</button></header>
+    <header class="page-header"><div><p class="eyebrow">Operations analytics</p><h1>运行总览</h1><p class="page-description">查看所选范围用量、每日趋势、群与场景分布，以及当前运行健康状态。</p></div><button class="ghost-button" :disabled="loading" @click="load()"><RefreshCw :size="16" :class="{ spinning: loading }" />刷新</button></header>
     <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
+
+    <section class="dashboard-filters" aria-label="统计筛选">
+      <div class="filter-title"><CalendarRange :size="18" /><div><strong>统计范围</strong><span>仅用于当前页面，不保存为配置</span></div></div>
+      <label><span>开始日期</span><input v-model="fromDate" type="date" :max="toDate" @change="applyFilters" /></label>
+      <label><span>结束日期</span><input v-model="toDate" type="date" :min="fromDate" :max="defaultToDate" @change="applyFilters" /></label>
+      <label><span>群 / 单聊</span><select v-model="selectedGroupKey" @change="selectGroup"><option value="">全部群与单聊</option><option v-for="item in dimensions.groups" :key="groupKey(item)" :value="groupKey(item)">{{ groupLabel(item) }}</option></select></label>
+      <label><span>会话 Thread</span><select v-model="selectedConversationKey" @change="selectConversation"><option value="">全部会话</option><option v-for="item in visibleConversations" :key="conversationKey(item)" :value="conversationKey(item)">{{ conversationLabel(item) }}</option></select></label>
+      <button class="filter-reset" :disabled="!filtersActive || loading" @click="resetFilters"><RotateCcw :size="15" />重置</button>
+    </section>
 
     <section class="health-strip" :class="{ attention: needsAttention }">
       <div class="health-summary"><span class="health-pulse" /><div><strong>{{ health.feishu.draining ? '服务正在排空' : needsAttention ? '有运行项需要留意' : '系统运行正常' }}</strong><p>{{ healthReason }}</p></div></div>
@@ -122,18 +194,18 @@ const chatDisplayName = (item: DashboardOverview['analytics']['chats'][number]) 
       <div class="health-stat"><span>服务运行时间</span><strong>{{ formatUptime(health.uptimeSeconds) }}</strong><small>画像待处理 {{ health.store.profiles.queued }} 条</small></div>
     </section>
 
-    <section class="kpi-grid" aria-label="累计运行指标">
-      <article><div class="metric-heading"><MessageSquareText :size="17" /><span>累计处理</span></div><strong>{{ formatNumber(stats.analytics.total.received) }}</strong><small>今日新增 {{ stats.today.received }} 条</small></article>
+    <section class="kpi-grid" aria-label="筛选范围运行指标">
+      <article><div class="metric-heading"><MessageSquareText :size="17" /><span>范围内处理</span></div><strong>{{ formatNumber(stats.analytics.total.received) }}</strong><small>{{ rangeLabel }}</small></article>
       <article><div class="metric-heading"><UsersRound :size="17" /><span>服务群 / 会话</span></div><strong>{{ formatNumber(stats.analytics.total.uniqueChats) }}</strong><small>{{ stats.bots }} 个 Bot · {{ stats.scenes }} 个启用场景</small></article>
-      <article><div class="metric-heading"><CheckCircle2 :size="17" /><span>累计成功率</span></div><strong>{{ totalSuccessRate === null ? '—' : `${totalSuccessRate}%` }}</strong><small>{{ formatNumber(totalFinished) }} 条已结束任务</small></article>
+      <article><div class="metric-heading"><CheckCircle2 :size="17" /><span>范围内成功率</span></div><strong>{{ totalSuccessRate === null ? '—' : `${totalSuccessRate}%` }}</strong><small>{{ formatNumber(totalFinished) }} 条已结束任务</small></article>
       <article><div class="metric-heading"><Clock3 :size="17" /><span>平均处理耗时</span></div><strong>{{ formatDuration(stats.analytics.total.averageDurationMs) }}</strong><small>仅统计成功完成的消息</small></article>
     </section>
 
     <section class="analytics-top">
       <article class="panel trend-panel">
-        <div class="panel-header"><div><h2><BarChart3 :size="17" />近 14 天处理趋势</h2><p class="panel-description">按消息接收日期统计，包含成功、失败和处理中的消息。</p></div><div class="trend-summary"><strong>{{ daily14Total }}</strong><span>14 天累计</span><small v-if="sevenDayDelta !== null" :class="{ positive: sevenDayDelta > 0 }">近 7 天较前 7 天 {{ sevenDayDelta > 0 ? '+' : '' }}{{ sevenDayDelta }}%</small><small v-else>暂无可比基期</small></div></div>
+        <div class="panel-header"><div><h2><BarChart3 :size="17" />{{ stats.analytics.range.days }} 天处理趋势</h2><p class="panel-description">按消息接收日期统计，包含成功、失败和处理中的消息。</p></div><div class="trend-summary"><strong>{{ rangeTotal }}</strong><span>筛选范围累计</span><small v-if="periodDelta !== null" :class="{ positive: periodDelta > 0 }">近 {{ comparisonDays }} 天较前 {{ comparisonDays }} 天 {{ periodDelta > 0 ? '+' : '' }}{{ periodDelta }}%</small><small v-else>暂无可比基期</small></div></div>
         <div class="chart-legend"><span class="received">全部消息</span><span class="completed">成功完成</span><span class="failed">失败</span></div>
-        <div class="trend-chart" role="img" aria-label="近 14 天消息处理趋势图，移动鼠标可查看每日指标">
+        <div class="trend-chart" role="img" :aria-label="`${stats.analytics.range.days} 天消息处理趋势图，移动鼠标可查看每日指标`">
           <div class="chart-canvas">
           <svg :viewBox="`0 0 ${chart.width} ${chart.height}`" preserveAspectRatio="none" @pointermove="updateDailyHover" @pointerleave="hoveredDailyIndex = null">
             <defs><linearGradient id="traffic-area" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--primary)" stop-opacity=".24"/><stop offset="1" stop-color="var(--primary)" stop-opacity="0"/></linearGradient></defs>
@@ -142,7 +214,7 @@ const chatDisplayName = (item: DashboardOverview['analytics']['chats'][number]) 
             <polyline class="chart-line received-line" :points="chartPoints('received')" />
             <polyline class="chart-line completed-line" :points="chartPoints('completed')" />
             <polyline class="chart-line failed-line" :points="chartPoints('failed')" />
-            <g v-for="(item, index) in stats.analytics.daily" :key="item.date"><circle class="chart-point" :cx="chartX(index)" :cy="chartY(item.received)" r="3"><title>{{ item.date }}：共 {{ item.received }} 条，成功 {{ item.completed }} 条，失败 {{ item.failed }} 条</title></circle><text v-if="index % 2 === 0 || index === stats.analytics.daily.length - 1" class="axis-label" :x="chartX(index)" :y="chart.height - 8" text-anchor="middle">{{ formatDate(item.date) }}</text></g>
+            <g v-for="(item, index) in stats.analytics.daily" :key="item.date"><circle class="chart-point" :cx="chartX(index)" :cy="chartY(item.received)" r="3"><title>{{ item.date }}：共 {{ item.received }} 条，成功 {{ item.completed }} 条，失败 {{ item.failed }} 条</title></circle><text v-if="index % xLabelEvery === 0 || index === stats.analytics.daily.length - 1" class="axis-label" :x="chartX(index)" :y="chart.height - 8" text-anchor="middle">{{ formatDate(item.date) }}</text></g>
             <g v-if="hoveredDaily && hoveredDailyIndex !== null" class="chart-hover-layer">
               <line class="chart-hover-guide" :x1="chartX(hoveredDailyIndex)" :x2="chartX(hoveredDailyIndex)" :y1="chart.top" :y2="chart.top + plotHeight" />
               <circle class="chart-hover-point received" :cx="chartX(hoveredDailyIndex)" :cy="chartY(hoveredDaily.received)" r="5" />
@@ -161,7 +233,7 @@ const chatDisplayName = (item: DashboardOverview['analytics']['chats'][number]) 
       </article>
 
       <article class="panel route-panel">
-        <div class="panel-header"><div><h2><Sparkles :size="17" />处理方式分布</h2><p class="panel-description">累计消息如何进入 Codex Thread。</p></div></div>
+        <div class="panel-header"><div><h2><Sparkles :size="17" />处理方式分布</h2><p class="panel-description">筛选范围内的消息如何进入 Codex Thread。</p></div></div>
         <div class="route-list"><div v-for="item in stats.analytics.routes" :key="item.type"><div class="route-row"><span><i :class="routeClass(item.type)" />{{ routeLabel(item.type) }}</span><strong>{{ item.count }}</strong></div><div class="mini-bar"><span :class="routeClass(item.type)" :style="{ width: `${routeTotal ? item.count / routeTotal * 100 : 0}%` }" /></div><small>{{ routeTotal ? Math.round(item.count / routeTotal * 100) : 0 }}%</small></div><div v-if="!stats.analytics.routes.length" class="empty compact-empty">暂无处理记录</div></div>
         <RouterLink class="panel-link" to="/thread-routing">查看经验复用详情<GitBranch :size="14" /></RouterLink>
       </article>
@@ -190,7 +262,7 @@ const chatDisplayName = (item: DashboardOverview['analytics']['chats'][number]) 
 
     <section class="analytics-bottom">
       <article class="panel chat-panel">
-        <div class="panel-header"><div><h2><UsersRound :size="17" />群 / 会话处理量排行</h2><p class="panel-description">按 Bot + 群或单聊会话聚合，展示累计使用量与处理质量。</p></div><span class="badge gray">Top {{ stats.analytics.chats.length }}</span></div>
+        <div class="panel-header"><div><h2><UsersRound :size="17" />群 / 会话处理量排行</h2><p class="panel-description">按 Bot + 群或单聊会话聚合，展示筛选范围内的使用量与处理质量。</p></div><span class="badge gray">Top {{ stats.analytics.chats.length }}</span></div>
         <div v-if="stats.analytics.chats.length" class="ranking-list"><article v-for="(item, index) in stats.analytics.chats" :key="`${item.botId}:${item.chatId}`"><span class="rank">{{ String(index + 1).padStart(2, '0') }}</span><div class="rank-main"><div class="rank-title"><strong>{{ chatDisplayName(item) }}</strong><span>{{ item.botName }}</span></div><div class="rank-bar"><span :style="{ width: `${item.received / maxChat * 100}%` }" /></div><small class="mono">{{ item.chatId }}</small></div><div class="rank-metrics"><strong>{{ item.received }}</strong><span>条消息</span></div><div class="rank-quality"><strong>{{ rate(item.completed, item.failed) === null ? '—' : `${rate(item.completed, item.failed)}%` }}</strong><span>成功率</span></div></article></div>
         <div v-else class="empty"><UsersRound :size="30" /><strong>还没有群处理数据</strong></div>
       </article>
@@ -203,12 +275,12 @@ const chatDisplayName = (item: DashboardOverview['analytics']['chats'][number]) 
       </article>
     </section>
 
-    <p class="data-note">统计口径：累计指标来自全部消息记录；技能包按消息实际挂载次数统计；工具包按执行申请统计；工具调用只统计已完成工具包中成功返回的原子步骤；每日趋势按服务器本地自然日聚合。</p>
+    <p class="data-note">统计口径：当前结果按所选日期、群和会话实时查询；技能包按消息实际挂载次数统计；工具包按执行申请统计；工具调用只统计已完成工具包中成功返回的原子步骤；每日趋势按服务器本地自然日聚合。筛选条件不会保存。</p>
   </div>
 </template>
 
 <style scoped>
-.dashboard-page{max-width:1440px}.health-strip{display:grid;grid-template-columns:minmax(300px,1.15fr) repeat(4,minmax(130px,.42fr));align-items:stretch;overflow:hidden;margin-bottom:14px;background:linear-gradient(110deg,rgba(52,211,153,.08),transparent 40%),var(--surface);border:1px solid rgba(52,211,153,.22);border-radius:16px;box-shadow:var(--shadow-soft)}.health-strip.attention{background:linear-gradient(110deg,rgba(251,191,36,.08),transparent 40%),var(--surface);border-color:rgba(251,191,36,.27)}.health-summary{display:flex;align-items:center;gap:13px;padding:19px 22px}.health-pulse{width:9px;height:9px;flex:0 0 auto;background:var(--green);border-radius:50%;box-shadow:0 0 0 5px rgba(52,211,153,.1)}.attention .health-pulse{background:var(--warning);box-shadow:0 0 0 5px rgba(251,191,36,.1)}.health-summary strong{font-size:13px}.health-summary p{margin:5px 0 0;color:var(--muted);font-size: 11px}.health-stat{padding:17px 19px;background:color-mix(in srgb,var(--surface-raised) 72%,transparent);border-left:1px solid var(--border)}.health-stat span,.health-stat small{display:block;color:var(--muted);font-size: 11px}.health-stat strong{display:block;margin:7px 0 5px;font:700 20px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}.kpi-grid article{padding:18px 19px;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-soft)}.metric-heading{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;font-weight:650}.metric-heading svg{color:var(--primary)}.kpi-grid article>strong{display:block;margin:14px 0 7px;font:700 25px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-grid small{color:var(--muted);font-size: 11px}.analytics-top,.analytics-bottom{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(310px,.55fr);gap:14px;margin-bottom:14px}.trend-summary{text-align:right}.trend-summary strong,.trend-summary span,.trend-summary small{display:block}.trend-summary strong{font:700 19px ui-monospace,SFMono-Regular,Menlo,monospace}.trend-summary span,.trend-summary small{color:var(--muted);font-size: 11px}.trend-summary small{margin-top:3px}.trend-summary small.positive{color:var(--primary)}.chart-legend{display:flex;justify-content:flex-end;gap:15px;padding:13px 22px 0}.chart-legend span{display:flex;align-items:center;gap:6px;color:var(--muted);font-size: 11px}.chart-legend span::before{content:'';width:14px;height:2px;background:var(--primary);border-radius:2px}.chart-legend .completed::before{background:var(--green)}.chart-legend .failed::before{background:var(--danger)}.trend-chart{height:265px;padding:4px 17px 15px}.trend-chart svg{width:100%;height:100%;overflow:visible}.grid-line{stroke:var(--border);stroke-width:1}.axis-label{fill:var(--muted);font:8px ui-monospace,SFMono-Regular,Menlo,monospace}.chart-area{fill:url(#traffic-area)}.chart-line{fill:none;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.received-line{stroke:var(--primary)}.completed-line{stroke:var(--green)}.failed-line{stroke:var(--danger);stroke-width:1.7}.chart-point{fill:var(--surface);stroke:var(--primary);stroke-width:2;vector-effect:non-scaling-stroke}.route-list{display:grid;gap:17px;padding:21px 22px}.route-row{display:flex;justify-content:space-between;gap:12px}.route-row span{display:flex;align-items:center;gap:8px;color:var(--text-soft);font-size: 11px}.route-row i{width:7px;height:7px;background:var(--muted);border-radius:50%}.route-row i.green,.mini-bar span.green{background:var(--green)}.route-row i.purple,.mini-bar span.purple{background:var(--primary)}.route-row i.blue,.mini-bar span.blue{background:#60a5fa}.route-row strong{font:700 11px ui-monospace,SFMono-Regular,Menlo,monospace}.mini-bar{height:5px;overflow:hidden;margin:8px 0 4px;background:var(--surface-soft);border-radius:999px}.mini-bar span{display:block;height:100%;background:var(--muted);border-radius:inherit}.route-list small{display:block;color:var(--muted);font-size: 11px;text-align:right}.panel-link{display:flex;align-items:center;justify-content:space-between;padding:15px 22px;color:var(--primary);border-top:1px solid var(--border);font-size: 11px;font-weight:700;text-decoration:none}.ranking-list{display:grid}.ranking-list article{display:grid;grid-template-columns:28px minmax(0,1fr) 70px 70px;align-items:center;gap:12px;padding:15px 20px;border-top:1px solid var(--border)}.ranking-list article:first-child{border-top:0}.rank{color:var(--muted);font:700 9px ui-monospace,SFMono-Regular,Menlo,monospace}.rank-main{min-width:0}.rank-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.rank-title strong{overflow:hidden;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.rank-title span{flex:0 0 auto;color:var(--muted);font-size: 11px}.rank-bar,.scene-bar{height:5px;overflow:hidden;margin:8px 0 5px;background:var(--surface-soft);border-radius:999px}.rank-bar span,.scene-bar span{display:block;height:100%;background:linear-gradient(90deg,var(--primary-strong),var(--primary));border-radius:inherit}.rank-main small{display:block;overflow:hidden;color:var(--muted);font-size: 11px;text-overflow:ellipsis;white-space:nowrap}.rank-metrics,.rank-quality{text-align:right}.rank-metrics strong,.rank-metrics span,.rank-quality strong,.rank-quality span{display:block}.rank-metrics strong,.rank-quality strong{font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace}.rank-metrics span,.rank-quality span{margin-top:3px;color:var(--muted);font-size: 11px}.scene-list{display:grid;padding:7px 0}.scene-list article{padding:12px 20px}.scene-list article>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:12px}.scene-list strong{font-size: 11px}.scene-list span{color:var(--muted);font-size: 11px}.coverage-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border-top:1px solid var(--border)}.coverage-links a{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;min-height:45px;padding:0 16px;color:var(--text-soft);border-top:1px solid var(--border);border-left:1px solid var(--border);font-size: 11px;text-decoration:none}.coverage-links a:nth-child(-n+2){border-top:0}.coverage-links a:nth-child(odd){border-left:0}.coverage-links svg{color:var(--primary)}.coverage-links strong{font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace}.compact-empty{min-height:130px}.data-note{margin:5px 2px 0;color:var(--muted);font-size: 11px;line-height:1.6}@media(max-width:1150px){.health-strip{grid-template-columns:repeat(4,minmax(0,1fr))}.health-summary{grid-column:1/-1;border-bottom:1px solid var(--border)}.analytics-top,.analytics-bottom{grid-template-columns:1fr}.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:700px){.health-strip,.kpi-grid{grid-template-columns:1fr}.health-summary{grid-column:auto}.health-stat{border-top:1px solid var(--border);border-left:0}.ranking-list article{grid-template-columns:24px minmax(0,1fr) 58px}.rank-quality{display:none}.coverage-links{grid-template-columns:1fr}.coverage-links a{border-left:0}.coverage-links a:nth-child(2){border-top:1px solid var(--border)}}
+.dashboard-page{max-width:1440px}.dashboard-filters{display:grid;grid-template-columns:minmax(150px,.8fr) repeat(2,minmax(118px,.55fr)) repeat(2,minmax(145px,1fr)) auto;align-items:end;gap:12px;margin-bottom:14px;padding:15px 17px;background:linear-gradient(105deg,color-mix(in srgb,var(--primary) 7%,transparent),transparent 42%),var(--surface);border:1px solid color-mix(in srgb,var(--primary) 20%,var(--border));border-radius:15px;box-shadow:var(--shadow-soft)}.filter-title{display:flex;align-items:center;gap:10px;min-height:39px}.filter-title>svg{color:var(--primary)}.filter-title strong,.filter-title span{display:block}.filter-title strong{font-size:12px}.filter-title span{margin-top:4px;color:var(--muted);font-size:10px}.dashboard-filters label>span{display:block;margin-bottom:6px;color:var(--muted);font-size:10px;font-weight:650}.dashboard-filters input,.dashboard-filters select{width:100%;height:39px;padding:0 11px;color:var(--text);background:var(--surface-raised);border:1px solid var(--border);border-radius:10px;font:inherit;font-size:11px;outline:none}.dashboard-filters input:focus,.dashboard-filters select:focus{border-color:color-mix(in srgb,var(--primary) 55%,var(--border));box-shadow:0 0 0 3px color-mix(in srgb,var(--primary) 10%,transparent)}.filter-reset{display:flex;align-items:center;justify-content:center;gap:6px;height:39px;padding:0 13px;color:var(--text-soft);background:var(--surface-raised);border:1px solid var(--border);border-radius:10px;font:inherit;font-size:11px;cursor:pointer}.filter-reset:disabled{opacity:.42;cursor:not-allowed}.health-strip{display:grid;grid-template-columns:minmax(300px,1.15fr) repeat(4,minmax(130px,.42fr));align-items:stretch;overflow:hidden;margin-bottom:14px;background:linear-gradient(110deg,rgba(52,211,153,.08),transparent 40%),var(--surface);border:1px solid rgba(52,211,153,.22);border-radius:16px;box-shadow:var(--shadow-soft)}.health-strip.attention{background:linear-gradient(110deg,rgba(251,191,36,.08),transparent 40%),var(--surface);border-color:rgba(251,191,36,.27)}.health-summary{display:flex;align-items:center;gap:13px;padding:19px 22px}.health-pulse{width:9px;height:9px;flex:0 0 auto;background:var(--green);border-radius:50%;box-shadow:0 0 0 5px rgba(52,211,153,.1)}.attention .health-pulse{background:var(--warning);box-shadow:0 0 0 5px rgba(251,191,36,.1)}.health-summary strong{font-size:13px}.health-summary p{margin:5px 0 0;color:var(--muted);font-size: 11px}.health-stat{padding:17px 19px;background:color-mix(in srgb,var(--surface-raised) 72%,transparent);border-left:1px solid var(--border)}.health-stat span,.health-stat small{display:block;color:var(--muted);font-size: 11px}.health-stat strong{display:block;margin:7px 0 5px;font:700 20px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}.kpi-grid article{padding:18px 19px;background:var(--surface);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow-soft)}.metric-heading{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;font-weight:650}.metric-heading svg{color:var(--primary)}.kpi-grid article>strong{display:block;margin:14px 0 7px;font:700 25px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.kpi-grid small{color:var(--muted);font-size: 11px}.analytics-top,.analytics-bottom{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(310px,.55fr);gap:14px;margin-bottom:14px}.trend-summary{text-align:right}.trend-summary strong,.trend-summary span,.trend-summary small{display:block}.trend-summary strong{font:700 19px ui-monospace,SFMono-Regular,Menlo,monospace}.trend-summary span,.trend-summary small{color:var(--muted);font-size: 11px}.trend-summary small{margin-top:3px}.trend-summary small.positive{color:var(--primary)}.chart-legend{display:flex;justify-content:flex-end;gap:15px;padding:13px 22px 0}.chart-legend span{display:flex;align-items:center;gap:6px;color:var(--muted);font-size: 11px}.chart-legend span::before{content:'';width:14px;height:2px;background:var(--primary);border-radius:2px}.chart-legend .completed::before{background:var(--green)}.chart-legend .failed::before{background:var(--danger)}.trend-chart{height:265px;padding:4px 17px 15px}.trend-chart svg{width:100%;height:100%;overflow:visible}.grid-line{stroke:var(--border);stroke-width:1}.axis-label{fill:var(--muted);font:8px ui-monospace,SFMono-Regular,Menlo,monospace}.chart-area{fill:url(#traffic-area)}.chart-line{fill:none;stroke-width:2.3;stroke-linecap:round;stroke-linejoin:round;vector-effect:non-scaling-stroke}.received-line{stroke:var(--primary)}.completed-line{stroke:var(--green)}.failed-line{stroke:var(--danger);stroke-width:1.7}.chart-point{fill:var(--surface);stroke:var(--primary);stroke-width:2;vector-effect:non-scaling-stroke}.route-list{display:grid;gap:17px;padding:21px 22px}.route-row{display:flex;justify-content:space-between;gap:12px}.route-row span{display:flex;align-items:center;gap:8px;color:var(--text-soft);font-size: 11px}.route-row i{width:7px;height:7px;background:var(--muted);border-radius:50%}.route-row i.green,.mini-bar span.green{background:var(--green)}.route-row i.purple,.mini-bar span.purple{background:var(--primary)}.route-row i.blue,.mini-bar span.blue{background:#60a5fa}.route-row strong{font:700 11px ui-monospace,SFMono-Regular,Menlo,monospace}.mini-bar{height:5px;overflow:hidden;margin:8px 0 4px;background:var(--surface-soft);border-radius:999px}.mini-bar span{display:block;height:100%;background:var(--muted);border-radius:inherit}.route-list small{display:block;color:var(--muted);font-size: 11px;text-align:right}.panel-link{display:flex;align-items:center;justify-content:space-between;padding:15px 22px;color:var(--primary);border-top:1px solid var(--border);font-size: 11px;font-weight:700;text-decoration:none}.ranking-list{display:grid}.ranking-list article{display:grid;grid-template-columns:28px minmax(0,1fr) 70px 70px;align-items:center;gap:12px;padding:15px 20px;border-top:1px solid var(--border)}.ranking-list article:first-child{border-top:0}.rank{color:var(--muted);font:700 9px ui-monospace,SFMono-Regular,Menlo,monospace}.rank-main{min-width:0}.rank-title{display:flex;align-items:center;justify-content:space-between;gap:12px}.rank-title strong{overflow:hidden;font-size:11px;text-overflow:ellipsis;white-space:nowrap}.rank-title span{flex:0 0 auto;color:var(--muted);font-size: 11px}.rank-bar,.scene-bar{height:5px;overflow:hidden;margin:8px 0 5px;background:var(--surface-soft);border-radius:999px}.rank-bar span,.scene-bar span{display:block;height:100%;background:linear-gradient(90deg,var(--primary-strong),var(--primary));border-radius:inherit}.rank-main small{display:block;overflow:hidden;color:var(--muted);font-size: 11px;text-overflow:ellipsis;white-space:nowrap}.rank-metrics,.rank-quality{text-align:right}.rank-metrics strong,.rank-metrics span,.rank-quality strong,.rank-quality span{display:block}.rank-metrics strong,.rank-quality strong{font:700 12px ui-monospace,SFMono-Regular,Menlo,monospace}.rank-metrics span,.rank-quality span{margin-top:3px;color:var(--muted);font-size: 11px}.scene-list{display:grid;padding:7px 0}.scene-list article{padding:12px 20px}.scene-list article>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:12px}.scene-list strong{font-size: 11px}.scene-list span{color:var(--muted);font-size: 11px}.coverage-links{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border-top:1px solid var(--border)}.coverage-links a{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:8px;min-height:45px;padding:0 16px;color:var(--text-soft);border-top:1px solid var(--border);border-left:1px solid var(--border);font-size: 11px;text-decoration:none}.coverage-links a:nth-child(-n+2){border-top:0}.coverage-links a:nth-child(odd){border-left:0}.coverage-links svg{color:var(--primary)}.coverage-links strong{font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace}.compact-empty{min-height:130px}.data-note{margin:5px 2px 0;color:var(--muted);font-size: 11px;line-height:1.6}@media(max-width:1150px){.dashboard-filters{grid-template-columns:repeat(2,minmax(0,1fr))}.filter-title{grid-column:1/-1}.health-strip{grid-template-columns:repeat(4,minmax(0,1fr))}.health-summary{grid-column:1/-1;border-bottom:1px solid var(--border)}.analytics-top,.analytics-bottom{grid-template-columns:1fr}.kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:700px){.dashboard-filters{grid-template-columns:1fr}.filter-title{grid-column:auto}.health-strip,.kpi-grid{grid-template-columns:1fr}.health-summary{grid-column:auto}.health-stat{border-top:1px solid var(--border);border-left:0}.ranking-list article{grid-template-columns:24px minmax(0,1fr) 58px}.rank-quality{display:none}.coverage-links{grid-template-columns:1fr}.coverage-links a{border-left:0}.coverage-links a:nth-child(2){border-top:1px solid var(--border)}}
 .chart-canvas{position:relative;width:100%;height:100%}.chart-canvas svg{touch-action:none;cursor:crosshair}.chart-hover-layer{pointer-events:none}.chart-hover-guide{stroke:color-mix(in srgb,var(--text) 48%,transparent);stroke-width:1;stroke-dasharray:4 4;vector-effect:non-scaling-stroke}.chart-hover-point{stroke:var(--surface);stroke-width:2.5;vector-effect:non-scaling-stroke}.chart-hover-point.received{fill:var(--primary)}.chart-hover-point.completed{fill:var(--green)}.chart-hover-point.failed{fill:var(--danger)}.chart-tooltip{position:absolute;z-index:3;top:8px;display:grid;min-width:142px;gap:7px;padding:11px 12px;color:var(--text);background:color-mix(in srgb,var(--surface-raised) 94%,transparent);border:1px solid color-mix(in srgb,var(--primary) 35%,var(--border));border-radius:10px;box-shadow:0 12px 30px rgba(0,0,0,.28);pointer-events:none;transform:translateX(10px);backdrop-filter:blur(14px)}.chart-tooltip.right{transform:translateX(calc(-100% - 10px))}.chart-tooltip strong{padding-bottom:5px;border-bottom:1px solid var(--border);font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace}.chart-tooltip span{display:grid;grid-template-columns:7px 1fr auto;align-items:center;gap:7px;color:var(--text-soft);font-size: 11px}.chart-tooltip i{width:7px;height:7px;background:var(--primary);border-radius:50%;box-shadow:0 0 8px color-mix(in srgb,var(--primary) 65%,transparent)}.chart-tooltip .completed i{background:var(--green);box-shadow:0 0 8px color-mix(in srgb,var(--green) 65%,transparent)}.chart-tooltip .failed i{background:var(--danger);box-shadow:0 0 8px color-mix(in srgb,var(--danger) 65%,transparent)}.chart-tooltip b{font:700 10px ui-monospace,SFMono-Regular,Menlo,monospace}
 .capability-panel{margin-bottom:14px;overflow:hidden}.capability-config{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}.capability-config span{padding:5px 8px;color:var(--muted);background:var(--surface-soft);border:1px solid var(--border);border-radius:999px;font-size: 11px}.capability-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-top:1px solid var(--border);border-bottom:1px solid var(--border)}.capability-summary article{display:flex;align-items:center;gap:13px;padding:18px 21px;border-left:1px solid var(--border)}.capability-summary article:first-child{border-left:0}.capability-icon{display:grid;width:36px;height:36px;place-items:center;color:var(--primary);background:color-mix(in srgb,var(--primary) 12%,transparent);border:1px solid color-mix(in srgb,var(--primary) 24%,transparent);border-radius:11px}.capability-icon.package{color:#60a5fa;background:rgba(96,165,250,.1);border-color:rgba(96,165,250,.22)}.capability-icon.tool{color:var(--green);background:rgba(52,211,153,.1);border-color:rgba(52,211,153,.22)}.capability-summary small,.capability-summary p{display:block;color:var(--muted);font-size: 11px}.capability-summary strong{display:block;margin:4px 0 3px;font:700 21px/1 ui-monospace,SFMono-Regular,Menlo,monospace}.capability-summary p{margin:0}.capability-detail{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}.capability-ranking{min-width:0;padding:17px 20px 20px;border-left:1px solid var(--border)}.capability-ranking:first-child{border-left:0}.subpanel-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}.subpanel-heading strong,.subpanel-heading span{display:block}.subpanel-heading strong{font-size:11px}.subpanel-heading span{margin-top:4px;color:var(--muted);font-size: 11px}.subpanel-heading a{flex:0 0 auto;color:var(--primary);font-size: 11px;font-weight:700;text-decoration:none}.capability-list{display:grid;gap:13px}.capability-list article>div:first-child{display:flex;align-items:center;justify-content:space-between;gap:12px}.capability-list strong{overflow:hidden;font-size: 11px;text-overflow:ellipsis;white-space:nowrap}.capability-list article>div:first-child span{flex:0 0 auto;color:var(--text-soft);font:700 9px ui-monospace,SFMono-Regular,Menlo,monospace}.capability-bar{height:5px;overflow:hidden;margin-top:7px;background:var(--surface-soft);border-radius:999px}.capability-bar span{display:block;height:100%;background:linear-gradient(90deg,var(--primary-strong),var(--primary));border-radius:inherit}.capability-bar.package span{background:linear-gradient(90deg,#3b82f6,var(--green))}.capability-list article>small{display:block;margin-top:5px;color:var(--muted);font-size: 11px}.compact-capability-empty{min-height:115px}.compact-capability-empty span{color:var(--muted);font-size: 11px}.compact-capability-empty strong{font-size: 11px}@media(max-width:900px){.capability-summary,.capability-detail{grid-template-columns:1fr}.capability-summary article,.capability-ranking{border-top:1px solid var(--border);border-left:0}.capability-summary article:first-child,.capability-ranking:first-child{border-top:0}}
 </style>

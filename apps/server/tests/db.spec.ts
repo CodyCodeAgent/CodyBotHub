@@ -461,6 +461,37 @@ describe('HubStore invariants', () => {
     store.close()
   })
 
+  it('filters dashboard statistics by date, Bot chat, and Thread Channel without persisting the query', () => {
+    const store = new HubStore(':memory:')
+    const linked = workspace(store, 'Dashboard filters')
+    const bot = store.createBot({ name: 'Dashboard Bot', defaultWorkspaceId: linked.id })
+    const base = {
+      provider: 'feishu' as const, accountId: bot.id, sender: { id: 'ou_dashboard', type: 'user' as const },
+      content: { type: 'text' as const }, text: 'dashboard event', attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
+    }
+    const first = { ...base, eventId: 'event-dashboard-1', messageId: 'message-dashboard-1', conversation: { id: 'oc_dashboard_1', scope: 'group' as const } }
+    const second = { ...base, eventId: 'event-dashboard-2', messageId: 'message-dashboard-2', conversation: { id: 'oc_dashboard_2', scope: 'group' as const } }
+    const firstRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, first), first)
+    const secondRoute = store.resolveThreadRouting(store.resolveRoute(bot.id, second), second)
+    store.finishMessageLog(store.createMessageLog(bot.id, firstRoute, first).id, { responseContent: 'first done' })
+    store.finishMessageLog(store.createMessageLog(bot.id, secondRoute, second).id, { responseContent: 'second done' })
+
+    const today = new Date()
+    const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+    expect(store.stats({ fromDate: todayKey, toDate: todayKey, botId: bot.id, chatId: 'oc_dashboard_1' })).toMatchObject({
+      analytics: { range: { fromDate: todayKey, toDate: todayKey, days: 1, botId: bot.id, chatId: 'oc_dashboard_1' }, total: { received: 1, completed: 1 }, chats: [{ chatId: 'oc_dashboard_1', received: 1 }] },
+    })
+    expect(store.stats({ fromDate: todayKey, toDate: todayKey, threadChannelId: secondRoute.threadChannelId }).analytics.total.received).toBe(1)
+    expect(store.stats({ fromDate: '2099-01-01', toDate: '2099-01-02' }).analytics.total.received).toBe(0)
+    expect(store.stats().analytics.total.received).toBe(2)
+    expect(store.dashboardDimensions()).toMatchObject({
+      groups: expect.arrayContaining([expect.objectContaining({ botId: bot.id, chatId: 'oc_dashboard_1' }), expect.objectContaining({ botId: bot.id, chatId: 'oc_dashboard_2' })]),
+      conversations: expect.arrayContaining([expect.objectContaining({ threadChannelId: firstRoute.threadChannelId }), expect.objectContaining({ threadChannelId: secondRoute.threadChannelId })]),
+    })
+    store.close()
+  })
+
   it('atomically accepts an inbound message and permanently deduplicates Feishu retries by message id', () => {
     const store = new HubStore(':memory:')
     const linked = workspace(store, 'Dedupe')

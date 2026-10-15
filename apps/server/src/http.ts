@@ -241,7 +241,14 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           return sendJson(response, 200, result)
         }
 
-        if (method === 'GET' && url.pathname === '/api/dashboard') return sendJson(response, 200, store.stats())
+        if (method === 'GET' && url.pathname === '/api/dashboard') return sendJson(response, 200, store.stats({
+          fromDate: url.searchParams.get('fromDate') ?? '',
+          toDate: url.searchParams.get('toDate') ?? '',
+          botId: url.searchParams.get('botId') ?? '',
+          chatId: url.searchParams.get('chatId') ?? '',
+          threadChannelId: url.searchParams.get('threadChannelId') ?? '',
+        }))
+        if (method === 'GET' && url.pathname === '/api/dashboard/dimensions') return sendJson(response, 200, store.dashboardDimensions())
         if (method === 'GET' && url.pathname === '/api/chats') {
           const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 200
           return sendJson(response, 200, store.listChatMetadata({ botId: url.searchParams.get('botId') ?? '', query: url.searchParams.get('query') ?? '', limit: number(limit, 200) }))

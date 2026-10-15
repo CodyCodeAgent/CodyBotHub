@@ -31,7 +31,7 @@ CodyBotHub 是一个独立的飞书 Bot 管理平台。它以工作区为运行�
 - 使用 CodyWebCore 的 Feishu Provider 与统一 App Server Session Manager 处理消息；每个 Bot 可选择 Codex 或 TraeX
 - 通过 Thread Channel 将多个相似群或话题绑定到同一个 Agent Thread；同一 Channel 使用 SQLite 持久队列串行执行，并可在管理端查看引擎、绑定、队列和路由依据
 - 飞书消息去重、审计记录和队列任务以单个 SQLite 事务落库；队列由常驻调度器自动恢复，避免进程切换窗口造成消息卡住
-- 运行总览直接展示 SQLite 完整性、队列积压、飞书连接、服务运行时长和画像任务状态
+- 运行总览直接展示 SQLite 完整性、队列积压、飞书连接、服务运行时长和画像任务状态；业务统计可临时按日期、群/单聊与 Thread 会话筛选，条件只用于当前页面并随 5 秒刷新实时重查
 - Codex 的模型与推理强度按“场景 → Bot → 平台 → Codex 账号默认值”逐字段继承；TraeX 按“场景 → Bot → TraeX 默认值”继承。选项由对应 App Server 实时返回，并在消息记录中保存实际值、来源和运行引擎
 - 回复使用飞书 Markdown 卡片，并附带工作区、场景、技能包和实际权限信息
 - 群用户明确 @ Bot 时，回复原消息并原生 @ 回发送人；其他 Bot 可按 Bot 级策略接入，支持来源白名单、可选 @ 回和持久化协作轮次防循环
