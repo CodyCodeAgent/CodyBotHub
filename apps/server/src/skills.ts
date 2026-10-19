@@ -4,11 +4,12 @@ import { constants } from 'node:fs'
 import { access, cp, lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { promisify } from 'node:util'
+import { runtimeFiles, ignoredSkillFile } from './workspace-sync.js'
 import type { HubStore } from './db.js'
 import type { SkillCatalogItem, SkillSourceRecord } from './types.js'
 
 const runFile = promisify(execFile)
-const ignoredDirectories = new Set(['.git', 'node_modules', '.cache', 'dist', 'build'])
+const ignoredDirectories = new Set(['.git', 'node_modules', '.cache', 'dist', 'build', '.venv', 'venv', '__pycache__'])
 
 type DiscoveredSkill = { key: string; name: string; targetName: string; description: string; absolutePath: string; relativePath: string; checksum: string }
 
@@ -45,8 +46,11 @@ export class SkillSyncService {
       }
       for (const root of source.knowledgeRoots) {
         const safeRoot = safeRelative(root)
-        await git(['-C', checkout, 'submodule', 'sync', '--', safeRoot]).catch(() => undefined)
-        await git(['-C', checkout, 'submodule', 'update', '--init', '--depth', '1', '--', safeRoot]).catch(() => undefined)
+        const tree = (await runFile('git', ['-C', checkout, 'ls-tree', 'HEAD', '--', safeRoot])).stdout
+        if (/^160000 /u.test(tree)) {
+          await git(['-C', checkout, 'submodule', 'sync', '--', safeRoot])
+          await git(['-C', checkout, 'submodule', 'update', '--init', '--depth', '1', '--', safeRoot])
+        }
       }
       const { stdout } = await runFile('git', ['-C', checkout, 'rev-parse', 'HEAD'], { maxBuffer: 1024 * 1024 })
       const updated = this.store.updateSkillSourceSync(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: stdout.trim(), lastError: '' })
@@ -56,6 +60,7 @@ export class SkillSyncService {
         const result = await this.install({ sourceId, workspaceId: updated.workspaceId, all: true, force: false })
         installed = result.installed
         skipped = result.skipped
+        if (result.errors.length) throw new Error(`技能源安装未全部完成：${result.errors.join('; ')}`)
       }
       return { source: this.store.getSkillSource(sourceId), installed, skipped }
     } catch (error) {
@@ -123,16 +128,26 @@ export class SkillSyncService {
       const targetPath = path.join(skillsDirectory, skill.targetName)
       const current = installations.get(skill.key)
       try {
-        if (current && current.sourceChecksum === skill.checksum && current.installedCommit === source.lastCommit && await exists(targetPath)) { skipped += 1; continue }
         if (await exists(targetPath)) {
-          if (!current && !input.force) { skipped += 1; errors.push(`${skill.name}：目标目录已存在`); continue }
-          await mkdir(backupDirectory, { recursive: true })
-          await rename(targetPath, path.join(backupDirectory, `${safeTimestamp()}-${skill.targetName}`))
+          const targetChecksum = await checksumDirectory(targetPath)
+          if (current && targetChecksum === skill.checksum) { this.store.upsertSkillInstallation({ sourceId: source.id, workspaceId: workspace.id, skillKey: skill.key, targetName: skill.targetName, sourcePath: skill.relativePath, targetPath, installedCommit: source.lastCommit, sourceChecksum: skill.checksum }); skipped += 1; continue }
+          if (current && targetChecksum !== current.sourceChecksum && !input.force) { skipped += 1; errors.push(`${skill.name}：本地内容已修改，保留现场`); continue }
         }
+        const present = await exists(targetPath)
+        if (present && !current && !input.force) { skipped += 1; errors.push(`${skill.name}：目标目录已存在`); continue }
         const temporary = `${targetPath}.installing-${process.pid}`
         await rm(temporary, { recursive: true, force: true })
-        await cp(skill.absolutePath, temporary, { recursive: true, dereference: true })
-        await rename(temporary, targetPath)
+        await cp(skill.absolutePath, temporary, { recursive: true, dereference: true, filter: file => !path.relative(skill.absolutePath, file).split(path.sep).some(ignoredSkillFile) })
+        const backup = path.join(backupDirectory, `${safeTimestamp()}-${skill.targetName}`), local = present ? await runtimeFiles(targetPath) : []
+        if (present) { await mkdir(backupDirectory, { recursive: true }); await rename(targetPath, backup) }
+        try {
+          for (const relative of local) { await mkdir(path.dirname(path.join(temporary, relative)), { recursive: true }); await rename(path.join(backup, relative), path.join(temporary, relative)) }
+          await rename(temporary, targetPath)
+        } catch (error) {
+          for (const relative of local) if (await exists(path.join(temporary, relative))) { await mkdir(path.dirname(path.join(backup, relative)), { recursive: true }); await rename(path.join(temporary, relative), path.join(backup, relative)) }
+          if (present) await rename(backup, targetPath)
+          throw error
+        }
         this.store.upsertSkillInstallation({ sourceId: source.id, workspaceId: workspace.id, skillKey: skill.key, targetName: skill.targetName, sourcePath: skill.relativePath, targetPath, installedCommit: source.lastCommit, sourceChecksum: skill.checksum })
         installed += 1
       } catch (error) {
@@ -153,7 +168,9 @@ export class SkillSyncService {
       if (!await exists(root)) continue
       found.push(...await discoverSkills(root, checkout))
     }
-    return uniqueBy(found, item => item.targetName)
+    const names = new Map<string, DiscoveredSkill>()
+    for (const skill of found) { const previous = names.get(skill.targetName); if (previous && previous.checksum !== skill.checksum) throw new Error(`${skill.name}：多个技能源目录存在同名且内容不同的技能`); names.set(skill.targetName, skill) }
+    return [...names.values()]
   }
 
   private async copyKnowledge(source: SkillSourceRecord): Promise<void> {
@@ -213,7 +230,7 @@ const parseSkillMetadata = (content: string, fallback: string): { name: string; 
 const checksumDirectory = async (directory: string): Promise<string> => {
   const hash = createHash('sha256')
   const walk = async (current: string): Promise<void> => {
-    const entries = (await readdir(current, { withFileTypes: true })).filter(item => !ignoredDirectories.has(item.name)).sort((a, b) => a.name.localeCompare(b.name))
+    const entries = (await readdir(current, { withFileTypes: true })).filter(item => !ignoredDirectories.has(item.name) && !ignoredSkillFile(item.name)).sort((a, b) => a.name.localeCompare(b.name))
     for (const entry of entries) {
       const child = path.join(current, entry.name)
       hash.update(path.relative(directory, child))
@@ -233,5 +250,5 @@ const safeRelative = (value: string): string => {
 const safeTargetName = (value: string): string => value.trim().replace(/[^a-zA-Z0-9._-]+/gu, '-').replace(/^-+|-+$/gu, '') || 'skill'
 const safeTimestamp = (): string => new Date().toISOString().replace(/[:.]/gu, '-')
 const exists = async (filename: string): Promise<boolean> => access(filename, constants.F_OK).then(() => true, () => false)
-const git = async (args: string[]): Promise<void> => { await runFile('git', args, { maxBuffer: 20 * 1024 * 1024 }) }
+const git = async (args: string[]): Promise<void> => { await runFile('git', args, { maxBuffer: 20 * 1024 * 1024, timeout: 90_000 }) }
 const uniqueBy = <T>(values: T[], key: (value: T) => string): T[] => [...new Map(values.map(value => [key(value), value])).values()]

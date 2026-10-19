@@ -1,5 +1,8 @@
 import { existsSync, realpathSync } from 'node:fs'
+import { WorkspaceAccess } from './workspace-access.js'
+import type { ScheduledTaskInput } from './scheduled-types.js'
 import path from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { channelCommandId, type ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import type { CodexEvent } from '@codycodeagent/cody-web-core/conversation'
 import { createRuntimeAppServerHost, type AppServerHost } from '@codycodeagent/cody-web-core/runtime'
@@ -134,7 +137,80 @@ const isWithin = (root: string, filename: string): boolean => {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
 }
 
+export type ScheduledRuntimeInput = {
+  runId: string; taskId: string; workspacePath: string; workspacePrompt: string; coreThreadId: string; config: ScheduledTaskInput; prompt: string; signal: AbortSignal
+  onThread: (id: string) => void; onModel: (model: RuntimeResolvedModel) => void; onProgress: (text: string) => void
+}
+
 export class CodyBotRuntime {
+  readonly workspaceAccess: WorkspaceAccess
+  private readonly scheduledContexts = new Map<string, string>()
+  private scheduledInvoker: ((runId: string, tool: string, args: Record<string, unknown>) => Promise<unknown>) | null = null
+  setScheduledInvoker(invoke: (runId: string, tool: string, args: Record<string, unknown>) => Promise<unknown>): void { this.scheduledInvoker = invoke }
+
+  async executeScheduled(input: ScheduledRuntimeInput): Promise<string> {
+    return this.workspaceAccess.use(input.workspacePath, async () => {
+      const { manager, attached } = await this.ensureEngine(input.config.runtimeKind), bindingId = `scheduled-run:${input.runId}`
+      input.signal.throwIfAborted()
+      const workspace = realpathSync.native(input.workspacePath), settings = this.store.getPlatformSettings()
+      const packages = input.config.skillPackageIds.map(id => this.store.listSkillPackages().find(p => p.id === id)).filter((p): p is NonNullable<typeof p> => Boolean(p))
+      const authorized = input.config.toolPackageIds.map(id => this.store.getToolPackage(id))
+      const knowledge = await this.resources.listKnowledge(workspace, input.config.prompt, 12)
+      const skills = await manager.listSkills([workspace], true)
+      const requested = packages.flatMap(p => p.skills)
+      const selected = rankSkillCandidates(skills.filter(s => s.enabled), requested.join(' ')).filter(s => requested.some(name => name === s.name || name === s.path))
+      const instructions = [settings.basePrompt, input.workspacePrompt,
+        '你正在执行 CodyBotHub 的 AI 定时任务。按任务要求自主使用已授权技能与查询能力。以真实工具结果为依据，报告结论、证据和未完成项，不展示推理摘要。',
+        '当前原生沙箱为只读。需要更新工作区时必须调用 codybothub_tasks.sync_workspace；需要执行已授权业务工具包时调用 invoke_tool_package，沿用其审批规则。人工拒绝后不得重复申请相同操作。',
+        `任务：${input.config.name}；执行 ID：${input.runId}。当前能力模式：${input.config.mode}。`,
+        ...packages.map(p => `技能包 ${p.name}（${p.fallbackMode}；${p.skills.join(', ')}）：${p.prompt}`),
+        `授权工具包：${authorized.map(p => `${p.name}（${p.id}）：${p.prompt}`).join('；') || '无'}`,
+        `知识资源索引（按需读取原文）：${knowledge.map(k => `${k.title}: ${k.path}`).join('\n')}`,
+        `任务要求：${input.config.prompt}`,
+      ].filter(Boolean).join('\n\n')
+      const tools = [
+        { type: 'function' as const, name: 'inspect_workspace', description: '只读检查工作区仓库、子模块与本地修改。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+        { type: 'function' as const, name: 'verify_resources', description: '刷新并验证当前引擎能识别的技能和知识资源。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+        { type: 'function' as const, name: 'sync_workspace', description: '按任务配置安全同步代码、子模块、技能与知识库；由平台协调工作区占用、备份与恢复。仅维护模式允许。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+        { type: 'function' as const, name: 'invoke_tool_package', description: '申请或执行本任务授权的工具包；需人工确认时发送飞书卡片，后续结果回到本任务线程。', inputSchema: { type: 'object', properties: { packageId: { type: 'string' }, arguments: { type: 'object' }, reason: { type: 'string' } }, required: ['packageId','arguments','reason'], additionalProperties: false } },
+      ]
+      const context: ExecutionContext = {
+        thread: { cwd: workspace, approvalPolicy: 'never', sandbox: 'read-only', runtimeWorkspaceRoots: [workspace], baseInstructions: null, developerInstructions: instructions, experimentalRawEvents: false, ephemeral: false, dynamicTools: [{ type: 'namespace', name: 'codybothub_tasks', description: '定时任务的受管维护与业务操作', tools }] },
+        turn: { cwd: workspace, runtimeWorkspaceRoots: [workspace], approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: true }, summary: 'concise', additionalContext: { 'scheduled-task': { kind: 'application', value: instructions } } },
+      }
+      try {
+      if (input.coreThreadId) await manager.resume({ id: bindingId, threadId: input.coreThreadId }, context)
+      else await manager.create(bindingId, context)
+      attached.add(bindingId)
+      const threadId = manager.snapshot(bindingId)!.threadId
+      input.onThread(threadId)
+      const model = await this.resolveModel(manager, { model: input.config.model || settings.defaultModel, reasoningEffort: input.config.reasoningEffort || settings.defaultReasoningEffort, modelSource: 'platform', reasoningEffortSource: 'platform', fallbackEnabled: settings.modelFallbackEnabled }, input.config.runtimeKind)
+      input.onModel(model)
+      let answer = ''
+      const unsubscribe = manager.subscribe(event => {
+        if (event.threadId !== threadId) return
+        const text = typeof event.data.text === 'string' ? event.data.text : ''
+        if (event.type === 'assistant.delta') answer += text
+        if (event.type === 'assistant.completed' && text) answer = text
+        if (text && ['assistant.delta','assistant.completed'].includes(event.type)) input.onProgress(answer)
+      })
+      const abort = () => { void manager.interrupt(bindingId).catch(() => undefined) }
+      this.scheduledContexts.set(bindingId, input.runId)
+      input.signal.addEventListener('abort', abort, { once: true })
+      try {
+        input.signal.throwIfAborted()
+        const turn = manager.submit(bindingId, { input: buildTurnUserInput({ text: input.prompt, ...(selected.length ? { skills: selected.map(s => ({ name: s.name, path: s.path })) } : {}) }), runtimeWorkspaceRoots: [workspace], approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: true }, ...(model.model ? { model: model.model } : {}), ...(model.reasoningEffort ? { effort: model.reasoningEffort as TurnInput['effort'] } : {}) }, 'queue', `${input.runId}:${randomUUID()}`)
+        const result = await this.waitForCompletion(manager, bindingId, turn.completed, input.config.runtimeKind, input.config.timeoutMinutes)
+        input.signal.throwIfAborted()
+        if (result.terminalEvent.type === 'turn.failed') throw new Error(String(result.terminalEvent.data.error || 'AI 定时任务失败'))
+        return result.assistantText.trim() || answer.trim() || '任务完成，但没有文本报告。'
+      } finally {
+        input.signal.removeEventListener('abort', abort); unsubscribe(); this.scheduledContexts.delete(bindingId); manager.detach(bindingId); attached.delete(bindingId)
+      }
+      } finally { if(manager.snapshot(bindingId))manager.detach(bindingId);attached.delete(bindingId) }
+    }, input.runId, input.signal)
+  }
+
   private static readonly TOOL_CONTRACT_VERSION = 2
   private readonly engines = new Map<AgentRuntimeKind, EngineState>()
   private readonly resources = new WorkspaceResourceIndex()
@@ -148,7 +224,7 @@ export class CodyBotRuntime {
     private readonly runtimeDirectory: string,
     private readonly commands: Partial<Record<AgentRuntimeKind, string>> = { codex: 'codex', traex: 'traex' },
     private readonly turnTimeoutMs = 15 * 60 * 1000,
-  ) {}
+  ) { this.workspaceAccess = new WorkspaceAccess(path.join(runtimeDirectory,'workspace-pauses.json')) }
 
   setToolPackageInvoker(invoker: (call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string; sourceLogId: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>): void {
     this.toolInvoker = invoker
@@ -168,6 +244,9 @@ export class CodyBotRuntime {
   }
 
   async executeCopilot(input: CopilotExecutionInput): Promise<string> {
+    return this.workspaceAccess.use(input.workspacePath, () => this.executeCopilotImpl(input))
+  }
+  private async executeCopilotImpl(input: CopilotExecutionInput): Promise<string> {
     const engine = await this.ensureEngine('codex'), manager = engine.manager, bindingId = `copilot:${input.sessionId}`
     const context = this.copilotContext(input)
     if (!engine.attached.has(bindingId)) {
@@ -202,7 +281,11 @@ export class CodyBotRuntime {
     }
   }
 
-  async execute(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true, executionMode: 'default' | 'read_only' = 'default', onTaskStatistics?: (statistics: RuntimeTaskStatistics) => void): Promise<string> {
+  async execute(...args: Parameters<CodyBotRuntime['executeImpl']>): Promise<string> {
+    return this.workspaceAccess.use(args[0].workspace.path, () => this.executeImpl(...args))
+  }
+
+  private async executeImpl(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true, executionMode: 'default' | 'read_only' = 'default', onTaskStatistics?: (statistics: RuntimeTaskStatistics) => void): Promise<string> {
     const channel = this.store.getThreadChannel(route.threadChannelId)
     if (channel.runtimeKind !== route.bot.runtimeKind) throw new Error(`Thread Channel runtime mismatch: ${channel.runtimeKind} != ${route.bot.runtimeKind}`)
     const engine = await this.ensureEngine(route.bot.runtimeKind)
@@ -369,6 +452,12 @@ export class CodyBotRuntime {
     })
     const dynamicTools: DynamicToolProvider = { invoke: async (call, binding) => {
       const args = call.arguments && typeof call.arguments === 'object' && !Array.isArray(call.arguments) ? call.arguments as Record<string, unknown> : {}
+      if (call.namespace === 'codybothub_tasks') {
+        const runId = this.scheduledContexts.get(binding.id)
+        if (!runId || !this.scheduledInvoker) throw new Error('定时任务执行上下文不存在')
+        const result = await this.scheduledInvoker(runId, call.tool, args)
+        return { contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: true }
+      }
       if (call.namespace === 'codybothub_admin') {
         const active = this.activeCopilotContexts.get(binding.id)
         if (!active || !this.copilotToolInvoker) throw new Error('CodyBotHub admin Copilot context is unavailable')

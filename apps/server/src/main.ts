@@ -10,6 +10,7 @@ import { FeishuProvisioningService } from './provisioning.js'
 import { SkillSyncService } from './skills.js'
 import { CopilotService } from './copilot.js'
 import { HubTaskService } from './tasks.js'
+import { ScheduledTaskService } from './scheduled.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = path.resolve(here, '../../..')
@@ -38,14 +39,20 @@ const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))
 const copilot = new CopilotService(store, runtime, (botId, query) => feishu.resolveObservedUserIdentities(botId, query))
 runtime.setCopilotToolInvoker(call => copilot.invokeTool(call))
 const tasks = new HubTaskService(store, runtime)
+const scheduled = new ScheduledTaskService(store, runtime, skills, dataDir, {
+  send: (botId, chatId, card, uuid) => feishu.sendScheduledCard(botId, chatId, card, uuid),
+  update: (botId, messageId, card) => feishu.updateScheduledCard(botId, messageId, card),
+  mayApprove: (botId, packageId, actorId) => feishu.mayApproveScheduled(botId, packageId, actorId),
+})
+feishu.setScheduledActionHandler((botId, actorId, actionId, reject) => scheduled.onAction(botId, actorId, actionId, reject))
 const server = createHubServer({
-  store, vault, runtime, webDist, provisioning, skills, copilot, tasks,
+  store, vault, runtime, webDist, provisioning, skills, copilot, tasks, scheduled,
   mcpToken: process.env.CODY_BOT_HUB_MCP_TOKEN ?? '', mcpPrincipal: process.env.CODY_BOT_HUB_MCP_PRINCIPAL ?? 'mcp-client',
   onConfigurationChanged: () => feishu.reload(),
   onMessageRetry: () => feishu.resumeQueuedJobs(),
   getDeploymentStatus: () => {
     const status = feishu.deploymentStatus(), taskHealth = tasks.health()
-    return { ...status, draining: status.draining || taskHealth.draining, activeJobs: status.activeJobs + taskHealth.activeTasks, queuedJobs: store.systemHealth().queue.queued + taskHealth.queuedTasks }
+    return { ...status, draining: status.draining || taskHealth.draining, activeJobs: status.activeJobs + taskHealth.activeTasks + scheduled.health().activeTasks, queuedJobs: store.systemHealth().queue.queued + taskHealth.queuedTasks + scheduled.health().queuedTasks }
   },
   getSystemHealth: () => {
     const checkedAt = new Date(), storeHealth = store.systemHealth(), feishuHealth = feishu.health(), runtimeHealth = runtime.health()
@@ -77,6 +84,7 @@ server.listen(port, host, () => {
   console.log(`CodyBotHub listening on http://${host}:${port}`)
   void feishu.start()
   tasks.resumeQueuedTasks()
+  scheduled.start()
 })
 
 let shuttingDown = false
@@ -86,8 +94,10 @@ const shutdown = async (signal: string) => {
   clearInterval(threadProfileTimer)
   feishu.beginDrain()
   tasks.beginDrain()
+  scheduled.beginDrain()
   console.info(`[shutdown] ${signal} received; waiting for ${feishu.deploymentStatus().activeJobs + tasks.health().activeTasks} active jobs`)
-  await Promise.all([feishu.waitForIdle(), tasks.waitForIdle()])
+  await Promise.all([feishu.waitForIdle(), tasks.waitForIdle(), scheduled.waitForIdle()])
+  await scheduled.stop()
   console.info('[shutdown] active jobs completed; stopping providers and runtime')
   feishu.stop()
   await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
@@ -95,7 +105,7 @@ const shutdown = async (signal: string) => {
   store.close()
   process.exit(0)
 }
-process.on('SIGUSR2', () => { feishu.beginDrain(); tasks.beginDrain() })
-process.on('SIGUSR1', () => { if (!shuttingDown) { feishu.cancelDrain(); tasks.cancelDrain() } })
+process.on('SIGUSR2', () => { feishu.beginDrain(); tasks.beginDrain(); scheduled.beginDrain() })
+process.on('SIGUSR1', () => { if (!shuttingDown) { feishu.cancelDrain(); tasks.cancelDrain(); scheduled.cancelDrain() } })
 process.on('SIGINT', () => { void shutdown('SIGINT').catch(error => { console.error('[shutdown] failed:', error); process.exit(1) }) })
 process.on('SIGTERM', () => { void shutdown('SIGTERM').catch(error => { console.error('[shutdown] failed:', error); process.exit(1) }) })

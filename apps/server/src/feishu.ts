@@ -68,6 +68,30 @@ export const selectReplyMentions = (
 }
 
 export class FeishuBotManager {
+  private scheduledActionHandler: ((botId: string, actorId: string, actionId: string, reject: boolean) => Promise<Record<string, unknown>>) | null = null
+  setScheduledActionHandler(handler: (botId: string, actorId: string, actionId: string, reject: boolean) => Promise<Record<string, unknown>>): void { this.scheduledActionHandler = handler }
+  async sendScheduledCard(botId: string, chatId: string, card: FeishuCard, uuid: string): Promise<string> {
+    const provider = this.providers.get(botId)?.provider
+    if (!provider) throw new Error('飞书 Bot 尚未连接')
+    return this.retryDelivery(provider, () => provider.sendCard(chatId, card, createHash('sha256').update(uuid).digest('hex').slice(0,32)))
+  }
+  async updateScheduledCard(botId: string, messageId: string, card: FeishuCard): Promise<void> {
+    const provider = this.providers.get(botId)?.provider
+    if (!provider) throw new Error('飞书 Bot 尚未连接')
+    await this.retryDelivery(provider, () => provider.updateCard(messageId, card))
+  }
+  async mayApproveScheduled(botId: string, packageId: string, actorId: string): Promise<boolean> {
+    const bot = this.store.listBots().find(b => b.id === botId), pack = this.store.getToolPackage(packageId)
+    if (!bot || !bot.workspaceIds.includes(pack.workspaceId)) return false
+    if (pack.approverIds.includes(actorId) || bot.operatorIds.includes(actorId)) return true
+    if (pack.approverIds.length || bot.operatorIds.length) return false
+    const provider = this.providers.get(botId)?.provider
+    if (!provider) return false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    try { return (await Promise.race([provider.applicationAdministrators(), new Promise<never>((_, reject) => { timer=setTimeout(()=>reject(new Error('管理员身份查询超时')),1200) })])).administratorIds.includes(actorId) }
+    catch { return false } finally { if(timer)clearTimeout(timer) }
+  }
+
   private readonly providers = new Map<string, ManagedProvider>()
   private readonly channelQueues = new Map<string, Promise<void>>()
   private readonly scheduledJobs = new Set<string>()
@@ -211,6 +235,11 @@ export class FeishuBotManager {
   }
 
   private async runToolExecution(executionId: string): Promise<void> {
+    const execution = this.store.getToolPackageExecution(executionId), workspace = this.store.getWorkspace(this.store.getToolPackage(execution.toolPackageId).workspaceId)
+    if (this.runtime.workspaceAccess) return this.runtime.workspaceAccess.use(workspace.path, () => this.runToolExecutionImpl(executionId))
+    return this.runToolExecutionImpl(executionId)
+  }
+  private async runToolExecutionImpl(executionId: string): Promise<void> {
     let execution = this.store.getToolPackageExecution(executionId)
     if (execution.status !== 'queued') return
     const pack = this.store.getToolPackage(execution.toolPackageId)
@@ -615,6 +644,11 @@ export class FeishuBotManager {
   }
 
   private async onAction(botId: string, provider: FeishuProvider, action: FeishuCardAction): Promise<Record<string, unknown>> {
+    if (['scheduled_tool_approve','scheduled_tool_reject'].includes(String(action.value.action))) {
+      if (action.value.botId !== botId || !this.scheduledActionHandler) return { toast: { type: 'error', content: '定时任务审批已失效' } }
+      try { return await this.scheduledActionHandler(botId, action.actorId, String(action.value.executionId ?? ''), action.value.action === 'scheduled_tool_reject') }
+      catch (error) { return { toast: { type: 'error', content: error instanceof Error ? error.message : String(error) } } }
+    }
     if (['tool_package_approve', 'tool_package_reject'].includes(String(action.value.action))) return this.onToolPackageAction(botId, provider, action)
     if (action.value.action !== 'bind_scene' || action.value.botId !== botId) return { toast: { type: 'warning', content: '这个操作已失效' } }
     const bot = this.store.listBots().find(item => item.id === botId)

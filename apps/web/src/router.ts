@@ -14,6 +14,9 @@ import ConversationThreadsView from './views/ConversationThreadsView.vue'
 import SkillsView from './views/SkillsView.vue'
 import ThreadRoutingView from './views/ThreadRoutingView.vue'
 import GuideView from './views/GuideView.vue'
+import ScheduledTasksView from './views/ScheduledTasksView.vue'
+import ScheduledTaskEditor from './views/ScheduledTaskEditor.vue'
+import ScheduledRunView from './views/ScheduledRunView.vue'
 import ToolsView from './views/ToolsView.vue'
 import ToolPackagesView from './views/ToolPackagesView.vue'
 
@@ -23,6 +26,10 @@ export const router = createRouter({
     { path: '/auth', name: 'auth', component: AuthView, meta: { public: true } },
     { path: '/', name: 'dashboard', component: DashboardView },
     { path: '/guide', name: 'guide', component: GuideView },
+    { path: '/scheduled-tasks', name: 'scheduled-tasks', component: ScheduledTasksView },
+    { path: '/scheduled-tasks/new', name: 'scheduled-task-new', component: ScheduledTaskEditor },
+    { path: '/scheduled-tasks/:id', name: 'scheduled-task-edit', component: ScheduledTaskEditor },
+    { path: '/scheduled-runs/:id', name: 'scheduled-run', component: ScheduledRunView },
     { path: '/workspaces', name: 'workspaces', component: WorkspacesView },
     { path: '/bots', name: 'bots', component: BotsView },
     { path: '/scenes', name: 'scenes', component: ScenesView },

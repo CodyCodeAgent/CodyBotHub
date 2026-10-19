@@ -1,3 +1,4 @@
+import type { ScheduledTaskInput, ScheduledTask, ScheduledRun, ScheduledRunSummary, ScheduledTemplate, SchedulerHealth, ScheduleConfig, WorkspaceRepository } from './types'
 import type { AdminAccount, AgentRuntimeKind, AuditLog, Bot, ChatMetadata, ConversationThread, CopilotProposal, CopilotState, DashboardDimensions, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, SystemHealth, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Tool, ToolPackage, ToolPackageExecution, ToolScriptVersion, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
@@ -18,6 +19,23 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
 }
 
 export const api = {
+  scheduledTemplates: () => request<ScheduledTemplate[]>('/scheduled-templates'),
+  scheduledMaintenance: (workspaceId:string) => request<{paused:boolean;reason:string}>(`/scheduled-maintenance?workspaceId=${encodeURIComponent(workspaceId)}`),
+  resumeScheduledWorkspace: (workspaceId:string) => request<{ok:boolean}>('/scheduled-maintenance',{method:'POST',body:JSON.stringify({workspaceId})}),
+  scheduledHealth: () => request<SchedulerHealth>('/scheduled-health'),
+  scheduledTasks: (filters: {query?:string;workspaceId?:string;enabled?:string;limit?:number;offset?:number} = {}) => { const p=new URLSearchParams(); for(const [k,v] of Object.entries(filters)) if(v!==undefined&&v!=='')p.set(k,String(v)); return request<PageResult<ScheduledTask>>(`/scheduled-tasks?${p}`) },
+  scheduledTask: (id:string) => request<ScheduledTask>(`/scheduled-tasks/${encodeURIComponent(id)}`),
+  saveScheduledTask: (value:ScheduledTaskInput,id?:string) => request<ScheduledTask>(id?`/scheduled-tasks/${encodeURIComponent(id)}`:'/scheduled-tasks',{method:id?'PUT':'POST',body:JSON.stringify(value)}),
+  enableScheduledTask: (id:string,enabled:boolean) => request<ScheduledTask>(`/scheduled-tasks/${encodeURIComponent(id)}/enabled`,{method:'PUT',body:JSON.stringify({enabled})}),
+  archiveScheduledTask: (id:string) => request<void>(`/scheduled-tasks/${encodeURIComponent(id)}`,{method:'DELETE'}),
+  triggerScheduledTask: (id:string) => request<ScheduledRun>(`/scheduled-tasks/${encodeURIComponent(id)}/run`,{method:'POST'}),
+  scheduledPreview: (schedule:ScheduleConfig) => request<string[]>('/scheduled-preview',{method:'POST',body:JSON.stringify({schedule})}),
+  scheduledRepository: (workspaceId:string) => request<WorkspaceRepository>(`/scheduled-workspace?workspaceId=${encodeURIComponent(workspaceId)}`),
+  scheduledRuns: (filters:{taskId?:string;workspaceId?:string;status?:string;from?:string;to?:string;limit?:number;offset?:number}={}) => {const p=new URLSearchParams();for(const [k,v] of Object.entries(filters))if(v!==undefined&&v!=='')p.set(k,String(v));return request<PageResult<ScheduledRunSummary>>(`/scheduled-runs?${p}`)},
+  scheduledRun: (id:string) => request<ScheduledRun>(`/scheduled-runs/${encodeURIComponent(id)}`),
+  cancelScheduledRun: (id:string) => request<ScheduledRun>(`/scheduled-runs/${encodeURIComponent(id)}/cancel`,{method:'POST'}),
+  retryScheduledDelivery: (id:string) => request<ScheduledRun>(`/scheduled-runs/${encodeURIComponent(id)}/delivery`,{method:'POST'}),
+
   authStatus: () => request<AuthStatus>('/auth/status'),
   setup: (loginName: string, displayName: string, password: string) => request<AuthStatus>('/auth/setup', { method: 'POST', body: JSON.stringify({ loginName, displayName, password }) }),
   login: (loginName: string, password: string) => request<AuthStatus>('/auth/login', { method: 'POST', body: JSON.stringify({ loginName, password }) }),

@@ -71,3 +71,8 @@ export interface SystemHealth {
   feishu: { draining: boolean; drainStartedAt: string; activeJobs: number; pendingReceipts: number; configuredBots: number; activeProviders: number; connectedProviders: number; scheduledJobs: number; activeChannels: number; lastQueueScanAt: string; lastError: string; providers: Array<{ botId: string; botName: string; state: string; error: string }> }
   runtime: { initialized: boolean; attachedChannels: number; engines: Array<{ kind: AgentRuntimeKind; label: string; initialized: boolean; attachedChannels: number; state: string; error: string }> }
 }
+
+export type { ScheduleConfig, WorkspaceSyncConfig, ScheduledTaskInput, ScheduledTask, ScheduledRunSummary, ScheduledRun, ScheduledRunStatus, ScheduledEvent, ScheduledAction } from '../../server/src/scheduled-types'
+export interface SchedulerHealth { draining:boolean; activeTasks:number; queuedTasks:number; ready:boolean; totalTasks:number; enabledTasks:number; recentRuns:number; recentFailed:number; awaitingApproval:number }
+export interface ScheduledTemplate {id:string;name:string;description:string;mode:'read_only'|'maintenance';prompt:string}
+export interface WorkspaceRepository {root:string;branch:string;commit:string;changes:string;submodules:Array<{path:string;initialized:boolean;commit:string}>}

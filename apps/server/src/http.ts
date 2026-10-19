@@ -15,6 +15,10 @@ import { removeToolSource, syncToolSource } from './tool-source.js'
 import type { CopilotService } from './copilot.js'
 import type { HubTaskService } from './tasks.js'
 import { createMcpEndpoint } from './mcp.js'
+import { scheduledTemplates, type ScheduledTaskService } from './scheduled.js'
+import { nextScheduleDates } from './schedule.js'
+import { inspectWorkspace } from './workspace-sync.js'
+import type { ScheduleConfig } from './scheduled-types.js'
 
 type Json = Record<string, unknown>
 
@@ -76,11 +80,12 @@ export interface HubServerOptions {
   skills: SkillSyncService
   copilot: CopilotService
   tasks: HubTaskService
+  scheduled?: ScheduledTaskService
   mcpToken?: string
   mcpPrincipal?: string
 }
 
-export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, getSystemHealth, getDeploymentStatus, provisioning, skills, copilot, tasks, mcpToken = '', mcpPrincipal = 'mcp-client' }: HubServerOptions) => {
+export const createHubServer = ({ store, vault, runtime, webDist, onConfigurationChanged, onMessageRetry, getSystemHealth, getDeploymentStatus, provisioning, skills, copilot, tasks, scheduled, mcpToken = '', mcpPrincipal = 'mcp-client' }: HubServerOptions) => {
   const auth = new AuthService(store)
   const mcp = createMcpEndpoint(tasks, mcpToken, mcpPrincipal)
 
@@ -108,6 +113,33 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (!auth.isAuthenticated(request)) throw new HttpError(401, 'Authentication required')
         const actor = auth.currentAccount(request)!
         const audit = (action: string, targetType: string, targetId: string, summary: string, details: Record<string, unknown> = {}) => store.createAuditLog({ actor, action, targetType, targetId, summary, details, ipAddress: requestIp(request) })
+
+        if (url.pathname.startsWith('/api/scheduled-')) {
+          if (!scheduled) throw new HttpError(503, '定时任务服务未启用')
+          const params = url.searchParams
+          const pagination = { limit: Math.min(100, Math.max(1, Number(params.get('limit')) || 20)), offset: Math.max(0, Number(params.get('offset')) || 0) }
+          if (method === 'GET' && url.pathname === '/api/scheduled-templates') return sendJson(response, 200, scheduledTemplates)
+          if (method === 'GET' && url.pathname === '/api/scheduled-maintenance') return sendJson(response,200,scheduled.maintenance(params.get('workspaceId')||''))
+          if (method === 'POST' && url.pathname === '/api/scheduled-maintenance') {const workspaceId=required(await readJson(request),'workspaceId');scheduled.resumeWorkspace(workspaceId);audit('scheduled_workspace.resume','workspace',workspaceId,'管理员核实后解除工作区维护暂停');return sendJson(response,200,{ok:true})}
+          if (method === 'GET' && url.pathname === '/api/scheduled-health') return sendJson(response, 200, scheduled.health())
+          if (method === 'GET' && url.pathname === '/api/scheduled-tasks') return sendJson(response, 200, scheduled.records.listTasks({ ...pagination, query: params.get('query') || '', workspaceId: params.get('workspaceId') || '', enabled: params.get('enabled') || '' }))
+          if (method === 'POST' && url.pathname === '/api/scheduled-tasks') { const task=await scheduled.save(await readJson(request),actor.loginName); audit('scheduled_task.create','scheduled_task',task.id,`创建定时任务 ${task.name}`); return sendJson(response,201,task) }
+          if (method === 'POST' && url.pathname === '/api/scheduled-preview') return sendJson(response,200,nextScheduleDates((await readJson(request)).schedule as ScheduleConfig))
+          if (method === 'GET' && url.pathname === '/api/scheduled-workspace') { const workspace=store.getWorkspace(params.get('workspaceId') || ''); return sendJson(response,200,await inspectWorkspace(workspace.path)) }
+          if (method === 'GET' && url.pathname === '/api/scheduled-runs') return sendJson(response,200,scheduled.records.listRuns({...pagination,taskId:params.get('taskId')||'',workspaceId:params.get('workspaceId')||'',status:params.get('status')||'',from:params.get('from')||'',to:params.get('to')||''}))
+          const taskMatch=url.pathname.match(/^\/api\/scheduled-tasks\/([^/]+)(?:\/(run|enabled))?$/u)
+          if (taskMatch) {
+            const id=taskMatch[1]!, action=taskMatch[2], task=scheduled.records.getTask(id)
+            if(method==='POST'&&action==='run') {const run=scheduled.trigger(id,actor.loginName);audit('scheduled_task.run','scheduled_run',run.id,`手动执行 ${task.name}`);return sendJson(response,202,run)}
+            if(method==='PUT'&&action==='enabled') {const input=await readJson(request),updated=await scheduled.save({...task,enabled:bool(input.enabled)},actor.loginName,id);audit('scheduled_task.toggle','scheduled_task',id,`${updated.enabled?'启用':'暂停'}定时任务 ${task.name}`);return sendJson(response,200,updated)}
+            if(method==='GET'&&!action)return sendJson(response,200,task)
+            if(method==='PUT'&&!action){const updated=await scheduled.save(await readJson(request),actor.loginName,id);audit('scheduled_task.update','scheduled_task',id,`修改定时任务 ${updated.name}`,{revision:updated.revision});return sendJson(response,200,updated)}
+            if(method==='DELETE'&&!action){scheduled.records.archive(id);audit('scheduled_task.archive','scheduled_task',id,`归档定时任务 ${task.name}`);response.statusCode=204;return response.end()}
+          }
+          const runMatch=url.pathname.match(/^\/api\/scheduled-runs\/([^/]+)(?:\/(cancel|delivery))?$/u)
+          if(runMatch){const id=runMatch[1]!, action=runMatch[2];if(method==='GET'&&!action)return sendJson(response,200,scheduled.records.getRun(id));if(method==='POST'&&action==='cancel'){const run=scheduled.cancel(id);audit('scheduled_run.cancel','scheduled_run',id,'取消或中断定时执行');return sendJson(response,200,run)}if(method==='POST'&&action==='delivery'){const run=await scheduled.retryDelivery(id);audit('scheduled_run.delivery','scheduled_run',id,'重新投递定时任务结果');return sendJson(response,200,run)}}
+          throw new HttpError(404,'定时任务接口不存在')
+        }
 
         if (method === 'GET' && url.pathname === '/api/system-health') return sendJson(response, 200, getSystemHealth?.() ?? null)
         if (method === 'GET' && url.pathname === '/api/tasks/page') {
@@ -203,7 +235,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         if (skillSourceMatch) {
           const sourceId = decodeURIComponent(skillSourceMatch[1]!), action = skillSourceMatch[2]
           if (method === 'POST' && action === 'sync') {
-            const result = await skills.sync(sourceId)
+            const result = await runtime.workspaceAccess.maintain(store.getWorkspace(store.getSkillSource(sourceId).workspaceId).path, `skill-source:${sourceId}`, () => skills.sync(sourceId))
             audit('skill_source.sync', 'skill_source', sourceId, `同步技能源 ${result.source.name}`, { commit: result.source.lastCommit, installed: result.installed, skipped: result.skipped })
             return sendJson(response, 200, result)
           }
@@ -236,7 +268,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         }
         if (method === 'POST' && url.pathname === '/api/skill-catalog/install') {
           const body = await readJson(request)
-          const result = await skills.install({ sourceId: required(body, 'sourceId'), workspaceId: required(body, 'workspaceId'), skillKeys: stringList(body.skillKeys), all: bool(body.all), force: bool(body.force) })
+          const result = await runtime.workspaceAccess.maintain(store.getWorkspace(required(body, 'workspaceId')).path, `skill-install:${Date.now()}`, () => skills.install({ sourceId: required(body, 'sourceId'), workspaceId: required(body, 'workspaceId'), skillKeys: stringList(body.skillKeys), all: bool(body.all), force: bool(body.force) }))
           audit('skill.install', 'skill_source', String(body.sourceId), `安装或更新 Skill：${result.installed} 个`, { installed: result.installed, skipped: result.skipped, errors: result.errors })
           return sendJson(response, 200, result)
         }
@@ -519,6 +551,9 @@ const skillSourceInput = (body: Json) => ({
 
 const messageStatus = (error: unknown): number => {
   const message = error instanceof Error ? error.message : ''
+  if (error instanceof Error && ['ZodError','RangeError'].includes(error.name)) return 400
+  if (/定时任务不存在|执行记录不存在|工具执行请求不存在/u.test(message)) return 404
+  if (/任务已有|任务尚未|当前执行|工作区|工具包|技能包|技能源|接收群|发送 Bot|执行间隔|执行时间|执行周期|请选择|Cron|同步模板/u.test(message) || message.startsWith('Git ')) return 400
   if (message.includes('UNIQUE constraint')) return 409
   if (message.includes('FOREIGN KEY constraint')) return 409
   if (message.includes('not found')) return 404
