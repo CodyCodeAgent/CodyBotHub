@@ -53,7 +53,7 @@ export class SkillSyncService {
         }
       }
       const { stdout } = await runFile('git', ['-C', checkout, 'rev-parse', 'HEAD'], { maxBuffer: 1024 * 1024 })
-      const updated = this.store.updateSkillSourceSync(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: stdout.trim(), lastError: '' })
+      const updated = this.store.updateSkillSourceSync(sourceId, { lastSyncedAt: source.lastSyncedAt, lastCommit: stdout.trim(), lastError: '' })
       await this.copyKnowledge(updated)
       let installed = 0, skipped = 0
       if (updated.autoInstall) {
@@ -62,7 +62,8 @@ export class SkillSyncService {
         skipped = result.skipped
         if (result.errors.length) throw new Error(`技能源安装未全部完成：${result.errors.join('; ')}`)
       }
-      return { source: this.store.getSkillSource(sourceId), installed, skipped }
+      const completed = this.store.updateSkillSourceSync(sourceId, { lastSyncedAt: new Date().toISOString(), lastCommit: stdout.trim(), lastError: '' })
+      return { source: completed, installed, skipped }
     } catch (error) {
       this.store.updateSkillSourceSync(sourceId, { lastError: error instanceof Error ? error.message : String(error) })
       throw error

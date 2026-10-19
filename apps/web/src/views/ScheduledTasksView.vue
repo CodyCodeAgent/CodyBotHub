@@ -90,6 +90,7 @@ const filter = async () => {
   offset.value = 0
   await load()
 }
+const clearTaskFilter = () => { taskId.value = ''; void filter() }
 const move = async (value: number) => {
   offset.value = value
   await load()
@@ -353,10 +354,7 @@ watch(
       <div v-if="taskId" class="notice">
         正在查看 {{ selectedTaskName }} 的记录。<button
           class="ghost-button compact"
-          @click="
-            taskId = ''
-            filter()
-          "
+          @click="clearTaskFilter"
         >
           清除任务筛选
         </button>

@@ -182,6 +182,7 @@ const next = async () => {
   step.value++
   window.scrollTo({ top: 0 })
 }
+const previousStep = () => { step.value--; error.value = '' }
 const save = async () => {
   syncConfig()
   saving.value = true
@@ -736,10 +737,7 @@ onUnmounted(() => {
               v-if="step > 1"
               class="ghost-button"
               type="button"
-              @click="
-                step--
-                error = ''
-              "
+              @click="previousStep"
             >
               <ArrowLeft :size="15" />上一步</button
             ><button class="button" :disabled="saving">
