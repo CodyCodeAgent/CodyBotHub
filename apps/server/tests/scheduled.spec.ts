@@ -6,6 +6,7 @@ import { HubStore } from '../src/db.js'
 import { nextScheduleDates } from '../src/schedule.js'
 import { ScheduledTaskService } from '../src/scheduled.js'
 import { WorkspaceAccess } from '../src/workspace-access.js'
+import { WorkspaceSyncService } from '../src/workspace-sync.js'
 import type { ScheduledRuntimeInput } from '../src/runtime.js'
 import type { ScheduledTaskInput } from '../src/scheduled-types.js'
 const cleaners: Array<() => Promise<void>> = []
@@ -352,6 +353,47 @@ describe('persistent AI scheduled tasks', () => {
     await finish(s.service)
     expect(s.runtime.executeScheduled.mock.calls[1]![0].coreThreadId).toBe('native-thread')
   })
+  it('allows AI selections only within configured preserved files and submodules', async () => {
+    const s = setup()
+    const spy = vi.spyOn(WorkspaceSyncService.prototype, 'run').mockResolvedValue({})
+    try {
+      const task = await s.service.save(
+        {
+          ...s.input,
+          mode: 'maintenance',
+          sync: {
+            ...s.input.sync,
+            preserveLocalFiles: ['local.toml', 'other.toml'],
+            submodules: [{ path: 'knowledge', mode: 'branch', branch: 'main', required: true }]
+          }
+        },
+        'admin'
+      )
+      s.runtime.executeScheduled.mockImplementation(async (input) => {
+        await expect(
+          s.service.invoke(input.runId, 'sync_workspace', { preserveLocalFiles: ['not-authorized'] })
+        ).rejects.toThrow('超出任务配置范围')
+        await expect(
+          s.service.invoke(input.runId, 'sync_workspace', { submodulePaths: ['not-authorized'] })
+        ).rejects.toThrow('超出任务配置范围')
+        await s.service.invoke(input.runId, 'sync_workspace', {
+          preserveLocalFiles: ['local.toml'],
+          submodulePaths: []
+        })
+        return 'done'
+      })
+      s.service.trigger(task.id, 'admin')
+      await finish(s.service)
+      expect(spy).toHaveBeenCalledTimes(1)
+      expect(spy.mock.calls[0]![0].config).toMatchObject({ preserveLocalFiles: ['local.toml'], submodules: [] })
+      expect(s.service.records.getTask(task.id).sync.preserveLocalFiles).toEqual(['local.toml', 'other.toml'])
+      await expect(
+        s.service.save({ ...s.input, sync: { ...s.input.sync, preserveLocalFiles: ['../outside'] } }, 'admin')
+      ).rejects.toThrow('精确相对路径')
+    } finally {
+      spy.mockRestore()
+    }
+  })
 })
 describe('workspace maintenance coordination', () => {
   it('waits for active readers and blocks new readers while applying', async () => {
@@ -390,10 +432,13 @@ describe('workspace maintenance coordination', () => {
     await expect(next.use(s.directory, async () => true)).resolves.toBe(true)
   })
   it('blocks waiting readers and maintenance when an earlier writer pauses the workspace', async () => {
-    const gate = new WorkspaceAccess(), root = tmpdir()
+    const gate = new WorkspaceAccess(),
+      root = tmpdir()
     let release!: () => void
     const write = gate.maintain(root, 'first', async () => {
-      await new Promise<void>((resolve) => { release = resolve })
+      await new Promise<void>((resolve) => {
+        release = resolve
+      })
       gate.pause(root, 'verification incomplete')
     })
     const action = vi.fn(async () => true)

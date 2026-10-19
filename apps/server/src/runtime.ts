@@ -167,11 +167,12 @@ export class CodyBotRuntime {
         `授权工具包：${authorized.map(p => `${p.name}（${p.id}）：${p.prompt}`).join('；') || '无'}`,
         `知识资源索引（按需读取原文）：${knowledge.map(k => `${k.title}: ${k.path}`).join('\n')}`,
         `任务要求：${input.config.prompt}`,
+        `同步授权配置：${JSON.stringify(input.config.sync)}。sync_workspace 默认使用全部配置；可通过 preserveLocalFiles、submodulePaths 选择其中一部分，不得扩展配置范围。本机保留文件维持原内容，远端对这些文件的变更会记录并提示。`,
       ].filter(Boolean).join('\n\n')
       const tools = [
         { type: 'function' as const, name: 'inspect_workspace', description: '只读检查工作区仓库、子模块与本地修改。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
         { type: 'function' as const, name: 'verify_resources', description: '刷新并验证当前引擎能识别的技能和知识资源。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
-        { type: 'function' as const, name: 'sync_workspace', description: '按任务配置安全同步代码、子模块、技能与知识库；由平台协调工作区占用、备份与恢复。仅维护模式允许。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+        { type: 'function' as const, name: 'sync_workspace', description: '按任务配置安全同步代码、子模块、技能与知识库。可在已授权范围内选择本机保留文件和子模块；省略参数则沿用任务配置。仅维护模式允许。', inputSchema: { type: 'object', properties: { preserveLocalFiles: { type: 'array', items: { type: 'string' } }, submodulePaths: { type: 'array', items: { type: 'string' } } }, additionalProperties: false } },
         { type: 'function' as const, name: 'invoke_tool_package', description: '申请或执行本任务授权的工具包；需人工确认时发送飞书卡片，后续结果回到本任务线程。', inputSchema: { type: 'object', properties: { packageId: { type: 'string' }, arguments: { type: 'object' }, reason: { type: 'string' } }, required: ['packageId','arguments','reason'], additionalProperties: false } },
       ]
       const context: ExecutionContext = {

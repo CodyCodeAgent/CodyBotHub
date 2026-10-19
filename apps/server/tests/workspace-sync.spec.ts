@@ -1,9 +1,24 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  symlinkSync,
+  chmodSync,
+  statSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { inspectWorkspace, WorkspaceSyncService, skillContentHash } from '../src/workspace-sync.js'
+import {
+  inspectWorkspace,
+  WorkspaceSyncService,
+  skillContentHash,
+  validatePreservedPaths
+} from '../src/workspace-sync.js'
 import type { WorkspaceSyncConfig } from '../src/scheduled-types.js'
 vi.setConfig({ testTimeout: 20000 })
 const dirs: string[] = []
@@ -38,7 +53,10 @@ const setup = () => {
       sourceIds: []
     }
   let count = 0
-  const run = (verify: () => Promise<unknown> = async () => ({ skills: ['demo'], knowledgeRoots: [] })) =>
+  const run = (
+    verify: () => Promise<unknown> = async () => ({ skills: ['demo'], knowledgeRoots: [] }),
+    maintain: <T>(action: () => Promise<T>) => Promise<T> = (action) => action()
+  ) =>
     service.run({
       workspaceId: 'workspace-id',
       workspacePath: workspace,
@@ -46,13 +64,95 @@ const setup = () => {
       config,
       signal: new AbortController().signal,
       event: vi.fn(),
-      maintain: (action) => action(),
+      maintain,
       syncSource: async () => ({}),
       verify
     })
   return { source, workspace, data, service, config, run }
 }
 describe('workspace resource synchronization', () => {
+  it('keeps allowlisted local content and mode while recording upstream file changes, including later runs', async () => {
+    const s = setup()
+    s.config.preserveLocalFiles = ['README.md']
+    const bytes = Buffer.from([0, 1, 255, 10, 13])
+    writeFileSync(path.join(s.workspace, 'README.md'), bytes)
+    chmodSync(path.join(s.workspace, 'README.md'), 0o750)
+    writeFileSync(path.join(s.source, 'README.md'), 'upstream changes')
+    writeFileSync(path.join(s.source, 'new.txt'), 'new code')
+    commit(s.source, 'remote update')
+    const result = await s.run()
+    expect(git(s.workspace, 'rev-parse', 'HEAD')).toBe(git(s.source, 'rev-parse', 'HEAD'))
+    expect(readFileSync(path.join(s.workspace, 'README.md'))).toEqual(bytes)
+    expect(statSync(path.join(s.workspace, 'README.md')).mode & 0o777).toBe(0o750)
+    expect(readFileSync(path.join(s.workspace, 'new.txt'), 'utf8')).toBe('new code')
+    expect(result.preservedLocalFiles).toEqual([expect.objectContaining({ path: 'README.md', upstreamChanged: true })])
+    expect(result.warnings).toEqual([expect.stringContaining('远端有修改')])
+    const journal = JSON.parse(readFileSync(path.join(s.data, 'workspace-sync/run-1/journal.json'), 'utf8'))
+    expect(readFileSync(journal.localFiles[0].backup)).toEqual(bytes)
+    expect(statSync(journal.localFiles[0].backup).mode & 0o077).toBe(0)
+    await s.run()
+    expect(readFileSync(path.join(s.workspace, 'README.md'))).toEqual(bytes)
+  })
+  it('restores local overrides as well as repository HEAD after verification failure', async () => {
+    const s = setup(),
+      before = git(s.workspace, 'rev-parse', 'HEAD')
+    s.config.preserveLocalFiles = ['README.md']
+    writeFileSync(path.join(s.workspace, 'README.md'), 'machine config')
+    writeFileSync(path.join(s.source, 'README.md'), 'new upstream config')
+    commit(s.source, 'next')
+    await expect(
+      s.run(async () => {
+        throw new Error('verification error')
+      })
+    ).rejects.toThrow('已恢复')
+    expect(git(s.workspace, 'rev-parse', 'HEAD')).toBe(before)
+    expect(readFileSync(path.join(s.workspace, 'README.md'), 'utf8')).toBe('machine config')
+    expect(git(s.workspace, 'diff', '--cached', '--name-only')).toBe('')
+  })
+  it('continues rejecting unrelated tracked modifications and staged changes', async () => {
+    const s = setup()
+    s.config.preserveLocalFiles = ['README.md']
+    writeFileSync(path.join(s.workspace, 'skills/demo/SKILL.md'), 'unsaved business edit')
+    await expect(s.run()).rejects.toThrow('未列入')
+    git(s.workspace, 'restore', '--', 'skills/demo/SKILL.md')
+    writeFileSync(path.join(s.workspace, 'README.md'), 'staged config')
+    git(s.workspace, 'add', 'README.md')
+    await expect(s.run()).rejects.toThrow('暂存')
+    expect(readFileSync(path.join(s.workspace, 'README.md'), 'utf8')).toBe('staged config')
+  })
+  it('refuses an upstream deletion of a preserved file before changing the workspace', async () => {
+    const s = setup(),
+      before = git(s.workspace, 'rev-parse', 'HEAD')
+    s.config.preserveLocalFiles = ['README.md']
+    writeFileSync(path.join(s.workspace, 'README.md'), 'machine config')
+    git(s.source, 'rm', 'README.md')
+    commit(s.source, 'delete config')
+    await expect(s.run()).rejects.toThrow('删除/改名')
+    expect(git(s.workspace, 'rev-parse', 'HEAD')).toBe(before)
+    expect(readFileSync(path.join(s.workspace, 'README.md'), 'utf8')).toBe('machine config')
+  })
+  it('rejects path traversal, globs, submodule paths and symlinks in preserve lists', async () => {
+    for (const file of ['../file', '/tmp/file', '.git/config', '.gitmodules', '*.toml', 'dir/', 'dir/../file'])
+      expect(() => validatePreservedPaths([file])).toThrow('精确相对路径')
+    const s = setup()
+    s.config.preserveLocalFiles = ['skills']
+    await expect(s.run()).rejects.toThrow('目录')
+    rmSync(path.join(s.workspace, 'README.md'))
+    symlinkSync(path.join(s.workspace, 'skills/demo/SKILL.md'), path.join(s.workspace, 'README.md'))
+    s.config.preserveLocalFiles = ['README.md']
+    await expect(s.run()).rejects.toThrow('符号链接')
+  })
+  it('cancels when preserved content changes while waiting for maintenance access', async () => {
+    const s = setup()
+    s.config.preserveLocalFiles = ['README.md']
+    await expect(
+      s.run(undefined, (action) => {
+        writeFileSync(path.join(s.workspace, 'README.md'), 'another user edit')
+        return action()
+      })
+    ).rejects.toThrow('准备期间本机保留文件发生变化')
+    expect(readFileSync(path.join(s.workspace, 'README.md'), 'utf8')).toBe('another user edit')
+  })
   it('installs new skills, preserves runtime environments and detects content-only changes', async () => {
     const s = setup()
     expect((await s.run()).skills).toEqual({ installed: 1, updated: 0, unchanged: 0 })

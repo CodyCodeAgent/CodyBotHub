@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { cp, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, readdir, realpath, rename, rm, stat, lstat, chmod, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import type { WorkspaceSyncConfig } from './scheduled-types.js'
 const exec = promisify(execFile)
@@ -16,11 +16,12 @@ const exists = async (file: string) =>
     () => true,
     () => false
   )
-const git = async (cwd: string, args: string[], signal?: AbortSignal): Promise<string> => {
+const git = async (cwd: string, args: string[], signal?: AbortSignal, raw = false): Promise<string> => {
   try {
-    return (
+    const output = (
       await exec('git', args, { cwd, timeout: 90000, maxBuffer: 8 * 1024 * 1024, ...(signal ? { signal } : {}) })
-    ).stdout.trim()
+    ).stdout
+    return raw ? output : output.trim()
   } catch (error) {
     const e = error as Error & { stderr?: string }
     throw new Error(
@@ -94,6 +95,85 @@ export const skillContentHash = async (root: string): Promise<string> => {
 }
 type Installed = { source: string; checksum: string }
 type Backup = { target: string; backup: string; staging: string; runtime: string[]; created: boolean }
+type LocalFile = { path: string; checksum: string; mode: number }
+type LocalBackup = LocalFile & { backup: string; beforeBlob: string; afterBlob: string; upstreamChanged: boolean }
+const checksum = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex')
+export const validatePreservedPaths = (files: string[]): string[] => {
+  if (files.length > 100) throw new RangeError('本机保留文件超过上限')
+  return [
+    ...new Set(
+      files.map((file) => {
+        if (
+          !file ||
+          path.isAbsolute(file) ||
+          file.includes('\\') ||
+          /[\x00-\x1f*?\[\]]/u.test(file) ||
+          file.split('/').some((part) => !part || part === '.' || part === '..' || part.toLowerCase() === '.git') ||
+          file === '.gitmodules'
+        )
+          throw new RangeError(`本机保留文件需要精确相对路径，不支持目录或通配符：${file}`)
+        return file
+      })
+    )
+  ]
+}
+const blob = async (root: string, commit: string, file: string) => {
+  const entry = await git(root, ['ls-tree', '-z', commit, '--', file], undefined, true)
+  const match = entry.match(/^(100644|100755) blob ([a-f\d]+)\t([^\0]+)\0$/u)
+  if (!match || match[3] !== file)
+    throw new Error(`本机保留文件必须是主仓库已跟踪的普通文件，远端删除/改名需人工处理：${file}`)
+  return match[2]!
+}
+const localState = async (root: string, files: string[]): Promise<LocalFile[]> => {
+  const result: LocalFile[] = []
+  for (const file of files) {
+    const target = path.join(root, file),
+      info = await lstat(target)
+    if (!info.isFile() || (await realpath(target)) !== target)
+      throw new Error(`本机保留文件不能是符号链接或目录：${file}`)
+    if (info.size > 8 * 1024 * 1024) throw new Error(`本机保留文件超过 8 MiB 上限：${file}`)
+    await blob(root, 'HEAD', file)
+    result.push({ path: file, checksum: checksum(await readFile(target)), mode: info.mode & 0o777 })
+  }
+  return result
+}
+const checkChanges = async (root: string, files: string[], signal?: AbortSignal) => {
+  const staged = await git(root, ['diff', '--cached', '--name-only', '-z', '--'], signal, true)
+  if (staged) throw new Error('工作区有暂存修改，请先人工处理；本机保留清单不会处理暂存区')
+  const changes = (
+    await git(
+      root,
+      ['diff', '--no-renames', '--name-only', '-z', '--ignore-submodules=all', 'HEAD', '--'],
+      signal,
+      true
+    )
+  )
+    .split('\0')
+    .filter(Boolean)
+  const blocked = changes.filter((file) => !files.includes(file))
+  if (blocked.length) throw new Error(`工作区有未列入本机保留清单的本地修改，已保留现场：\n${blocked.join('\n')}`)
+}
+const restoreLocalFiles = async (root: string, files: LocalBackup[]) => {
+  for (const file of files) {
+    const bytes = await readFile(file.backup)
+    if (checksum(bytes) !== file.checksum) throw new Error(`本机文件备份校验失败：${file.path}`)
+    const target = path.join(root, file.path),
+      parent = path.dirname(target)
+    if ((await realpath(parent)) !== parent) throw new Error(`本机文件父目录发生变化：${file.path}`)
+    const temporary = path.join(
+      parent,
+      `.codybothub-restore-${createHash('sha256').update(file.path).digest('hex').slice(0, 16)}`
+    )
+    // Exclusive creation never overwrites an unrelated local temporary file or symlink.
+    await writeFile(temporary, bytes, { flag: 'wx', mode: file.mode })
+    try {
+      await chmod(temporary, file.mode)
+      await rename(temporary, target)
+    } finally {
+      await rm(temporary, { force: true })
+    }
+  }
+}
 export const runtimeFiles = async (root: string): Promise<string[]> => {
   const paths: string[] = []
   const walk = async (dir: string) => {
@@ -156,7 +236,9 @@ export class WorkspaceSyncService {
     const { config, signal, event } = input,
       initial = await inspectWorkspace(input.workspacePath),
       root = initial.root
-    if (initial.changes) throw new Error(`工作区有本地修改，已保留现场：\n${initial.changes}`)
+    const preservedPaths = validatePreservedPaths(config.preserveLocalFiles || [])
+    await checkChanges(root, preservedPaths, signal)
+    const initialLocalFiles = await localState(root, preservedPaths)
     await reference(root, config.branch)
     event('fetch', '检查主仓库远端更新')
     await git(root, ['fetch', '--prune', 'origin', config.branch], signal)
@@ -232,6 +314,7 @@ export class WorkspaceSyncService {
       modules: plan,
       phase: 'prepared',
       backups: [] as Backup[],
+      localFiles: [] as LocalBackup[],
       warnings
     }
     const persist = () =>
@@ -246,8 +329,11 @@ export class WorkspaceSyncService {
     return input.maintain(async () => {
       signal.throwIfAborted()
       const fresh = await inspectWorkspace(root)
-      if (fresh.changes || fresh.commit !== initial.commit || fresh.branch !== currentBranch)
+      if (fresh.commit !== initial.commit || fresh.branch !== currentBranch)
         throw new Error('准备期间工作区发生变化，已取消本次应用')
+      await checkChanges(root, preservedPaths, signal)
+      if (JSON.stringify(await localState(root, preservedPaths)) !== JSON.stringify(initialLocalFiles))
+        throw new Error('准备期间本机保留文件发生变化，已取消本次应用')
       for (const m of plan) {
         if (
           (await git(path.join(root, m.path), ['rev-parse', 'HEAD'])) !== m.before ||
@@ -260,6 +346,16 @@ export class WorkspaceSyncService {
         )
           throw new Error(`准备期间子模块 ${m.path} 发生变化`)
       }
+      for (const [index, file] of initialLocalFiles.entries()) {
+        const beforeBlob = await blob(root, initial.commit, file.path),
+          afterBlob = await blob(root, target, file.path)
+        const backup = path.join(directory, `local-file-${index}.bin`)
+        const bytes = await readFile(path.join(root, file.path))
+        if (checksum(bytes) !== file.checksum) throw new Error(`备份前本机文件发生变化：${file.path}`)
+        await writeFile(backup, bytes, { flag: 'wx', mode: 0o600 })
+        journal.localFiles.push({ ...file, backup, beforeBlob, afterBlob, upstreamChanged: beforeBlob !== afterBlob })
+      }
+      await persist()
       journal.phase = 'applying'
       await persist()
       event('applying', '工作区已空闲，开始应用更新')
@@ -274,7 +370,20 @@ export class WorkspaceSyncService {
         unchanged = 0
       try {
         await git(root, ['update-ref', `refs/codybothub-backups/${input.runId}`, initial.commit])
+        if (preservedPaths.length)
+          await git(root, ['restore', '--source=HEAD', '--worktree', '--', ...preservedPaths], signal)
         if (initial.commit !== target) await git(root, ['merge', '--ff-only', target], signal)
+        await restoreLocalFiles(root, journal.localFiles)
+        for (const file of journal.localFiles) {
+          if (file.upstreamChanged) warnings.push(`${file.path}：远端有修改，已按配置保留本机完整内容，请核对远端差异`)
+          event('local_file', `保留本机文件 ${file.path}`, {
+            path: file.path,
+            checksum: file.checksum,
+            beforeBlob: file.beforeBlob,
+            afterBlob: file.afterBlob,
+            upstreamChanged: file.upstreamChanged
+          })
+        }
         for (const m of plan) {
           const dir = path.join(root, m.path)
           await git(dir, ['update-ref', `refs/codybothub-backups/${input.runId}`, m.before])
@@ -391,6 +500,7 @@ export class WorkspaceSyncService {
           await input.syncSource(id)
         }
         signal.throwIfAborted()
+        await restoreLocalFiles(root, journal.localFiles)
         const verification = await input.verify()
         event('verify', '技能和知识资源识别已验证', verification)
         journal.phase = 'completed'
@@ -401,6 +511,7 @@ export class WorkspaceSyncService {
           submodules: plan,
           actualSubmodules: (await inspectWorkspace(root)).submodules,
           skills: { installed, updated, unchanged },
+          preservedLocalFiles: journal.localFiles.map(({ backup, mode, ...file }) => file),
           warnings,
           verification,
           backupDirectory: directory
@@ -440,8 +551,17 @@ export class WorkspaceSyncService {
             rollbackErrors.push(String(e))
           }
         try {
+          if (preservedPaths.length)
+            await git(root, ['restore', '--source=HEAD', '--worktree', '--', ...preservedPaths])
+          // Refresh Git's stat cache after atomic local-file restores, without staging content.
+          await git(root, ['status', '--porcelain', '--untracked-files=no', '--ignore-submodules=all'])
           if ((await git(root, ['rev-parse', 'HEAD'])) !== initial.commit)
             await git(root, ['reset', '--keep', initial.commit])
+        } catch (e) {
+          rollbackErrors.push(String(e))
+        }
+        try {
+          await restoreLocalFiles(root, journal.localFiles)
         } catch (e) {
           rollbackErrors.push(String(e))
         }
@@ -457,7 +577,7 @@ export class WorkspaceSyncService {
         )
         throw Object.assign(
           new Error(
-            `${error instanceof Error ? error.message : String(error)}${rollbackErrors.length ? '；恢复未完成，请核实工作区后再运行' : '；已恢复本轮代码与技能更新'}${config.sourceIds.length ? '；独立技能源的同步结果需单独核实' : ''}`
+            `${error instanceof Error ? error.message : String(error)}${rollbackErrors.length ? `；恢复未完成，请核实工作区后再运行：${rollbackErrors.join('; ')}` : '；已恢复本轮代码与技能更新'}${config.sourceIds.length ? '；独立技能源的同步结果需单独核实' : ''}`
           ),
           { workspaceNeedsReview: rollbackErrors.length > 0 }
         )

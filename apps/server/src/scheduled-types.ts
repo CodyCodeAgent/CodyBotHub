@@ -12,6 +12,7 @@ export type WorkspaceSyncConfig = {
   installSkills: boolean
   skillRoots: string[]
   sourceIds: string[]
+  preserveLocalFiles?: string[]
 }
 export type ScheduledTaskInput = {
   name: string

@@ -39,7 +39,8 @@ const catalog = ref<ModelCatalog>({ items: [], defaultModel: '', defaultReasonin
   previewError = ref(''),
   repository = ref<WorkspaceRepository | null>(null),
   checking = ref(false),
-  skillRoots = ref('skills\n.agents/skills')
+  skillRoots = ref('skills\n.agents/skills'),
+  preserveLocalFiles = ref('')
 const moduleOptions = ref<
   Array<{
     path: string
@@ -81,7 +82,8 @@ const form = reactive<ScheduledTaskInput>({
     submodules: [],
     installSkills: true,
     skillRoots: ['skills', '.agents/skills'],
-    sourceIds: []
+    sourceIds: [],
+    preserveLocalFiles: []
   }
 })
 let alive = true,
@@ -111,6 +113,10 @@ const preview = async () => {
   }
 }
 const syncConfig = () => {
+  form.sync.preserveLocalFiles = preserveLocalFiles.value
+    .split('\n')
+    .map((s) => s.trim())
+    .filter(Boolean)
   form.sync.skillRoots = skillRoots.value
     .split('\n')
     .map((s) => s.trim())
@@ -137,7 +143,7 @@ const inspect = async () => {
       }
     })
     notice.value = repository.value.changes
-      ? '检测到本地修改，同步时会保留现场并停止应用。'
+      ? '检测到本地修改：仅本机保留清单中的文件允许保留后更新，其他修改会阻止同步。'
       : '仓库与子模块已识别，请选择需要同步的服务。'
   } catch (e) {
     error.value = e instanceof Error ? e.message : '无法识别 Git 仓库'
@@ -151,6 +157,8 @@ const changeWorkspace = () => {
   form.output = { botId: '', chatId: '', when: 'always' }
   form.sync.submodules = []
   form.sync.sourceIds = []
+  form.sync.preserveLocalFiles = []
+  preserveLocalFiles.value = ''
   moduleOptions.value = []
   repository.value = null
 }
@@ -182,7 +190,10 @@ const next = async () => {
   step.value++
   window.scrollTo({ top: 0 })
 }
-const previousStep = () => { step.value--; error.value = '' }
+const previousStep = () => {
+  step.value--
+  error.value = ''
+}
 const save = async () => {
   syncConfig()
   saving.value = true
@@ -208,6 +219,13 @@ const archive = async () => {
   }
 }
 onBeforeRouteLeave(() => !dirty.value || confirm('当前任务配置尚未保存，确定离开？'))
+watch(
+  [skillRoots, preserveLocalFiles, moduleOptions],
+  () => {
+    if (loaded.value) dirty.value = true
+  },
+  { deep: true }
+)
 watch(
   form,
   () => {
@@ -271,6 +289,7 @@ onMounted(async () => {
       Object.assign(form, task)
       moduleOptions.value = task.sync.submodules.map((m) => ({ ...m, selected: true, initialized: true, commit: '' }))
       skillRoots.value = task.sync.skillRoots.join('\n')
+      preserveLocalFiles.value = (task.sync.preserveLocalFiles || []).join('\n')
     } else {
       form.workspaceId = String(route.query.workspaceId || ws[0]?.id || '')
       const template = (ts as ScheduledTemplate[]).find((t) => t.id === String(route.query.template || 'custom'))
@@ -466,6 +485,22 @@ onUnmounted(() => {
                     <label for="sync-branch">主仓库跟踪分支</label
                     ><input id="sync-branch" v-model.trim="form.sync.branch" placeholder="master / main" />
                   </div>
+                  <div class="field">
+                    <label for="preserve-local-files">本机保留文件（每行一个精确相对路径）</label>
+                    <textarea
+                      id="preserve-local-files"
+                      v-model="preserveLocalFiles"
+                      rows="3"
+                      placeholder=".codex/config.toml"
+                    />
+                    <small
+                      >仅支持主仓库已跟踪的普通文件；不支持目录、通配符、符号链接或暂存改动。这些文件保留本机完整内容，远端修改只记录，不合并；其他代码修改仍会阻止同步。Prompt
+                      可在清单内选择，不能扩展范围。</small
+                    >
+                  </div>
+                  <p v-if="moduleOptions.length && !moduleOptions.some((m) => m.selected)" class="scheduler-hint">
+                    尚未选择子模块：此次只更新主仓库，不会更新子模块中的知识库和服务代码。
+                  </p>
                   <details v-if="moduleOptions.length">
                     <summary>
                       选择子模块与更新策略（已选 {{ moduleOptions.filter((m) => m.selected).length }} /
@@ -733,12 +768,7 @@ onUnmounted(() => {
           <span>步骤 {{ step }} / 3</span>
           <div class="actions">
             <RouterLink class="ghost-button" to="/scheduled-tasks">取消</RouterLink
-            ><button
-              v-if="step > 1"
-              class="ghost-button"
-              type="button"
-              @click="previousStep"
-            >
+            ><button v-if="step > 1" class="ghost-button" type="button" @click="previousStep">
               <ArrowLeft :size="15" />上一步</button
             ><button class="button" :disabled="saving">
               <component :is="step === 3 ? Check : ArrowRight" :size="16" />{{

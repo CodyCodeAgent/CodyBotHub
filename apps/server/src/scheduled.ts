@@ -8,7 +8,7 @@ import type { CodyBotRuntime } from './runtime.js'
 import type { SkillSyncService } from './skills.js'
 import { nextScheduleDates } from './schedule.js'
 import { ScheduledStore } from './scheduled-store.js'
-import { inspectWorkspace, WorkspaceSyncService } from './workspace-sync.js'
+import { inspectWorkspace, WorkspaceSyncService, validatePreservedPaths } from './workspace-sync.js'
 import { workspacePathsOverlap } from './workspace-access.js'
 import { ToolPackageRunner } from './tool-execution.js'
 import type { ScheduledAction, ScheduledRun, ScheduledTask, ScheduledTaskInput } from './scheduled-types.js'
@@ -62,14 +62,16 @@ const schema = z.object({
         .default([]),
       installSkills: z.boolean().default(true),
       skillRoots: z.array(z.string().max(1000)).max(30).default(['skills', '.agents/skills']),
-      sourceIds: ids
+      sourceIds: ids,
+      preserveLocalFiles: z.array(z.string().min(1).max(1000)).max(100).default([])
     })
     .default({
       branch: 'master',
       submodules: [],
       installSkills: true,
       skillRoots: ['skills', '.agents/skills'],
-      sourceIds: []
+      sourceIds: [],
+      preserveLocalFiles: []
     })
 })
 export type ScheduledTransport = {
@@ -112,6 +114,7 @@ export class ScheduledTaskService {
     const config = schema.parse(body),
       workspace = this.hub.getWorkspace(config.workspaceId)
     realpathSync.native(workspace.path)
+    validatePreservedPaths(config.sync.preserveLocalFiles || [])
     nextScheduleDates(config.schedule)
     for (const id of config.skillPackageIds)
       if (!this.hub.listSkillPackages().some((p) => p.id === id && p.workspaceId === workspace.id))
@@ -464,14 +467,12 @@ export class ScheduledTaskService {
     }
   }
   private verify(run: ScheduledRun): Promise<unknown> {
-    return this.runtime
-      .workspaceResources(run.snapshot.workspacePath, '', run.snapshot.runtimeKind)
-      .then((result) => ({
-        skillCount: result.skills.filter((s) => s.enabled).length,
-        skills: result.skills.filter((s) => s.enabled).map((s) => s.name),
-        knowledgeCount: result.knowledge.length,
-        knowledgeRoots: result.knowledgeRoots
-      }))
+    return this.runtime.workspaceResources(run.snapshot.workspacePath, '', run.snapshot.runtimeKind).then((result) => ({
+      skillCount: result.skills.filter((s) => s.enabled).length,
+      skills: result.skills.filter((s) => s.enabled).map((s) => s.name),
+      knowledgeCount: result.knowledge.length,
+      knowledgeRoots: result.knowledgeRoots
+    }))
   }
   async invoke(id: string, tool: string, args: Record<string, unknown>): Promise<unknown> {
     const run = this.records.getRun(id),
@@ -490,6 +491,26 @@ export class ScheduledTaskService {
     }
     if (tool === 'sync_workspace') {
       if (run.snapshot.mode !== 'maintenance') throw new Error('当前任务未授权工作区维护')
+      const selection = z
+        .object({
+          preserveLocalFiles: z.array(z.string().min(1).max(1000)).max(100).optional(),
+          submodulePaths: z.array(z.string().min(1).max(1000)).max(200).optional()
+        })
+        .strict()
+        .parse(args)
+      const allowedFiles = run.snapshot.sync.preserveLocalFiles || []
+      if (selection.preserveLocalFiles?.some((file) => !allowedFiles.includes(file)))
+        throw new Error('保留文件超出任务配置范围，请先在任务配置中添加')
+      if (selection.submodulePaths?.some((file) => !run.snapshot.sync.submodules.some((m) => m.path === file)))
+        throw new Error('子模块超出任务配置范围，请先在任务配置中添加')
+      const syncConfig = {
+        ...run.snapshot.sync,
+        preserveLocalFiles: selection.preserveLocalFiles ?? allowedFiles,
+        submodules:
+          selection.submodulePaths === undefined
+            ? run.snapshot.sync.submodules
+            : run.snapshot.sync.submodules.filter((m) => selection.submodulePaths!.includes(m.path))
+      }
       if (run.events.some((e) => e.phase === 'completed' && e.data && typeof e.data === 'object' && 'skills' in e.data))
         throw new Error('本轮同步已经完成，请使用现有结果，不重复应用')
       try {
@@ -497,7 +518,7 @@ export class ScheduledTaskService {
           workspaceId: run.workspaceId,
           workspacePath: run.snapshot.workspacePath,
           runId: run.id,
-          config: run.snapshot.sync,
+          config: syncConfig,
           signal: active.controller.signal,
           event: (phase, message, data) => this.records.event(id, phase, message, data),
           maintain: (action) =>
