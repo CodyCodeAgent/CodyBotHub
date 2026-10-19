@@ -416,7 +416,8 @@ export interface SkillCatalogItem {
   workspaceName: string
   sourcePath: string
   targetPath: string
-  status: 'available' | 'installed' | 'update_available' | 'conflict' | 'local'
+  status: 'available' | 'installed' | 'update_available' | 'conflict' | 'source_conflict' | 'local'
+  conflictPaths?: string[]
   checksum: string
   installedCommit: string
 }

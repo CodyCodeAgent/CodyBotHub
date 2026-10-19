@@ -11,7 +11,7 @@ import type { SkillCatalogItem, SkillSourceRecord } from './types.js'
 const runFile = promisify(execFile)
 const ignoredDirectories = new Set(['.git', 'node_modules', '.cache', 'dist', 'build', '.venv', 'venv', '__pycache__'])
 
-type DiscoveredSkill = { key: string; name: string; targetName: string; description: string; absolutePath: string; relativePath: string; checksum: string }
+type DiscoveredSkill = { key: string; name: string; targetName: string; description: string; absolutePath: string; relativePath: string; checksum: string; conflictPaths?: string[] }
 
 export class SkillSyncService {
   private readonly running = new Map<string, Promise<unknown>>()
@@ -87,7 +87,8 @@ export class SkillSyncService {
           else if (installation.sourceChecksum !== skill.checksum || installation.installedCommit !== source.lastCommit) status = 'update_available'
           else status = 'installed'
         } else if (targetExists) status = 'conflict'
-        result.push({ key: skill.key, name: skill.name, description: skill.description, sourceId: source.id, sourceName: source.name, workspaceId: source.workspaceId, workspaceName: source.workspaceName, sourcePath: skill.relativePath, targetPath, status, checksum: skill.checksum, installedCommit: installation?.installedCommit ?? '' })
+        if (skill.conflictPaths) status = 'source_conflict'
+        result.push({ key: skill.key, name: skill.name, description: skill.description, sourceId: source.id, sourceName: source.name, workspaceId: source.workspaceId, workspaceName: source.workspaceName, sourcePath: skill.relativePath, targetPath, status, checksum: skill.checksum, installedCommit: installation?.installedCommit ?? '', ...(skill.conflictPaths ? { conflictPaths: skill.conflictPaths } : {}) })
       }
     }
 
@@ -108,7 +109,7 @@ export class SkillSyncService {
     }
 
     const query = input.query?.trim().toLocaleLowerCase()
-    return result.filter(item => (!input.status || item.status === input.status) && (!query || `${item.name} ${item.description} ${item.sourceName} ${item.sourcePath}`.toLocaleLowerCase().includes(query)))
+    return result.filter(item => (!input.status || item.status === input.status) && (!query || `${item.name} ${item.description} ${item.sourceName} ${item.sourcePath} ${item.conflictPaths?.join(' ') ?? ''}`.toLocaleLowerCase().includes(query)))
       .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
   }
 
@@ -126,6 +127,11 @@ export class SkillSyncService {
     let installed = 0, skipped = 0
     const errors: string[] = []
     for (const skill of selected) {
+      if (skill.conflictPaths) {
+        skipped += 1
+        errors.push(`${skill.name}：多个技能源目录存在同名且内容不同的技能，请先处理来源冲突（${skill.conflictPaths.join('、')}）`)
+        continue
+      }
       const targetPath = path.join(skillsDirectory, skill.targetName)
       const current = installations.get(skill.key)
       try {
@@ -167,11 +173,23 @@ export class SkillSyncService {
     for (const configuredRoot of roots) {
       const root = path.join(checkout, safeRelative(configuredRoot))
       if (!await exists(root)) continue
-      found.push(...await discoverSkills(root, checkout))
+      found.push(...(await discoverSkills(root, checkout)).sort((a, b) => a.key.localeCompare(b.key)))
     }
-    const names = new Map<string, DiscoveredSkill>()
-    for (const skill of found) { const previous = names.get(skill.targetName); if (previous && previous.checksum !== skill.checksum) throw new Error(`${skill.name}：多个技能源目录存在同名且内容不同的技能`); names.set(skill.targetName, skill) }
-    return [...names.values()]
+    const groups = new Map<string, Map<string, DiscoveredSkill>>()
+    for (const skill of found) {
+      const group = groups.get(skill.targetName) ?? new Map<string, DiscoveredSkill>()
+      group.set(skill.key, skill)
+      groups.set(skill.targetName, group)
+    }
+    // Equal copies collapse to one stable entry. Differing copies remain visible,
+    // but cannot be installed until the source roots have been disambiguated.
+    return [...groups.values()].map(group => {
+      const variants = [...group.values()]
+      const skill = variants.at(-1)!
+      return new Set(variants.map(item => item.checksum)).size > 1
+        ? { ...skill, conflictPaths: variants.map(item => item.relativePath) }
+        : skill
+    })
   }
 
   private async copyKnowledge(source: SkillSourceRecord): Promise<void> {

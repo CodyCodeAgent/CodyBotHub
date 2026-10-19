@@ -403,6 +403,7 @@ input::placeholder, textarea::placeholder { color: color-mix(in srgb, var(--mute
 .select-cell { width: 42px; padding-right: 0; }
 .select-cell input { width: 15px; min-height: 0; height: 15px; accent-color: var(--primary-strong); }
 .skill-description { max-width: 390px; line-height: 1.55; }
+.conflict-path { display: block; max-width: 340px; white-space: normal; overflow-wrap: anywhere; margin-top: 6px; font-size: 11px; }
 .path-code { display: block; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .directory-picker-backdrop { z-index: 80; }
