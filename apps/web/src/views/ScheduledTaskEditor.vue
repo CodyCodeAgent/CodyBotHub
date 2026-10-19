@@ -478,7 +478,7 @@ onUnmounted(() => {
                   </p>
                   <div v-if="repository" class="notice">
                     当前分支：{{ repository.branch || '游离 HEAD' }} · {{ repository.commit.slice(0, 12) }}<br />{{
-                      repository.changes ? '存在本地修改，应用前需要处理' : '当前未检测到主仓库文件修改'
+                      repository.changes ? '存在本地修改：保留清单内维持本机版本，清单外需先处理' : '当前未检测到主仓库文件修改'
                     }}
                   </div>
                   <div class="field">
@@ -708,6 +708,14 @@ onUnmounted(() => {
                     <div>
                       <dt>结果输出</dt>
                       <dd>{{ form.output.botId ? '平台记录，并发送到 ' + form.output.chatId : '仅保存在平台' }}</dd>
+                    </div>
+                    <div v-if="isSync">
+                      <dt>同步范围</dt>
+                      <dd>主仓库 + {{ form.sync.submodules.length }} 个子模块</dd>
+                    </div>
+                    <div v-if="isSync">
+                      <dt>本机保留</dt>
+                      <dd>{{ (form.sync.preserveLocalFiles || []).join('、') || '无；任何已跟踪本地修改都会阻止更新' }}</dd>
                     </div>
                     <div>
                       <dt>配置生效</dt>
