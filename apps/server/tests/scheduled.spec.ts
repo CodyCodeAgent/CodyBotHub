@@ -389,4 +389,19 @@ describe('workspace maintenance coordination', () => {
     next.resume(s.directory)
     await expect(next.use(s.directory, async () => true)).resolves.toBe(true)
   })
+  it('blocks waiting readers and maintenance when an earlier writer pauses the workspace', async () => {
+    const gate = new WorkspaceAccess(), root = tmpdir()
+    let release!: () => void
+    const write = gate.maintain(root, 'first', async () => {
+      await new Promise<void>((resolve) => { release = resolve })
+      gate.pause(root, 'verification incomplete')
+    })
+    const action = vi.fn(async () => true)
+    const reader = expect(gate.use(root, action)).rejects.toThrow('verification incomplete')
+    const writer = expect(gate.maintain(root, 'second', action)).rejects.toThrow('verification incomplete')
+    release()
+    await Promise.all([write, reader, writer])
+    await expect(gate.maintain(root, 'third', action)).rejects.toThrow('verification incomplete')
+    expect(action).not.toHaveBeenCalled()
+  })
 })

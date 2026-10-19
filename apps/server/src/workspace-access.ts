@@ -57,6 +57,7 @@ export class WorkspaceAccess {
       await sleep(100)
     }
     signal?.throwIfAborted()
+    if (this.paused(root)) throw new Error(`工作区已暂停，需要管理员核实恢复：${this.paused(root)}`)
     const id = randomUUID()
     this.readers.set(id, { root, owner })
     try {
@@ -73,6 +74,7 @@ export class WorkspaceAccess {
     waitMs = 15 * 60000
   ): Promise<T> {
     root = rootOf(root)
+    if (this.paused(root)) throw new Error(`工作区已暂停，需要管理员核实恢复：${this.paused(root)}`)
     const writer = { root, owner },
       deadline = Date.now() + waitMs
     this.writers.push(writer)
@@ -91,6 +93,7 @@ export class WorkspaceAccess {
         await sleep(100)
       }
       signal?.throwIfAborted()
+      if (this.paused(root)) throw new Error(`工作区已暂停，需要管理员核实恢复：${this.paused(root)}`)
       return await action()
     } finally {
       this.writers = this.writers.filter((w) => w !== writer)
