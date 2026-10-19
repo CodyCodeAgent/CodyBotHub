@@ -93,6 +93,22 @@ const setupDivergedModule = (conflict = false) => {
   return { ...s, module, moduleSource, before }
 }
 describe('workspace resource synchronization', () => {
+  it('reports invalid skill metadata without rolling back other repository updates or valid skills', async () => {
+    const s = setup()
+    mkdirSync(path.join(s.source, 'skills/invalid'), { recursive: true })
+    writeFileSync(
+      path.join(s.source, 'skills/invalid/SKILL.md'),
+      '---\nname: invalid/child\n---\n# Invalid directory name'
+    )
+    writeFileSync(path.join(s.source, 'README.md'), 'new code')
+    commit(s.source, 'bad metadata alongside valid updates')
+    const result = await s.run()
+    expect(result.warnings).toEqual([expect.stringContaining('skills/invalid：技能名称 "invalid/child"')])
+    expect(readFileSync(path.join(s.workspace, 'README.md'), 'utf8')).toBe('new code')
+    expect(existsSync(path.join(s.workspace, '.codex/skills/demo/SKILL.md'))).toBe(true)
+    expect(existsSync(path.join(s.workspace, '.codex/skills/invalid'))).toBe(false)
+    expect(git(s.workspace, 'rev-parse', 'HEAD')).toBe(git(s.source, 'rev-parse', 'HEAD'))
+  })
   it('merges a selected divergent submodule without dropping local commits or repeating merges', async () => {
     const s = setupDivergedModule()
     await s.run()

@@ -512,8 +512,12 @@ export class WorkspaceSyncService {
             if (await exists(path.join(dir, 'SKILL.md'))) {
               const source = await readFile(path.join(dir, 'SKILL.md'), 'utf8'),
                 name = (source.match(/^name:\s*["']?([^\n"']+)/mu)?.[1] || path.basename(dir)).trim()
-              if (!/^[\p{L}\p{N}_.-]{1,120}$/u.test(name) || name === '.' || name === '..')
-                throw new Error('技能名称不是有效目录名')
+              if (!/^[\p{L}\p{N}_.-]{1,120}$/u.test(name) || name === '.' || name === '..') {
+                const relative = path.relative(root, dir)
+                warnings.push(`${relative}：技能名称 ${JSON.stringify(name)} 不适合作为安装目录，已跳过该技能`)
+                event('skill_skip', `跳过名称不合法的技能：${relative}`, { name, source: relative })
+                return
+              }
               const hash = await skillContentHash(canonical),
                 previous = found.get(name)
               if (conflicts.has(name)) return
