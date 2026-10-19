@@ -47,7 +47,7 @@ const moduleOptions = ref<
     initialized: boolean
     commit: string
     selected: boolean
-    mode: 'pinned' | 'branch'
+    mode: 'pinned' | 'branch' | 'merge'
     branch: string
     required: boolean
   }>
@@ -478,7 +478,9 @@ onUnmounted(() => {
                   </p>
                   <div v-if="repository" class="notice">
                     当前分支：{{ repository.branch || '游离 HEAD' }} · {{ repository.commit.slice(0, 12) }}<br />{{
-                      repository.changes ? '存在本地修改：保留清单内维持本机版本，清单外需先处理' : '当前未检测到主仓库文件修改'
+                      repository.changes
+                        ? '存在本地修改：保留清单内维持本机版本，清单外需先处理'
+                        : '当前未检测到主仓库文件修改'
                     }}
                   </div>
                   <div class="field">
@@ -534,13 +536,17 @@ onUnmounted(() => {
                             >更新方式<select v-model="m.mode">
                               <option value="pinned">跟随主仓库提交</option>
                               <option value="branch">指定分支最新版本</option>
+                              <option value="merge">合并远端，保留本地提交</option>
                             </select></label
-                          ><label v-if="m.mode === 'branch'"
+                          ><label v-if="m.mode !== 'pinned'"
                             >目标分支<input v-model.trim="m.branch" placeholder="请填写实际分支" /></label
                           ><label class="check-card"
                             ><input v-model="m.required" type="checkbox" /><span>必选项，失败则停止应用</span></label
                           >
                         </div>
+                        <small v-if="m.selected && m.mode === 'merge'"
+                          >只自动应用无冲突的合并，不推送远端；有冲突则保留现状，按必选/可选策略报告。</small
+                        >
                       </div>
                     </div>
                   </details>
@@ -715,7 +721,9 @@ onUnmounted(() => {
                     </div>
                     <div v-if="isSync">
                       <dt>本机保留</dt>
-                      <dd>{{ (form.sync.preserveLocalFiles || []).join('、') || '无；任何已跟踪本地修改都会阻止更新' }}</dd>
+                      <dd>
+                        {{ (form.sync.preserveLocalFiles || []).join('、') || '无；任何已跟踪本地修改都会阻止更新' }}
+                      </dd>
                     </div>
                     <div>
                       <dt>配置生效</dt>

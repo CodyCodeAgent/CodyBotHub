@@ -8,7 +8,7 @@ export type ScheduleConfig = {
 }
 export type WorkspaceSyncConfig = {
   branch: string
-  submodules: Array<{ path: string; mode: 'pinned' | 'branch'; branch: string; required: boolean }>
+  submodules: Array<{ path: string; mode: 'pinned' | 'branch' | 'merge'; branch: string; required: boolean }>
   installSkills: boolean
   skillRoots: string[]
   sourceIds: string[]

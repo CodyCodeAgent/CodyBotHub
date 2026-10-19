@@ -53,7 +53,7 @@ const schema = z.object({
         .array(
           z.object({
             path: z.string().min(1).max(1000),
-            mode: z.enum(['pinned', 'branch']),
+            mode: z.enum(['pinned', 'branch', 'merge']),
             branch: z.string().max(200).default(''),
             required: z.boolean().default(true)
           })

@@ -23,15 +23,93 @@ const git = async (cwd: string, args: string[], signal?: AbortSignal, raw = fals
     ).stdout
     return raw ? output : output.trim()
   } catch (error) {
-    const e = error as Error & { stderr?: string }
-    throw new Error(
-      `Git ${args[0]} 失败：${(e.stderr || e.message).replace(/https?:\/\/[^\s/@]+:[^\s/@]+@/gu, 'https://***@').slice(0, 2000)}`
+    const e = error as Error & { stderr?: string; code?: number | string }
+    throw Object.assign(
+      new Error(
+        `Git ${args[0]} 失败：${(e.stderr || e.message).replace(/https?:\/\/[^\s/@]+:[^\s/@]+@/gu, 'https://***@').slice(0, 2000)}`
+      ),
+      { gitExitCode: e.code }
     )
   }
 }
 const reference = async (cwd: string, branch: string) => {
   if (!branch || branch.startsWith('-')) throw new Error('请配置有效目标分支')
   await git(cwd, ['check-ref-format', '--branch', branch])
+}
+const ensureFastForward = async (
+  root: string,
+  before: string,
+  after: string,
+  branch: string,
+  signal: AbortSignal,
+  event: (phase: string, message: string, data?: unknown) => void
+) => {
+  const ancestor = async () => {
+    try {
+      await git(root, ['merge-base', '--is-ancestor', before, after], signal)
+      return true
+    } catch (error) {
+      if ((error as { gitExitCode?: unknown }).gitExitCode === 1) return false
+      throw error
+    }
+  }
+  if (await ancestor()) return
+  for (const deepen of [200, 1000]) {
+    if ((await git(root, ['rev-parse', '--is-shallow-repository'], signal)) !== 'true') break
+    event('deepen', `补全浅克隆历史以核对快进关系：${path.basename(root)}`, { branch, deepen })
+    await git(root, ['fetch', '--no-recurse-submodules', `--deepen=${deepen}`, 'origin', branch], signal)
+    if (await ancestor()) return
+  }
+  throw Object.assign(
+    new Error(
+      `非快进更新：${path.basename(root)} 当前 ${before.slice(0, 12)} 不是目标 ${after.slice(0, 12)} 的祖先；可能存在本地提交或浅克隆历史仍不完整，已保留现场，不能强制覆盖`
+    ),
+    { nonFastForward: true }
+  )
+}
+const prepareMerge = async (root: string, before: string, remote: string, signal: AbortSignal): Promise<string> => {
+  try {
+    await git(root, ['merge-base', '--is-ancestor', remote, before], signal)
+    return before
+  } catch (error) {
+    if ((error as { gitExitCode?: unknown }).gitExitCode !== 1) throw error
+  }
+  let tree = ''
+  try {
+    const result = await exec('git', ['merge-tree', '--write-tree', before, remote], {
+      cwd: root,
+      signal,
+      timeout: 90000,
+      maxBuffer: 8 * 1024 * 1024
+    })
+    tree = result.stdout.split('\n')[0]!.trim()
+  } catch (error) {
+    const detail = error as Error & { stdout?: string; stderr?: string }
+    const conflicts = detail.stdout
+      ?.split('\n')
+      .filter((line) => line.startsWith('CONFLICT'))
+      .join('\n')
+    throw new Error(`子模块合并预检失败，工作目录未改变：${conflicts || detail.stderr || detail.message}`)
+  }
+  if (!/^[a-f\d]{40,64}$/u.test(tree)) throw new Error('合并预检没有返回有效树对象，未应用更新')
+  return git(
+    root,
+    [
+      '-c',
+      'user.name=CodyBotHub',
+      '-c',
+      'user.email=codybothub@localhost',
+      'commit-tree',
+      tree,
+      '-p',
+      before,
+      '-p',
+      remote,
+      '-m',
+      'CodyBotHub: merge remote update while preserving local commits'
+    ],
+    signal
+  )
 }
 export const inspectWorkspace = async (
   directory: string
@@ -241,12 +319,12 @@ export class WorkspaceSyncService {
     const initialLocalFiles = await localState(root, preservedPaths)
     await reference(root, config.branch)
     event('fetch', '检查主仓库远端更新')
-    await git(root, ['fetch', '--prune', 'origin', config.branch], signal)
+    await git(root, ['fetch', '--no-recurse-submodules', '--prune', 'origin', config.branch], signal)
     const target = await git(root, ['rev-parse', `refs/remotes/origin/${config.branch}`]),
       currentBranch = initial.branch
     if (currentBranch !== config.branch)
       throw new Error(`当前分支 ${currentBranch || 'detached HEAD'} 与目标 ${config.branch} 不同，请先人工切换分支`)
-    await git(root, ['merge-base', '--is-ancestor', initial.commit, target], signal)
+    await ensureFastForward(root, initial.commit, target, config.branch, signal, event)
     const plan: Array<{
         path: string
         before: string
@@ -261,16 +339,32 @@ export class WorkspaceSyncService {
       const known = initial.submodules.find((m) => m.path === selected.path),
         dir = path.resolve(root, selected.path)
       try {
+        event('submodule_fetch', `检查子模块 ${selected.path}`, {
+          path: selected.path,
+          mode: selected.mode,
+          branch: selected.branch
+        })
         if (!known?.initialized) throw new Error('子模块尚未初始化，请先在工作区准备该服务')
         if (!within(root, await realpath(dir))) throw new Error('子模块越出工作区')
         if (await git(dir, ['status', '--porcelain', '--untracked-files=no', '--ignore-submodules=all']))
           throw new Error('子模块有本地修改')
         let after = ''
-        if (selected.mode === 'branch') {
+        if (selected.mode === 'branch' || selected.mode === 'merge') {
           await reference(dir, selected.branch)
-          await git(dir, ['fetch', 'origin', selected.branch], signal)
+          await git(dir, ['fetch', '--no-recurse-submodules', 'origin', selected.branch], signal)
           after = await git(dir, ['rev-parse', `refs/remotes/origin/${selected.branch}`])
-          await git(dir, ['merge-base', '--is-ancestor', known.commit, after], signal)
+          try {
+            await ensureFastForward(dir, known.commit, after, selected.branch, signal, event)
+          } catch (error) {
+            if (selected.mode !== 'merge' || !(error as { nonFastForward?: boolean }).nonFastForward) throw error
+            const remote = after
+            after = await prepareMerge(dir, known.commit, remote, signal)
+            event('submodule_merge', `合并版本已预检：${selected.path}`, {
+              before: known.commit,
+              remote,
+              prepared: after
+            })
+          }
         } else {
           const tree = await git(root, ['ls-tree', target, '--', selected.path])
           after = tree.match(/^160000 commit ([a-f\d]+)\t/u)?.[1] || ''
@@ -303,6 +397,7 @@ export class WorkspaceSyncService {
       } catch (error) {
         if (selected.required) throw error
         warnings.push(`${selected.path}：${error instanceof Error ? error.message : String(error)}`)
+        event('submodule_skip', `可选子模块保留原版本：${selected.path}`, { error: warnings.at(-1) })
       }
     }
     const directory = path.join(this.dataDirectory, 'workspace-sync', input.runId)

@@ -12,6 +12,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   inspectWorkspace,
@@ -70,7 +71,87 @@ const setup = () => {
     })
   return { source, workspace, data, service, config, run }
 }
+const setupDivergedModule = (conflict = false) => {
+  const s = setup(),
+    moduleSource = path.join(path.dirname(s.source), 'module-source')
+  mkdirSync(moduleSource)
+  git(moduleSource, 'init', '-b', 'main')
+  writeFileSync(path.join(moduleSource, 'guide.md'), 'shared baseline\n')
+  commit(moduleSource, 'base')
+  git(s.source, '-c', 'protocol.file.allow=always', 'submodule', 'add', moduleSource, 'services/docs')
+  commit(s.source, 'module')
+  git(s.workspace, 'fetch', 'origin', 'main')
+  git(s.workspace, 'merge', '--ff-only', 'origin/main')
+  git(s.workspace, '-c', 'protocol.file.allow=always', 'submodule', 'update', '--init')
+  const module = path.join(s.workspace, 'services/docs')
+  writeFileSync(path.join(module, conflict ? 'guide.md' : 'local.txt'), 'local knowledge\n')
+  commit(module, 'local knowledge')
+  const before = git(module, 'rev-parse', 'HEAD')
+  writeFileSync(path.join(moduleSource, conflict ? 'guide.md' : 'remote.txt'), 'remote knowledge\n')
+  commit(moduleSource, 'remote knowledge')
+  s.config.submodules = [{ path: 'services/docs', mode: 'merge', branch: 'main', required: true }]
+  return { ...s, module, moduleSource, before }
+}
 describe('workspace resource synchronization', () => {
+  it('merges a selected divergent submodule without dropping local commits or repeating merges', async () => {
+    const s = setupDivergedModule()
+    await s.run()
+    expect(readFileSync(path.join(s.module, 'local.txt'), 'utf8')).toBe('local knowledge\n')
+    expect(readFileSync(path.join(s.module, 'remote.txt'), 'utf8')).toBe('remote knowledge\n')
+    git(s.module, 'merge-base', '--is-ancestor', s.before, 'HEAD')
+    git(s.module, 'merge-base', '--is-ancestor', git(s.moduleSource, 'rev-parse', 'HEAD'), 'HEAD')
+    const after = git(s.module, 'rev-parse', 'HEAD')
+    await s.run()
+    expect(git(s.module, 'rev-parse', 'HEAD')).toBe(after)
+  })
+  it('leaves conflicting submodules untouched and supports explicitly skipping optional modules', async () => {
+    const s = setupDivergedModule(true)
+    await expect(s.run()).rejects.toThrow('guide.md')
+    expect(git(s.module, 'rev-parse', 'HEAD')).toBe(s.before)
+    expect(readFileSync(path.join(s.module, 'guide.md'), 'utf8')).toBe('local knowledge\n')
+    expect(() => git(s.module, 'rev-parse', '--verify', 'MERGE_HEAD')).toThrow()
+    s.config.submodules[0]!.required = false
+    expect((await s.run()).warnings).toEqual([expect.stringContaining('合并预检失败')])
+    expect(git(s.module, 'rev-parse', 'HEAD')).toBe(s.before)
+  })
+  it('restores the original submodule commit if validation fails after a clean merge', async () => {
+    const s = setupDivergedModule()
+    await expect(
+      s.run(async () => {
+        throw new Error('index unavailable')
+      })
+    ).rejects.toThrow('已恢复')
+    expect(git(s.module, 'rev-parse', 'HEAD')).toBe(s.before)
+    expect(readFileSync(path.join(s.module, 'local.txt'), 'utf8')).toBe('local knowledge\n')
+    expect(existsSync(path.join(s.module, 'remote.txt'))).toBe(false)
+  })
+  it('deepens shallow history before deciding that a fast-forward is impossible', async () => {
+    const s = setup()
+    rmSync(s.workspace, { recursive: true })
+    execFileSync('git', ['clone', '--depth=1', '--branch', 'main', pathToFileURL(s.source).href, s.workspace], {
+      stdio: 'pipe'
+    })
+    for (let index = 0; index < 3; index++) {
+      writeFileSync(path.join(s.source, 'README.md'), `upstream ${index}`)
+      commit(s.source, 'remote commit')
+    }
+    git(s.workspace, 'fetch', '--depth=1', 'origin', 'main')
+    expect(() => git(s.workspace, 'merge-base', '--is-ancestor', 'HEAD', 'origin/main')).toThrow()
+    await s.run()
+    expect(git(s.workspace, 'rev-parse', 'HEAD')).toBe(git(s.source, 'rev-parse', 'HEAD'))
+    expect(readFileSync(path.join(s.workspace, 'README.md'), 'utf8')).toBe('upstream 2')
+  })
+  it('still refuses genuinely divergent local commits instead of resetting them', async () => {
+    const s = setup()
+    writeFileSync(path.join(s.workspace, 'README.md'), 'local commit')
+    commit(s.workspace, 'local branch')
+    const before = git(s.workspace, 'rev-parse', 'HEAD')
+    writeFileSync(path.join(s.source, 'README.md'), 'remote commit')
+    commit(s.source, 'remote branch')
+    await expect(s.run()).rejects.toThrow('非快进')
+    expect(git(s.workspace, 'rev-parse', 'HEAD')).toBe(before)
+    expect(readFileSync(path.join(s.workspace, 'README.md'), 'utf8')).toBe('local commit')
+  })
   it('keeps allowlisted local content and mode while recording upstream file changes, including later runs', async () => {
     const s = setup()
     s.config.preserveLocalFiles = ['README.md']
