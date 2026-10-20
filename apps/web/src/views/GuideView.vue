@@ -112,9 +112,9 @@ onBeforeUnmount(() => observer?.disconnect())
     <section class="guide-hero" aria-labelledby="guide-title">
       <div class="hero-grid" aria-hidden="true" />
       <div class="hero-copy">
-        <div class="hero-status"><span />CODYBOTHUB · SYSTEM HANDBOOK</div>
+        <div class="hero-status"><span />数字人管理后台 · 系统使用指南</div>
         <h1 id="guide-title">让飞书里的每条消息，<b>进入正确的 AI 工作流</b></h1>
-        <p>CodyBotHub 是连接飞书与 Codex 的企业 Agent 控制台。它负责识别业务场景、装配代码与知识、管理会话边界、可靠执行任务，并把每次结果沉淀成可追溯、可复用的经验。</p>
+        <p>数字人管理后台是连接飞书与 Codex 的企业 Agent 控制台。它负责识别业务场景、装配代码与知识、管理会话边界、可靠执行任务，并把每次结果沉淀成可追溯、可复用的经验。</p>
         <div class="hero-actions"><RouterLink class="button" to="/workspaces"><Rocket :size="17" />开始接入第一个 Bot</RouterLink><a class="ghost-button" href="#architecture"><BookOpenCheck :size="17" />理解系统架构</a></div>
         <div class="assurances"><span><Check :size="14" />本地工作区边界</span><span><Check :size="14" />SQLite 持久队列</span><span><Check :size="14" />完整审计链路</span></div>
       </div>
@@ -143,9 +143,9 @@ onBeforeUnmount(() => observer?.disconnect())
 
       <main class="guide-content">
         <section id="overview" class="guide-section">
-          <header class="section-heading"><div><p>01 · SYSTEM POSITIONING</p><h2>它不是一个聊天机器人，<br />而是一套 Agent 运行系统</h2></div><p>普通 Bot 只负责把问题转发给模型。CodyBotHub 还负责决定模型在什么边界里工作、携带哪些业务知识、使用哪个历史会话，以及整个过程如何恢复和审计。</p></header>
+          <header class="section-heading"><div><p>01 · SYSTEM POSITIONING</p><h2>它不是一个聊天机器人，<br />而是一套 Agent 运行系统</h2></div><p>普通 Bot 只负责把问题转发给模型。数字人管理后台还负责决定模型在什么边界里工作、携带哪些业务知识、使用哪个历史会话，以及整个过程如何恢复和审计。</p></header>
           <div class="value-grid"><article v-for="item in values" :key="item.title"><div class="card-icon"><component :is="item.icon" :size="20" /></div><h3>{{ item.title }}</h3><p>{{ item.text }}</p></article></div>
-          <div class="callout"><Bot :size="24" /><div><strong>一句话理解</strong><p>飞书是入口，工作区是边界，场景是路由，技能包是能力，Thread 是记忆，Codex 是执行者，CodyBotHub 把它们组织成一条可靠的生产链路。</p></div></div>
+          <div class="callout"><Bot :size="24" /><div><strong>一句话理解</strong><p>飞书是入口，工作区是边界，场景是路由，技能包是能力，Thread 是记忆，Codex 是执行者，数字人管理后台把它们组织成一条可靠的生产链路。</p></div></div>
         </section>
 
         <section id="architecture" class="guide-section">

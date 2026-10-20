@@ -25,7 +25,7 @@ watch(() => props.visible, visible => {
 <template>
   <div v-if="visible" class="dialog-backdrop directory-picker-backdrop" @mousedown.self="emit('close')">
     <section class="dialog directory-picker" role="dialog" aria-modal="true" aria-labelledby="directory-picker-title">
-      <header class="dialog-header"><div><h2 id="directory-picker-title">选择本地目录</h2><p>浏览 CodyBotHub 服务所在机器允许访问的目录。</p></div><button type="button" class="icon-button" aria-label="关闭目录选择器" @click="emit('close')"><X :size="19" /></button></header>
+      <header class="dialog-header"><div><h2 id="directory-picker-title">选择本地目录</h2><p>浏览数字人管理后台服务所在机器允许访问的目录。</p></div><button type="button" class="icon-button" aria-label="关闭目录选择器" @click="emit('close')"><X :size="19" /></button></header>
       <div class="dialog-body">
         <div v-if="listing" class="directory-browser">
           <div class="directory-roots"><button v-for="root in listing.roots" :key="root.path" type="button" class="directory-root" :class="{ active: root.path === listing.current }" @click="browse(root.path)"><Folder :size="14" />{{ root.name }}</button></div>

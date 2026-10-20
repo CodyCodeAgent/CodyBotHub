@@ -52,7 +52,7 @@ onMounted(async () => { const status = await api.authStatus().catch(() => null);
     <aside class="sidebar" :class="{ open: mobileOpen }">
       <div class="brand">
         <div class="brand-mark"><span class="brand-orbit" aria-hidden="true" /><Bot :size="22" /></div>
-        <div><strong>CodyBotHub</strong><span>Feishu Agent Control</span></div>
+        <div><strong>数字人管理后台</strong><span>Digital Human Control</span></div>
         <button class="close-nav icon-button" aria-label="关闭导航" @click="mobileOpen = false"><X :size="20" /></button>
       </div>
       <nav aria-label="主要导航">

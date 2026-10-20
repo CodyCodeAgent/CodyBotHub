@@ -30,7 +30,7 @@ const submit = async () => {
   <div class="auth-page">
     <section class="auth-form-side">
       <form class="auth-card" @submit.prevent="submit">
-        <div class="brand"><div class="brand-mark"><Bot :size="22" /></div><div><strong>CodyBotHub</strong><span>Feishu Agent Control</span></div></div>
+        <div class="brand"><div class="brand-mark"><Bot :size="22" /></div><div><strong>数字人管理后台</strong><span>Digital Human Control</span></div></div>
         <p class="eyebrow">{{ setupRequired ? '首次启动' : '安全登录' }}</p>
         <h1>{{ setupRequired ? '创建管理员密码' : '欢迎回来' }}</h1>
         <p>{{ setupRequired ? '创建首个平台管理员账号。密码至少输入 10 个字符。' : '使用平台账号登录并管理工作区、Bot、场景路由和技能包。' }}</p>

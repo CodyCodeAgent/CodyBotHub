@@ -83,7 +83,7 @@ const remove = async (source: SkillSource) => {
       </section>
     </div>
 
-    <div v-if="dialogOpen" class="dialog-backdrop" @click.self="dialogOpen = false"><form class="dialog large" @submit.prevent="saveSource"><header class="dialog-header"><div><h2>{{ form.id ? '编辑技能源' : '添加技能源' }}</h2><p>Git 操作只发生在 CodyBotHub 管理的缓存目录，不会 reset 工作区。</p></div><button type="button" class="icon-button" @click="dialogOpen = false"><X :size="18" /></button></header><div class="dialog-body">
+    <div v-if="dialogOpen" class="dialog-backdrop" @click.self="dialogOpen = false"><form class="dialog large" @submit.prevent="saveSource"><header class="dialog-header"><div><h2>{{ form.id ? '编辑技能源' : '添加技能源' }}</h2><p>Git 操作只发生在数字人管理后台管理的缓存目录，不会 reset 工作区。</p></div><button type="button" class="icon-button" @click="dialogOpen = false"><X :size="18" /></button></header><div class="dialog-body">
       <div class="field-grid"><div class="field"><label>名称</label><input v-model="form.name" required placeholder="AI Hub 能力源" /></div><div class="field"><label>目标工作区</label><select v-model="form.workspaceId" required><option disabled value="">选择工作区</option><option v-for="workspace in workspaces" :key="workspace.id" :value="workspace.id">{{ workspace.name }}</option></select></div></div>
       <div class="field"><label>Git 仓库</label><input v-model="form.repositoryUrl" required placeholder="git@code.example.com:team/repo.git" /></div>
       <div class="field"><label>分支</label><input v-model="form.branch" required placeholder="main" /></div>
