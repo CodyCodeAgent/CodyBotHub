@@ -1,0 +1,21 @@
+name: Feature request
+description: 提议能力、接口或文档改进
+title: '[Feature] '
+labels: [enhancement]
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: 使用场景与当前问题
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
