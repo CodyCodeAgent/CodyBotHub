@@ -46,7 +46,7 @@ describe('CopilotService', () => {
 
     const result = await service.invokeTool({
       tool: 'propose_bot_operator', sessionId: session.id, accountId: account.id, workspaceId: workspace.id,
-      arguments: { botId: bot.id, openId: 'ou_123abc', personName: '勾超', action: 'add' },
+      arguments: { botId: bot.id, openId: 'ou_123abc', personName: '示例用户', action: 'add' },
     })
     expect(store.listBots().find(item => item.id === bot.id)?.operatorIds).toEqual(['ou_existing'])
     const draft = store.getCopilotProposal(String(result.proposalId), account.id)
@@ -107,18 +107,18 @@ describe('CopilotService', () => {
     const bot = store.createBot({ name: '预算立项小助手', appId: 'cli_target', defaultWorkspaceId: workspace.id })
     const service = new CopilotService(store, { resetCopilotSession: () => undefined } as unknown as CodyBotRuntime, async (botId, query) => {
       expect(botId).toBe(bot.id)
-      expect(query).toBe('勾超')
-      return [{ openId: 'ou_target_app', name: '勾超', source: 'message', messageCount: 5, lastSeenAt: '2026-09-22T00:00:00.000Z' }]
+      expect(query).toBe('示例用户')
+      return [{ openId: 'ou_target_app', name: '示例用户', source: 'message', messageCount: 5, lastSeenAt: '2026-09-22T00:00:00.000Z' }]
     })
     const session = service.session(account.id, workspace.id).session
 
     await expect(service.invokeTool({
       tool: 'resolve_feishu_bot_user', sessionId: session.id, accountId: account.id, workspaceId: workspace.id,
-      arguments: { botId: bot.id, query: '勾超' },
+      arguments: { botId: bot.id, query: '示例用户' },
     })).resolves.toMatchObject({
       bot: { id: bot.id, name: '预算立项小助手', appId: 'cli_target' },
-      resolvedQuery: '勾超', identityScope: 'target Feishu Bot application', verified: true,
-      identities: [{ openId: 'ou_target_app', name: '勾超', source: 'message' }],
+      resolvedQuery: '示例用户', identityScope: 'target Feishu Bot application', verified: true,
+      identities: [{ openId: 'ou_target_app', name: '示例用户', source: 'message' }],
     })
     store.close()
   })

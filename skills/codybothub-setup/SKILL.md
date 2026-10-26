@@ -29,14 +29,7 @@ Use its output to decide what is missing. Do not confuse a Trae IDE Remote Serve
   ```
 
 - Install the Codex CLI when the selected Bot runtime is Codex and `codex` is absent, normally with `npm install --global @openai/codex`. Verify authentication with `codex login status`; when login is required, run `codex login`, present the browser/device flow to the user, and wait for completion.
-- Install the TraeX CLI when the selected Bot runtime is TraeX and `traex` is absent. In the ByteDance environment, the repository-tested installer is:
-
-  ```bash
-  curl -fsSL https://code.byted.org/api/tos-proxy/download/traex_install.sh -o /tmp/traex_install.sh
-  TRAEX_INSTALL_ASSUME_YES=1 TRAEX_INSTALL_CHANNEL=alpha bash /tmp/traex_install.sh
-  ```
-
-  Read the downloaded script before execution when the source or environment differs. Verify authentication with `traex login status`; when login is required, run `traex login --sso-device`, give the authorization URL to the user, and wait until the CLI reports success.
+- Install the TraeX CLI only when the selected Bot runtime is TraeX and the user has an authorized distribution source. There is no public TraeX installer in this repository: do not guess a download URL or use an internal package source for an external contributor. Verify authentication with `traex login status`; when login is required and supported, run `traex login --sso-device`, give the authorization URL to the user, and wait until the CLI reports success. Codex-only development and tests do not require TraeX.
 
 Authentication must use the same operating-system account that runs CodyBotHub. Never copy tokens between users or print credentials.
 
@@ -58,7 +51,7 @@ pnpm build
 ./skills/codybothub-setup/scripts/install-service.sh --port 3003
 ```
 
-The installer resolves the current repository, Node, Codex, and TraeX paths instead of copying the machine-specific example in `deploy/codybothub.service`. If only one Agent CLI is installed, the other runtime remains unavailable without affecting Bots using the installed runtime.
+The installer resolves the current repository, Node, Codex, and TraeX paths instead of copying the placeholder example in `deploy/codybothub.service`. If only one Agent CLI is installed, the other runtime remains unavailable without affecting Bots using the installed runtime.
 
 On first launch, open `/auth` and let the user create the protected administrator account. Do not invent or retain their password. Then configure workspaces, Bot credentials, runtime, model, scenes, and skill packages in the management UI.
 

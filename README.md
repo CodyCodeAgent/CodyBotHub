@@ -2,6 +2,18 @@
 
 CodyBotHub 是一个独立的飞书 Bot 管理平台。它以工作区为运行边界，统一管理 Bot、场景、技能包、路由，以及 Codex/TraeX Agent 会话。
 
+## 快速开始
+
+要求 Node.js 22.16+、Git 和 Corepack。无需飞书或 Agent 账号即可启动本地管理端、运行单元测试；真实消息和 Agent Turn 需要单独配置相应服务。
+
+```bash
+corepack enable
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+管理端默认位于 `http://127.0.0.1:5173`，API 默认位于 `http://127.0.0.1:4310`。运行 `pnpm check` 完成类型检查、测试和构建。可选集成与公开环境要求见 [公开环境说明](docs/open-source-setup.md)，参与开发见 [贡献指南](CONTRIBUTING.md) 和 [社区行为准则](CODE_OF_CONDUCT.md)，使用问题见 [帮助说明](SUPPORT.md)。安全问题请按 [SECURITY.md](SECURITY.md) 私密报告。本项目按 [MIT License](LICENSE) 开源。
+
 ## 让 AI 完成安装与运维
 
 仓库内置了 [CodyBotHub Setup Skill](skills/codybothub-setup/SKILL.md)。把下面这句话交给 Codex、TraeX 或其他能读取仓库文件的 Agent：
@@ -50,6 +62,7 @@ CodyBotHub 是一个独立的飞书 Bot 管理平台。它以工作区为运行�
 
 完整的数据流、匹配规则和线程规则见 [docs/architecture.md](docs/architecture.md)。
 
+
 ## 群消息与 Bot 协作
 
 普通群聊只有在明确 @ 当前 Bot 或独立命中场景规则时才会处理。用户明确 @ Bot 后，平台回复原消息并原生 @ 回该用户；同一条消息里被 @ 的其他人不会被继续 @。告警卡片等独立命中场景的消息沿用场景的群/话题回复方式，不强制 @ 任何人。
@@ -62,10 +75,10 @@ CodyBotHub 是一个独立的飞书 Bot 管理平台。它以工作区为运行�
 
 当前可以直接询问：
 
-- “勾超的飞书 Open ID 是什么？”Copilot 会通过 `lark-cli contact +search-user` 实时检索，不会猜测人员 ID。同名时会列出邮箱和部门供管理员确认。
+- “某位同事的飞书 Open ID 是什么？”Copilot 会通过 `lark-cli contact +search-user` 实时检索，不会猜测人员 ID。同名时会列出邮箱和部门供管理员确认。
 - “概览 AI Hub 下的 Bot、场景、技能包和工具包。”平台事实通过内部只读工具获取。
 - “写一个接收 budgetId 并输出 JSON 的 Python 工具。”Copilot 会生成托管脚本草稿，页面展示代码、参数和超时，点击“确认创建工具”后才写入工具注册表。
-- “把勾超加为预算立项小助手的操作人。”Copilot 会先查人和 Bot，再生成配置变更卡片，点击“确认更新 Bot”后才修改 SQLite 并热重载飞书连接。
+- “把某位同事加为示例 Bot 的操作人。”Copilot 会先查人和 Bot，再生成配置变更卡片，点击“确认更新 Bot”后才修改 SQLite 并热重载飞书连接。
 
 服务账号需要提前完成 `lark-cli` 用户登录，并拥有通讯录搜索权限；可用以下命令检查：
 
@@ -166,7 +179,7 @@ pnpm dev
 
 服务器必须先安装所选 CLI，并确保服务账号能直接执行对应命令。TraeX 未安装时，现有 Codex Bot 继续正常运行；TraeX Bot 在首次读取模型或处理消息时会返回明确的 App Server 初始化错误。可以在运行总览的 Runtime 状态和服务日志中查看各引擎状态。
 
-Linux systemd 模板默认使用 `/home/gouchao/.local/bin/traex`，并将 `~/.local/bin` 加入服务 PATH。TraeX 安装完成后，应以运行 CodyBotHub 的同一系统账号执行 `traex login status`；IDE Remote Server 的登录态不会自动等同于 TraeX CLI 登录态。
+Linux systemd 安装器会解析当前账号的 CLI 路径，并将 `~/.local/bin` 加入服务 PATH。TraeX 安装完成后，应以运行 CodyBotHub 的同一系统账号执行 `traex login status`；IDE Remote Server 的登录态不会自动等同于 TraeX CLI 登录态。
 
 ## Core 依赖
 
@@ -178,7 +191,7 @@ Linux systemd 模板默认使用 `/home/gouchao/.local/bin/traex`，并将 `~/.l
 
 Codex Turn 可能运行几分钟甚至更久。直接执行 `systemctl restart codybothub.service` 会向进程发送停止信号；如果 systemd 在 Turn 结束前强制结束进程，本轮调查会失败，飞书只能收到中断错误。
 
-生产环境统一使用 [scripts/deploy.sh](scripts/deploy.sh)。它会在切换版本前进入**排空状态**：
+已有 Linux 用户服务可由维护者使用 [scripts/deploy.sh](scripts/deploy.sh) 升级。该脚本会拉取 `origin/main`，运行前应确认目标提交、数据库备份和 CI 状态；它不是自动发布流水线。脚本会在切换版本前进入**排空状态**：
 
 1. 先拉取、安装依赖并构建新版本，此时线上服务继续运行。
 2. 向服务发送 `SIGUSR2`，停止启动新的 Codex Turn。
@@ -191,12 +204,11 @@ Codex Turn 可能运行几分钟甚至更久。直接执行 `systemctl restart c
 
 ### 日常发布命令
 
-发布脚本需要在部署服务器的仓库目录中运行：
+发布脚本需要由维护者在目标服务器的仓库目录中运行，不要在开发机或未经确认的服务上执行：
 
 ```bash
-# 登录当前生产服务器
-ssh 'gouchao@fdbd:dc01:ff:31d:5830:b5a4:4263:f20b'
-cd /home/gouchao/code/github/CodyBotHub
+# 在已确认的目标服务器上，进入该服务实际使用的仓库目录
+cd /path/to/CodyBotHub
 
 # 服务端、依赖或数据库代码有变化：构建、排空、重启、健康检查
 ./scripts/deploy.sh
@@ -243,16 +255,15 @@ CODY_BOT_HUB_DEPLOY_DRAIN_TIMEOUT_SECONDS=1800 ./scripts/deploy.sh
 
 ### 服务安装与检查
 
-systemd 用户服务模板位于 [deploy/codybothub.service](deploy/codybothub.service)。首次部署或模板更新后执行：
+首次部署建议使用安装器生成当前机器专属的 systemd 用户服务配置，先预览，再安装：
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/codybothub.service ~/.config/systemd/user/codybothub.service
-systemctl --user daemon-reload
-systemctl --user enable --now codybothub.service
+pnpm build
+./skills/codybothub-setup/scripts/install-service.sh --dry-run
+./skills/codybothub-setup/scripts/install-service.sh --port 3003
 ```
 
-模板将 `TimeoutStopSec` 设置为 20 分钟，作为误操作 `stop/restart` 时的最后保护。日常发布仍应使用部署脚本，因为脚本会在发送停止信号前完成构建、主动排空并验证健康状态。
+安装器会设置 20 分钟的 `TimeoutStopSec`，作为误操作 `stop/restart` 时的最后保护。仓库内的 [示例 unit](deploy/codybothub.service) 含占位路径，不能直接复制使用。日常发布仍应使用部署脚本，因为脚本会在发送停止信号前完成构建、主动排空并验证健康状态。
 
 常用检查命令：
 
