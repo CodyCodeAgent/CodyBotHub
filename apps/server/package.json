@@ -8,10 +8,12 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/main.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:git": "CODY_FULL_GIT_TESTS=1 vitest run tests/workspace-sync.spec.ts"
   },
   "dependencies": {
-    "@codycodeagent/cody-web-core": "github:CodyCodeAgent/CodyWebCore#v0.40.0",
+    "@cody-bot-hub/contracts": "workspace:*",
+    "@codycodeagent/cody-web-core": "git+https://github.com/CodyCodeAgent/CodyWebCore.git#v0.40.0",
     "@larksuiteoapi/node-sdk": "^1.73.2",
     "@modelcontextprotocol/node": "^2.1.0",
     "@modelcontextprotocol/server": "^2.1.0",

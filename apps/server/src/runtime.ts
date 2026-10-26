@@ -9,8 +9,13 @@ import { createRuntimeAppServerHost, type AppServerHost } from '@codycodeagent/c
 import { buildTurnUserInput, CodexSessionManager, type CodexModelOption, type CodexSkillOption, type DynamicToolProvider, type ExecutionContext, type ExecutionPolicyProvider, type ThreadBinding, type TurnInput, type TurnInputSkill, type TurnOutcome } from '@codycodeagent/cody-web-core/session'
 import type { HubStore } from './db.js'
 import { TaskTokenUsageTracker, threadTokenCounters, type TaskTokenUsage } from './task-statistics.js'
-import { readSkillSearchTags, relevance, WorkspaceResourceIndex, type KnowledgeResource } from './resources.js'
+import { readSkillSearchTags, WorkspaceResourceIndex, type KnowledgeResource } from './resources.js'
 import type { AgentRuntimeKind, InvestigationSkillRecord, InvestigationTraceRecord, InvestigationToolRecord, ModelConfigSource, ResolvedModelConfig, ResolvedRoute, ToolPackageRecord } from './types.js'
+import { rankSkillCandidates, resolveRuntimeModel, type RuntimeResolvedModel } from './runtime-selection.js'
+import { EngineRegistry, type EngineState } from './runtime-engine-registry.js'
+import { buildCopilotContext, buildRouteContext } from './runtime-contexts.js'
+
+export { rankSkillCandidates, resolveRuntimeModel, type RuntimeResolvedModel } from './runtime-selection.js'
 
 export type RuntimeAttachment = {
   path: string
@@ -28,14 +33,6 @@ export type RuntimeProgress = {
 export type RuntimeTaskStatistics = {
   tokenUsage: TaskTokenUsage | null
   startedAt: number | null
-}
-
-export type RuntimeResolvedModel = {
-  model: string
-  reasoningEffort: string
-  modelSource: ModelConfigSource
-  reasoningEffortSource: ModelConfigSource
-  fallback: boolean
 }
 
 export type RuntimeModelCatalog = {
@@ -69,66 +66,6 @@ type RuntimeSkillPlan = {
   instructions: string
   trace: InvestigationTraceRecord
   requiresDynamicTools: boolean
-}
-
-type EngineState = {
-  kind: AgentRuntimeKind
-  host: AppServerHost
-  manager: CodexSessionManager
-  attached: Set<string>
-  attaching: Map<string, Promise<void>>
-  tokenTotals: Map<string, TaskTokenUsage>
-}
-
-export const resolveRuntimeModel = (requested: ResolvedModelConfig, models: CodexModelOption[], configuredModel = '', configuredEffort = '', runtimeDefaultSource: ModelConfigSource = 'codex'): RuntimeResolvedModel => {
-  const visible = models.filter(item => !item.hidden)
-  const findModel = (value: string) => models.find(item => item.id === value || item.model === value)
-  const accountDefault = findModel(configuredModel) ?? models.find(item => item.isDefault) ?? visible[0] ?? models[0]
-  const selected = requested.model ? findModel(requested.model) : accountDefault
-  let fallback = false
-  let modelSource = requested.modelSource
-  if (requested.model && !selected) {
-    if (!requested.fallbackEnabled) throw new Error(`Model ${requested.model} is unavailable for the current Codex account`)
-    fallback = true
-    modelSource = runtimeDefaultSource
-  }
-  const actual = selected ?? accountDefault
-  const model = actual?.id || actual?.model || requested.model || configuredModel
-  let reasoningEffort = requested.reasoningEffort || configuredEffort || actual?.defaultReasoningEffort || ''
-  let reasoningEffortSource: ModelConfigSource = requested.reasoningEffort ? requested.reasoningEffortSource : runtimeDefaultSource
-  if (reasoningEffort && actual?.supportedReasoningEfforts.length && !actual.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort'])) {
-    if (!requested.fallbackEnabled) throw new Error(`Reasoning effort ${reasoningEffort} is unsupported by model ${model}`)
-    reasoningEffort = actual.defaultReasoningEffort || ''
-    reasoningEffortSource = runtimeDefaultSource
-    fallback = true
-  }
-  return { model, reasoningEffort, modelSource, reasoningEffortSource, fallback }
-}
-
-export const rankSkillCandidates = (skills: CodexSkillOption[], query: string, options: { tags?: Map<string, string[]>; boosts?: Array<{ keyword: string; weight: number }>; minimumScore?: number } = {}): CodexSkillOption[] => {
-  const normalized = query.toLocaleLowerCase()
-  const scored = skills.map(skill => {
-    const searchable = `${skill.name} ${skill.displayName} ${skill.description} ${skill.path} ${(options.tags?.get(skill.path) ?? []).join(' ')}`
-    const searchableNormalized = searchable.toLocaleLowerCase()
-    let score = relevance(searchable, normalized)
-    if (normalized.includes(skill.name.toLocaleLowerCase())) score += 30
-    for (const boost of options.boosts ?? []) if (searchableNormalized.includes(boost.keyword.toLocaleLowerCase())) score += boost.weight
-    const sourcePriority = skill.path.includes(`${path.sep}.codex${path.sep}skills${path.sep}`)
-      ? 3
-      : skill.path.includes(`${path.sep}.agents${path.sep}skills${path.sep}`)
-        ? 2
-        : 1
-    return { skill, score, sourcePriority }
-  })
-  const ranked = scored
-    .filter(item => item.score >= (options.minimumScore ?? 0))
-    .sort((left, right) => right.score - left.score || right.sourcePriority - left.sourcePriority || left.skill.name.localeCompare(right.skill.name, 'zh-CN'))
-  const unique = new Map<string, CodexSkillOption>()
-  for (const item of ranked) {
-    const key = item.skill.name.trim().toLocaleLowerCase()
-    if (!unique.has(key)) unique.set(key, item.skill)
-  }
-  return [...unique.values()]
 }
 
 const skillSnapshot = (skill: CodexSkillOption): InvestigationSkillRecord => ({ name: skill.name, description: skill.description, path: skill.path })
@@ -213,7 +150,7 @@ export class CodyBotRuntime {
   }
 
   private static readonly TOOL_CONTRACT_VERSION = 2
-  private readonly engines = new Map<AgentRuntimeKind, EngineState>()
+  private readonly engines = new EngineRegistry()
   private readonly resources = new WorkspaceResourceIndex()
   private readonly activeToolContexts = new Map<string, { sourceLogId: string; invocationAllowed: boolean }>()
   private readonly activeCopilotContexts = new Map<string, { sessionId: string; accountId: string; workspaceId: string }>()
@@ -249,7 +186,7 @@ export class CodyBotRuntime {
   }
   private async executeCopilotImpl(input: CopilotExecutionInput): Promise<string> {
     const engine = await this.ensureEngine('codex'), manager = engine.manager, bindingId = `copilot:${input.sessionId}`
-    const context = this.copilotContext(input)
+    const context = buildCopilotContext(input)
     if (!engine.attached.has(bindingId)) {
       let threadId = input.coreThreadId
       if (input.coreThreadId) await manager.resume({ id: bindingId, threadId: input.coreThreadId }, context)
@@ -382,21 +319,11 @@ export class CodyBotRuntime {
   }
 
   async dispose(): Promise<void> {
-    await Promise.all([...this.engines.values()].map(async engine => {
-      await engine.manager.dispose()
-      await engine.host.dispose()
-    }))
-    this.engines.clear()
+    await this.engines.dispose()
   }
 
   health(): { initialized: boolean; attachedChannels: number; engines: Array<{ kind: AgentRuntimeKind; label: string; initialized: boolean; attachedChannels: number; state: string; error: string }> } {
-    const engines: AgentRuntimeKind[] = ['codex', 'traex']
-    const rows = engines.map(kind => {
-      const engine = this.engines.get(kind)
-      const diagnostics = engine?.host.diagnostics()
-      return { kind, label: kind === 'traex' ? 'TraeX' : 'Codex', initialized: Boolean(engine && diagnostics?.initialized), attachedChannels: engine?.attached.size ?? 0, state: diagnostics?.lifecycle ?? 'not_started', error: diagnostics?.unavailableReason ?? '' }
-    })
-    return { initialized: rows.some(item => item.initialized), attachedChannels: rows.reduce((sum, item) => sum + item.attachedChannels, 0), engines: rows }
+    return this.engines.health()
   }
 
   async listSkills(workspacePath: string, kind: AgentRuntimeKind = 'codex'): Promise<CodexSkillOption[]> {
@@ -436,11 +363,7 @@ export class CodyBotRuntime {
   }
 
   private async ensureEngine(kind: AgentRuntimeKind): Promise<EngineState> {
-    const existing = this.engines.get(kind)
-    if (existing) {
-      await existing.host.ensureInitialized()
-      return existing
-    }
+    return this.engines.ensure(kind, async () => {
     const policy: ExecutionPolicyProvider = {
       evaluate: operation => /approval/iu.test(operation.method)
         ? ({ action: 'allow', reason: 'CodyBotHub YOLO mode automatically approves tool execution.' })
@@ -484,13 +407,15 @@ export class CodyBotRuntime {
       const counters = threadTokenCounters(notification.params)
       if (counters) state.tokenTotals.set(counters.threadId, counters.total)
     })
-    this.engines.set(kind, state)
     try {
       await host.ensureInitialized()
       return state
     } catch (error) {
+      await manager.dispose().catch(() => undefined)
+      await host.dispose().catch(() => undefined)
       throw new Error(`${kind === 'traex' ? 'TraeX' : 'Codex'} App Server 初始化失败：${error instanceof Error ? error.message : String(error)}`)
     }
+    })
   }
 
   private async resolveModel(manager: CodexSessionManager, requested: ResolvedModelConfig, kind: AgentRuntimeKind): Promise<RuntimeResolvedModel> {
@@ -560,84 +485,11 @@ export class CodyBotRuntime {
   }
 
   private context(route: ResolvedRoute, resourceInstructions = ''): ExecutionContext {
-    const cwd = realpathSync.native(route.workspace.path)
     const toolContract = this.toolPackageContract(route)
-    const developerInstructions = [route.turnInstructions, toolContract].filter(Boolean).join('\n\n')
-    return {
-      thread: {
-        cwd,
-        approvalPolicy: 'never',
-        sandbox: 'danger-full-access',
-        runtimeWorkspaceRoots: [cwd],
-        baseInstructions: null,
-        developerInstructions: developerInstructions || null,
-        experimentalRawEvents: false,
-        ephemeral: false,
-        dynamicTools: [{
-          type: 'namespace',
-          name: 'codybothub',
-          description: 'CodyBotHub 中由管理员注册、可审批、可审计的业务操作。',
-          tools: [{
-            type: 'function',
-            name: 'invoke_tool_package',
-            description: `在完成分析并有足够证据后，申请或执行当前技能包关联的工具包。需要审批时会发送飞书确认卡片。${toolContract ? ` 当前允许：${this.authorizedToolPackages(route).map(item => `${item.name}=${item.id}`).join('；')}` : ' 当前场景没有授权工具包。'}`,
-            inputSchema: {
-              type: 'object',
-              properties: {
-                packageId: { type: 'string', description: '工具包 ID，只能使用当前上下文列出的 ID' },
-                arguments: { type: 'object', description: '工具包所需业务参数' },
-                reason: { type: 'string', description: '执行原因、证据和预期影响' },
-              },
-              required: ['packageId', 'arguments', 'reason'], additionalProperties: false,
-            },
-          }],
-        }],
-      },
-      turn: {
-        cwd,
-        runtimeWorkspaceRoots: [cwd],
-        approvalPolicy: 'never',
-        sandboxPolicy: { type: 'dangerFullAccess' },
-        summary: 'detailed',
-        additionalContext: developerInstructions || resourceInstructions ? {
-          'cody-bot-hub-route': { kind: 'application', value: [developerInstructions, resourceInstructions].filter(Boolean).join('\n\n') },
-        } : null,
-      },
-    }
+    const authorizedNames = this.authorizedToolPackages(route).map(item => `${item.name}=${item.id}`).join('；')
+    return buildRouteContext(route, resourceInstructions, toolContract, authorizedNames)
   }
 
-  private copilotContext(input: CopilotExecutionInput): ExecutionContext {
-    const cwd = realpathSync.native(input.workspacePath)
-    const instructions = [
-      '你是 CodyBotHub 平台管理员 Copilot。使用简洁中文帮助管理员查询平台、查找飞书人员和生成配置草稿。',
-      '所有平台事实必须通过 codybothub_admin 工具查询，不要猜测 ID、配置或人员信息。',
-      '你运行在只读沙箱中。不得直接编辑工作区、数据库或平台配置。需要创建托管脚本时，先完成脚本、参数和 Schema 设计，再调用 propose_managed_script 生成待确认草稿。需要调整 Bot 操作人时，先确认唯一人员 Open ID 和 Bot，再调用 propose_bot_operator。所有草稿只有管理员点击应用后才会生效。',
-      '查找人员基本信息时调用 search_feishu_user。当用户询问“我或某人在指定 Bot 应用下的 Open ID”时，先用 inspect_platform 找到准确 Bot ID，再调用 resolve_feishu_bot_user；用户说“我”时 query 传 me。只有 resolve_feishu_bot_user 返回的 Open ID 可用于 Bot 操作人或工具包审批人授权。search_feishu_user 返回的 Open ID 属于 lark-cli 用户应用命名空间，不得直接授权。',
-      '生成脚本时使用参数 argv，不把用户输入拼进 shell 命令；给出明确错误、超时和 JSON 输出。',
-      `当前账号：${input.accountId}；当前工作区：${input.workspaceName}（${input.workspaceId}）。`,
-      `平台概览：${input.platformContext}`,
-    ].join('\n\n')
-    return {
-      thread: {
-        cwd, approvalPolicy: 'never', sandbox: 'read-only', runtimeWorkspaceRoots: [cwd], baseInstructions: null, developerInstructions: instructions, experimentalRawEvents: false, ephemeral: false,
-        dynamicTools: [{
-          type: 'namespace', name: 'codybothub_admin', description: 'CodyBotHub 平台管理查询与可确认草稿工具。', tools: [
-            { type: 'function', name: 'inspect_platform', description: '查询平台工作区、Bot、场景、技能包、工具和工具包。', inputSchema: { type: 'object', properties: { resource: { type: 'string', enum: ['all', 'workspaces', 'bots', 'scenes', 'skillPackages', 'tools', 'toolPackages'] }, query: { type: 'string' } }, additionalProperties: false } },
-            { type: 'function', name: 'search_feishu_user', description: '按姓名或邮箱搜索飞书员工并返回 Open ID、邮箱和部门。', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'], additionalProperties: false } },
-            { type: 'function', name: 'resolve_feishu_bot_user', description: '在指定 CodyBotHub Bot 的飞书应用命名空间下，从该 Bot 已收到消息的用户和应用管理员中按姓名解析可授权的 Open ID。用户说“我”时 query 传 me。', inputSchema: { type: 'object', properties: { botId: { type: 'string', description: 'inspect_platform 返回的目标 Bot ID' }, query: { type: 'string', description: '人员姓名，或 me 表示当前 lark-cli 登录用户' } }, required: ['botId', 'query'], additionalProperties: false } },
-            { type: 'function', name: 'propose_managed_script', description: '创建平台托管脚本草稿。只生成待确认提案，不直接保存工具。', inputSchema: { type: 'object', properties: {
-              name: { type: 'string' }, description: { type: 'string' }, language: { type: 'string', enum: ['python', 'shell', 'node'] }, scriptContent: { type: 'string' },
-              argumentsTemplate: { type: 'array', items: { type: 'string' } }, inputSchema: { type: 'object' }, timeoutSeconds: { type: 'number' },
-            }, required: ['name', 'description', 'language', 'scriptContent', 'argumentsTemplate', 'inputSchema'], additionalProperties: false } },
-            { type: 'function', name: 'propose_bot_operator', description: '创建添加或移除 Bot 操作人的配置草稿。调用前必须已确认目标 Bot 应用命名空间下的准确 Open ID，不得使用 search_feishu_user 返回的个人应用 Open ID。', inputSchema: { type: 'object', properties: {
-              botId: { type: 'string', description: 'inspect_platform 返回的 Bot ID' }, openId: { type: 'string', description: '目标 Bot 卡片回调提示或当前飞书应用返回的 ou_ Open ID' }, personName: { type: 'string' }, action: { type: 'string', enum: ['add', 'remove'] },
-            }, required: ['botId', 'openId', 'action'], additionalProperties: false } },
-          ],
-        }],
-      },
-      turn: { cwd, runtimeWorkspaceRoots: [cwd], approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly' }, summary: 'concise', additionalContext: { 'cody-bot-hub-admin': { kind: 'application', value: instructions } } },
-    }
-  }
 
   private permissions(_route: ResolvedRoute): Pick<TurnInput, 'sandboxPolicy'> {
     return { sandboxPolicy: { type: 'dangerFullAccess' } }

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { assertTransition } from './state-transitions.js'
 import type { HubStore } from './db.js'
 import type {
   ScheduledAction,
@@ -15,16 +16,6 @@ export class ScheduledStore {
   readonly db: HubStore['db']
   constructor(readonly hub: HubStore) {
     this.db = hub.db
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS scheduled_tasks (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL REFERENCES workspaces(id), name TEXT NOT NULL, config_json TEXT NOT NULL, revision INTEGER NOT NULL, enabled INTEGER NOT NULL, next_run_at TEXT NOT NULL DEFAULT '', core_thread_id TEXT NOT NULL DEFAULT '', created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, archived INTEGER NOT NULL DEFAULT 0);
-      CREATE INDEX IF NOT EXISTS scheduled_tasks_due ON scheduled_tasks(enabled, next_run_at);
-      CREATE TABLE IF NOT EXISTS scheduled_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES scheduled_tasks(id), task_name TEXT NOT NULL, workspace_id TEXT NOT NULL, status TEXT NOT NULL, trigger TEXT NOT NULL, scheduled_at TEXT NOT NULL, trigger_key TEXT NOT NULL UNIQUE, snapshot_json TEXT NOT NULL, created_at TEXT NOT NULL, started_at TEXT NOT NULL DEFAULT '', completed_at TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', reasoning_effort TEXT NOT NULL DEFAULT '', core_thread_id TEXT NOT NULL DEFAULT '', report TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', delivery_status TEXT NOT NULL DEFAULT 'none', delivery_error TEXT NOT NULL DEFAULT '');
-      CREATE INDEX IF NOT EXISTS scheduled_runs_queue ON scheduled_runs(status, created_at);
-      CREATE INDEX IF NOT EXISTS scheduled_runs_task ON scheduled_runs(task_id, created_at DESC);
-      CREATE TABLE IF NOT EXISTS scheduled_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES scheduled_runs(id), at TEXT NOT NULL, phase TEXT NOT NULL, message TEXT NOT NULL, data_json TEXT NOT NULL DEFAULT 'null');
-      CREATE TABLE IF NOT EXISTS scheduled_actions (id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES scheduled_runs(id), request_key TEXT NOT NULL, status TEXT NOT NULL, body_json TEXT NOT NULL, UNIQUE(run_id,request_key));
-      CREATE TABLE IF NOT EXISTS scheduled_leases (name TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL);
-    `)
   }
   private task(row: Row): ScheduledTask {
     return {
@@ -240,9 +231,12 @@ export class ScheduledStore {
     }
     const entries = Object.entries(patch)
     if (!entries.length) return
-    this.db
-      .prepare(`UPDATE scheduled_runs SET ${entries.map(([k]) => `${columns[k]}=?`).join(',')} WHERE id=?`)
-      .run(...entries.map(([, v]) => v ?? ''), id)
+    const current = patch.status ? this.getRun(id).status : undefined
+    if (current && patch.status) assertTransition('scheduledRun', current, patch.status)
+    const changed = this.db
+      .prepare(`UPDATE scheduled_runs SET ${entries.map(([k]) => `${columns[k]}=?`).join(',')} WHERE id=?${current ? ' AND status=?' : ''}`)
+      .run(...entries.map(([, v]) => v ?? ''), id, ...(current ? [current] : [])).changes
+    if (!changed) throw new Error('Scheduled run changed concurrently or no longer exists')
   }
   event(runId: string, phase: string, message: string, data: unknown = null): void {
     this.db
@@ -273,11 +267,13 @@ export class ScheduledStore {
   updateAction(id: string, patch: Partial<ScheduledAction>, expected?: string): boolean {
     const old = this.action(id),
       next = { ...old, ...patch }
+    if (expected && old.status !== expected) return false
+    assertTransition('scheduledAction', old.status, next.status)
     return (
       Number(
         this.db
-          .prepare(`UPDATE scheduled_actions SET status=?,body_json=? WHERE id=? ${expected ? 'AND status=?' : ''}`)
-          .run(next.status, JSON.stringify(next), id, ...(expected ? [expected] : [])).changes
+          .prepare('UPDATE scheduled_actions SET status=?,body_json=? WHERE id=? AND status=?')
+          .run(next.status, JSON.stringify(next), id, old.status).changes
       ) > 0
     )
   }
