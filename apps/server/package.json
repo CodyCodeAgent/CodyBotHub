@@ -15,7 +15,7 @@
     "@cody-bot-hub/contracts": "workspace:*",
     "@codycodeagent/cody-web-core": "git+https://github.com/CodyCodeAgent/CodyWebCore.git#v0.40.0",
     "@larksuiteoapi/node-sdk": "^1.73.2",
-    "@modelcontextprotocol/node": "^2.1.0",
+    "@modelcontextprotocol/node": "^2.1.1",
     "@modelcontextprotocol/server": "^2.1.0",
     "@node-rs/argon2": "^2.0.2",
     "cron-parser": "^5.10.2",
