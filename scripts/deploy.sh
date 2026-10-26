@@ -26,7 +26,7 @@ cleanup() {
   rm -rf "${WEB_STAGE}"
   if [[ "${drain_requested}" == true && "${restart_started}" == false ]]; then
     echo "Deployment stopped; resuming queued work."
-    systemctl --user kill --signal=SIGUSR1 "${SERVICE_NAME}" >/dev/null 2>&1 || true
+    systemctl --user kill --kill-whom=main --signal=SIGUSR1 "${SERVICE_NAME}" >/dev/null 2>&1 || true
   fi
   exit "${exit_code}"
 }
@@ -65,7 +65,9 @@ if [[ "${WEB_ONLY}" == true ]]; then
 fi
 
 pnpm --filter @cody-bot-hub/server build
-systemctl --user kill --signal=SIGUSR2 "${SERVICE_NAME}"
+# Only the Hub process handles drain signals. Signalling the whole cgroup also
+# sends SIGUSR2 to active Codex subprocesses and aborts their running turns.
+systemctl --user kill --kill-whom=main --signal=SIGUSR2 "${SERVICE_NAME}"
 drain_requested=true
 deadline=$((SECONDS + DRAIN_TIMEOUT_SECONDS))
 
