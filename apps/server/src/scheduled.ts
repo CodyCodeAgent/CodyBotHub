@@ -11,6 +11,8 @@ import { ScheduledStore } from './scheduled-store.js'
 import { inspectWorkspace, WorkspaceSyncService, validatePreservedPaths } from './workspace-sync.js'
 import { workspacePathsOverlap } from './workspace-access.js'
 import { ToolPackageRunner } from './tool-execution.js'
+import { ScheduledRunScheduler } from './scheduled-run-scheduler.js'
+import { ScheduledRunOrchestrator, type ActiveScheduledRun } from './scheduled-run-orchestrator.js'
 import type { ScheduledAction, ScheduledRun, ScheduledTask, ScheduledTaskInput } from './scheduled-types.js'
 export { scheduledTemplates } from './scheduled-types.js'
 const at = () => new Date().toISOString()
@@ -81,13 +83,13 @@ export type ScheduledTransport = {
 }
 export class ScheduledTaskService {
   readonly records: ScheduledStore
-  private readonly owner = randomUUID()
-  private readonly active = new Map<string, { controller: AbortController; workspace: string }>()
+  private readonly active = new Map<string, ActiveScheduledRun>()
   private readonly sync: WorkspaceSyncService
+  private readonly scheduler: ScheduledRunScheduler
+  private readonly runOrchestrator: ScheduledRunOrchestrator
   private readonly runner: ToolPackageRunner
   private timer: ReturnType<typeof setInterval> | null = null
   private draining = false
-  private initialized = false
   private ticking = false
   constructor(
     private readonly hub: HubStore,
@@ -98,6 +100,8 @@ export class ScheduledTaskService {
   ) {
     this.records = new ScheduledStore(hub)
     this.sync = new WorkspaceSyncService(dataDir)
+    this.scheduler = new ScheduledRunScheduler(this.records, this.sync, runtime.workspaceAccess, runId => this.active.has(runId))
+    this.runOrchestrator = new ScheduledRunOrchestrator(this.records, this.active, (run, controller) => this.execute(run, controller))
     this.runner = new ToolPackageRunner(hub)
     runtime.setScheduledInvoker((id, tool, args) => this.invoke(id, tool, args))
   }
@@ -171,7 +175,7 @@ export class ScheduledTaskService {
     this.beginDrain()
     if (this.timer) clearInterval(this.timer)
     await this.waitForIdle()
-    this.records.releaseLease(this.owner)
+    this.scheduler.stop()
   }
   async waitForIdle(): Promise<void> {
     while (this.active.size) await new Promise((r) => setTimeout(r, 100))
@@ -191,7 +195,7 @@ export class ScheduledTaskService {
       draining: this.draining,
       activeTasks: this.active.size,
       queuedTasks: this.records.listRuns({ status: 'queued', limit: 1 }).total,
-      ready: this.initialized,
+      ready: this.scheduler.ready,
       totalTasks: this.records.listTasks({ limit: 1 }).total,
       enabledTasks: this.records.listTasks({ limit: 1, enabled: '1' }).total,
       recentRuns: this.records.listRuns({ from: new Date(Date.now() - 86400000).toISOString(), limit: 1 }).total,
@@ -207,75 +211,8 @@ export class ScheduledTaskService {
     if (this.ticking) return
     this.ticking = true
     try {
-      if (!this.records.lease(this.owner)) return
-      if (!this.initialized) {
-        this.records.recover()
-        for (const pending of this.sync.pendingRecovery())
-          this.runtime.workspaceAccess.pause(pending.root, pending.reason)
-        this.initialized = true
-      }
-      if (this.draining) return
-      for (const row of this.records.db
-        .prepare(
-          'SELECT id,next_run_at FROM scheduled_tasks WHERE enabled=1 AND archived=0 AND next_run_at<=? ORDER BY next_run_at LIMIT 100'
-        )
-        .all(now.toISOString()) as Array<{ id: string; next_run_at: string }>) {
-        const task = this.records.getTask(row.id),
-          key = `schedule:${task.id}:${row.next_run_at}`
-        this.records.db.exec('BEGIN IMMEDIATE')
-        try {
-          const missed = now.getTime() - Date.parse(row.next_run_at) > 30000,
-            busy = this.records.active(task.id),
-            pending = this.records.listRuns({ taskId: task.id, status: 'queued', limit: 1 }).total > 0
-          this.records.enqueue(
-            task,
-            '定时触发',
-            key,
-            row.next_run_at,
-            missed || (busy && (task.overlap === 'skip' || pending)) ? 'skipped' : 'queued',
-            missed ? '触发窗口已错过，已记录并从下一周期继续' : busy ? '上次尚未结束，按重叠策略处理' : ''
-          )
-          this.records.db
-            .prepare('UPDATE scheduled_tasks SET next_run_at=? WHERE id=? AND next_run_at=?')
-            .run(nextScheduleDates(task.schedule, now)[0]!, task.id, row.next_run_at)
-          this.records.db.exec('COMMIT')
-        } catch (e) {
-          this.records.db.exec('ROLLBACK')
-          throw e
-        }
-      }
-      for (const row of this.records.db
-        .prepare("SELECT id,run_id FROM scheduled_actions WHERE status='awaiting_approval'")
-        .all() as Array<{ id: string; run_id: string }>) {
-        const action = this.records.action(row.id)
-        if (
-          action.expiresAt <= now.toISOString() &&
-          this.records.updateAction(action.id, { status: 'expired', error: '审批已过期' }, 'awaiting_approval') &&
-          !this.active.has(action.runId)
-        )
-          this.records.updateRun(action.runId, { status: 'queued' })
-      }
-      for (const item of this.records.listRuns({ status: 'queued', limit: 100 }).items.reverse()) {
-        if (this.active.size >= 2) break
-        if (this.active.has(item.id)) continue
-        if (
-          this.records.db
-            .prepare(
-              "SELECT 1 FROM scheduled_runs WHERE task_id=? AND id<>? AND status IN ('running','awaiting_approval') LIMIT 1"
-            )
-            .get(item.taskId, item.id)
-        )
-          continue
-        const run = this.records.getRun(item.id),
-          root = realpathSync.native(run.snapshot.workspacePath)
-        if ([...this.active.values()].some((a) => workspacePathsOverlap(a.workspace, root))) continue
-        if (!this.records.claim(run.id)) continue
-        const controller = new AbortController()
-        this.active.set(run.id, { controller, workspace: root })
-        void this.execute(this.records.getRun(run.id), controller)
-          .catch((e) => console.error('[scheduler] execute failed', e))
-          .finally(() => this.active.delete(run.id))
-      }
+      if (!this.scheduler.tick(now, this.draining)) return
+      this.runOrchestrator.dispatch()
     } finally {
       this.ticking = false
     }

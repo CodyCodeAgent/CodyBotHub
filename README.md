@@ -62,6 +62,7 @@ pnpm dev
 
 完整的数据流、匹配规则和线程规则见 [docs/architecture.md](docs/architecture.md)。
 
+开发验证：`pnpm check` 运行类型检查、快速单测、少量真实 Git 契约测试和构建。完整工作区同步回归测试使用 `pnpm --filter @cody-bot-hub/server test:git`，会创建多个本地临时仓库，耗时明显更长。
 
 ## 群消息与 Bot 协作
 

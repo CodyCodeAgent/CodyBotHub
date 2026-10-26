@@ -150,6 +150,7 @@ describe('HubStore invariants', () => {
     expect(store.startThreadJob(job.id)).toBe(true)
     expect(store.listMessageAttempts(log.id).at(-1)).toMatchObject({ attemptNumber: 2, status: 'processing', requestedByLoginName: 'admin' })
     store.finishMessageLog(log.id, { responseContent: 'recovered' })
+    expect(() => store.finishMessageLog(log.id, { responseContent: 'stale completion' })).toThrow('Invalid messageLog transition')
     store.finishThreadJob(job.id, 'completed')
     expect(store.listMessageAttempts(log.id)).toMatchObject([
       { attemptNumber: 1, status: 'failed', responseContent: 'partial answer' },

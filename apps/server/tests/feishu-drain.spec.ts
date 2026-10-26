@@ -27,8 +27,9 @@ describe('FeishuBotManager deployment drain', () => {
 
   it('waits for active work and pending receipts before becoming idle', async () => {
     const { manager } = managerFixture()
-    const internals = manager as unknown as { scheduledJobs: Set<string>; pendingReceipts: Set<string> }
-    internals.scheduledJobs.add('job-1')
+    const internals = manager as unknown as { dispatcher: { enqueue: (channel: string, job: string, work: () => Promise<void>) => Promise<void> }; pendingReceipts: Set<string> }
+    let finishJob!: () => void
+    const job = internals.dispatcher.enqueue('channel-1', 'job-1', () => new Promise<void>(resolve => { finishJob = resolve }))
     internals.pendingReceipts.add('job-2')
 
     let settled = false
@@ -36,7 +37,8 @@ describe('FeishuBotManager deployment drain', () => {
     await new Promise(resolve => setTimeout(resolve, 20))
     expect(settled).toBe(false)
 
-    internals.scheduledJobs.delete('job-1')
+    finishJob()
+    await job
     internals.pendingReceipts.delete('job-2')
     await waiting
     expect(settled).toBe(true)

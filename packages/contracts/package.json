@@ -1,0 +1,17 @@
+{
+  "name": "@cody-bot-hub/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./scheduled": "./src/scheduled.ts",
+    "./platform": "./src/platform.ts",
+    "./domain": "./src/domain.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

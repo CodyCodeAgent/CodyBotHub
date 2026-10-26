@@ -2,70 +2,24 @@ import { existsSync, statSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import path from 'node:path'
-import { FEISHU_MESSAGE_TYPES } from '@codycodeagent/cody-web-core/feishu'
 import { AuthService } from './auth.js'
 import { SecretVault } from './crypto.js'
 import { HubStore } from './db.js'
-import type { AgentRuntimeKind, BotMessagePolicy, DeploymentStatusRecord, HubTaskRecord, SceneRecord, SkillPackageRecord, SystemHealthRecord, ToolPackageRecord, ToolRecord } from './types.js'
-import type { FeishuProvisioningService, ProvisioningRequest } from './provisioning.js'
-import { listBrowsableDirectories } from './directories.js'
+import type { DeploymentStatusRecord, HubTaskRecord, SystemHealthRecord } from './types.js'
+import type { FeishuProvisioningService } from './provisioning.js'
 import type { CodyBotRuntime } from './runtime.js'
 import type { SkillSyncService } from './skills.js'
-import { removeToolSource, syncToolSource } from './tool-source.js'
 import type { CopilotService } from './copilot.js'
 import type { HubTaskService } from './tasks.js'
 import { createMcpEndpoint } from './mcp.js'
-import { scheduledTemplates, type ScheduledTaskService } from './scheduled.js'
-import { nextScheduleDates } from './schedule.js'
-import { inspectWorkspace } from './workspace-sync.js'
-import type { ScheduleConfig } from './scheduled-types.js'
-
-type Json = Record<string, unknown>
-
-class HttpError extends Error {
-  constructor(readonly status: number, message: string) { super(message) }
-}
-
-const sendJson = (response: ServerResponse, status: number, value: unknown): void => {
-  response.statusCode = status
-  response.setHeader('Content-Type', 'application/json; charset=utf-8')
-  response.setHeader('Cache-Control', 'no-store')
-  response.end(JSON.stringify(value))
-}
-
-const readJson = async (request: IncomingMessage): Promise<Json> => {
-  const chunks: Buffer[] = []
-  let size = 0
-  for await (const chunk of request) {
-    const value = Buffer.from(chunk as Uint8Array)
-    size += value.length
-    if (size > 1024 * 1024) throw new HttpError(413, 'Request body is too large')
-    chunks.push(value)
-  }
-  if (!chunks.length) return {}
-  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Json }
-  catch { throw new HttpError(400, 'Invalid JSON body') }
-}
-
-const required = (body: Json, key: string): string => {
-  const value = body[key]
-  if (typeof value !== 'string' || !value.trim()) throw new HttpError(400, `${key} is required`)
-  return value.trim()
-}
-const optional = (body: Json, key: string): string => typeof body[key] === 'string' ? String(body[key]).trim() : ''
-const rawString = (body: Json, key: string): string => typeof body[key] === 'string' ? String(body[key]) : ''
-const stringList = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean) : []
-const bool = (value: unknown, fallback = false): boolean => typeof value === 'boolean' ? value : fallback
-const number = (value: unknown, fallback: number): number => typeof value === 'number' && Number.isFinite(value) ? value : fallback
-const runtimeKind = (value: unknown): AgentRuntimeKind => value === 'traex' ? 'traex' : 'codex'
-const botMessagePolicy = (value: unknown): BotMessagePolicy => value === 'reject' || value === 'mentioned' ? value : 'mentioned_or_scene'
-const page = <T>(items: T[], url: URL, fallback = 20): { items: T[]; total: number } => {
-  const requestedLimit = Number(url.searchParams.get('limit') ?? fallback)
-  const requestedOffset = Number(url.searchParams.get('offset') ?? 0)
-  const limit = Math.min(100, Math.max(1, Number.isFinite(requestedLimit) ? Math.trunc(requestedLimit) : fallback))
-  const offset = Math.max(0, Number.isFinite(requestedOffset) ? Math.trunc(requestedOffset) : 0)
-  return { items: items.slice(offset, offset + limit), total: items.length }
-}
+import type { ScheduledTaskService } from './scheduled.js'
+import { HttpError, matchId, optional, page, sendJson, readJson, required } from './http/common.js'
+import { handleScheduledRoute } from './http/scheduled-router.js'
+import { handleCopilotRoute } from './http/copilot-router.js'
+import { handleAdminRoute } from './http/admin-router.js'
+import { handleSkillRoute } from './http/skill-router.js'
+import { handleInsightsRoute } from './http/insights-router.js'
+import { handleConfigurationRoute } from './http/configuration-router.js'
 
 export interface HubServerOptions {
   store: HubStore
@@ -114,32 +68,7 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         const actor = auth.currentAccount(request)!
         const audit = (action: string, targetType: string, targetId: string, summary: string, details: Record<string, unknown> = {}) => store.createAuditLog({ actor, action, targetType, targetId, summary, details, ipAddress: requestIp(request) })
 
-        if (url.pathname.startsWith('/api/scheduled-')) {
-          if (!scheduled) throw new HttpError(503, '定时任务服务未启用')
-          const params = url.searchParams
-          const pagination = { limit: Math.min(100, Math.max(1, Number(params.get('limit')) || 20)), offset: Math.max(0, Number(params.get('offset')) || 0) }
-          if (method === 'GET' && url.pathname === '/api/scheduled-templates') return sendJson(response, 200, scheduledTemplates)
-          if (method === 'GET' && url.pathname === '/api/scheduled-maintenance') return sendJson(response,200,scheduled.maintenance(params.get('workspaceId')||''))
-          if (method === 'POST' && url.pathname === '/api/scheduled-maintenance') {const workspaceId=required(await readJson(request),'workspaceId');scheduled.resumeWorkspace(workspaceId);audit('scheduled_workspace.resume','workspace',workspaceId,'管理员核实后解除工作区维护暂停');return sendJson(response,200,{ok:true})}
-          if (method === 'GET' && url.pathname === '/api/scheduled-health') return sendJson(response, 200, scheduled.health())
-          if (method === 'GET' && url.pathname === '/api/scheduled-tasks') return sendJson(response, 200, scheduled.records.listTasks({ ...pagination, query: params.get('query') || '', workspaceId: params.get('workspaceId') || '', enabled: params.get('enabled') || '' }))
-          if (method === 'POST' && url.pathname === '/api/scheduled-tasks') { const task=await scheduled.save(await readJson(request),actor.loginName); audit('scheduled_task.create','scheduled_task',task.id,`创建定时任务 ${task.name}`); return sendJson(response,201,task) }
-          if (method === 'POST' && url.pathname === '/api/scheduled-preview') return sendJson(response,200,nextScheduleDates((await readJson(request)).schedule as ScheduleConfig))
-          if (method === 'GET' && url.pathname === '/api/scheduled-workspace') { const workspace=store.getWorkspace(params.get('workspaceId') || ''); return sendJson(response,200,await inspectWorkspace(workspace.path)) }
-          if (method === 'GET' && url.pathname === '/api/scheduled-runs') return sendJson(response,200,scheduled.records.listRuns({...pagination,taskId:params.get('taskId')||'',workspaceId:params.get('workspaceId')||'',status:params.get('status')||'',from:params.get('from')||'',to:params.get('to')||''}))
-          const taskMatch=url.pathname.match(/^\/api\/scheduled-tasks\/([^/]+)(?:\/(run|enabled))?$/u)
-          if (taskMatch) {
-            const id=taskMatch[1]!, action=taskMatch[2], task=scheduled.records.getTask(id)
-            if(method==='POST'&&action==='run') {const run=scheduled.trigger(id,actor.loginName);audit('scheduled_task.run','scheduled_run',run.id,`手动执行 ${task.name}`);return sendJson(response,202,run)}
-            if(method==='PUT'&&action==='enabled') {const input=await readJson(request),updated=await scheduled.save({...task,enabled:bool(input.enabled)},actor.loginName,id);audit('scheduled_task.toggle','scheduled_task',id,`${updated.enabled?'启用':'暂停'}定时任务 ${task.name}`);return sendJson(response,200,updated)}
-            if(method==='GET'&&!action)return sendJson(response,200,task)
-            if(method==='PUT'&&!action){const updated=await scheduled.save(await readJson(request),actor.loginName,id);audit('scheduled_task.update','scheduled_task',id,`修改定时任务 ${updated.name}`,{revision:updated.revision});return sendJson(response,200,updated)}
-            if(method==='DELETE'&&!action){scheduled.records.archive(id);audit('scheduled_task.archive','scheduled_task',id,`归档定时任务 ${task.name}`);response.statusCode=204;return response.end()}
-          }
-          const runMatch=url.pathname.match(/^\/api\/scheduled-runs\/([^/]+)(?:\/(cancel|delivery))?$/u)
-          if(runMatch){const id=runMatch[1]!, action=runMatch[2];if(method==='GET'&&!action)return sendJson(response,200,scheduled.records.getRun(id));if(method==='POST'&&action==='cancel'){const run=scheduled.cancel(id);audit('scheduled_run.cancel','scheduled_run',id,'取消或中断定时执行');return sendJson(response,200,run)}if(method==='POST'&&action==='delivery'){const run=await scheduled.retryDelivery(id);audit('scheduled_run.delivery','scheduled_run',id,'重新投递定时任务结果');return sendJson(response,200,run)}}
-          throw new HttpError(404,'定时任务接口不存在')
-        }
+        if (await handleScheduledRoute({ request, response, url, method, actor, store, scheduled, audit })) return
 
         if (method === 'GET' && url.pathname === '/api/system-health') return sendJson(response, 200, getSystemHealth?.() ?? null)
         if (method === 'GET' && url.pathname === '/api/tasks/page') {
@@ -150,326 +79,14 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
         const taskId = matchId(url.pathname, '/api/tasks/')
         if (taskId && method === 'GET') return sendJson(response, 200, store.getHubTask(taskId))
 
-        if (method === 'GET' && url.pathname === '/api/copilot/session') {
-          const workspaceId = url.searchParams.get('workspaceId') ?? store.listWorkspaces()[0]?.id ?? ''
-          if (!workspaceId) throw new HttpError(400, 'Create a Workspace before using Copilot')
-          return sendJson(response, 200, copilot.session(actor.id, workspaceId))
-        }
-        if (method === 'POST' && url.pathname === '/api/copilot/session/reset') {
-          const body = await readJson(request), result = copilot.reset(required(body, 'sessionId'), actor.id)
-          audit('copilot.reset', 'copilot_session', result.session.id, '重置平台 Copilot 会话', { workspaceId: result.session.workspaceId })
-          return sendJson(response, 200, result)
-        }
-        if (method === 'POST' && url.pathname === '/api/copilot/messages') {
-          const body = await readJson(request), content = required(body, 'content')
-          const result = await copilot.ask(required(body, 'sessionId'), actor, content)
-          audit('copilot.ask', 'copilot_session', result.session.id, `询问平台 Copilot：${content.slice(0, 120)}`, { workspaceId: result.session.workspaceId })
-          return sendJson(response, 200, result)
-        }
-        if (method === 'GET' && url.pathname === '/api/copilot/proposals') return sendJson(response, 200, store.listCopilotProposals(url.searchParams.get('sessionId') ?? '', actor.id))
-        const copilotProposal = url.pathname.match(/^\/api\/copilot\/proposals\/([^/]+)\/(apply|dismiss)$/u)
-        if (copilotProposal && method === 'POST') {
-          const id = decodeURIComponent(copilotProposal[1]!), action = copilotProposal[2]
-          if (action === 'dismiss') {
-            const proposal = copilot.dismissProposal(id, actor.id)
-            audit('copilot.proposal.dismiss', 'copilot_proposal', proposal.id, `放弃 Copilot 草稿：${proposal.title}`)
-            return sendJson(response, 200, proposal)
-          }
-          const result = copilot.applyProposal(id, actor)
-          if (result.target.type === 'bot') await onConfigurationChanged?.()
-          audit('copilot.proposal.apply', result.target.type, result.target.id, `应用 Copilot 草稿：${result.proposal.title}`, { proposalId: result.proposal.id, proposalKind: result.proposal.kind })
-          return sendJson(response, 200, result)
-        }
+        if (await handleCopilotRoute({ request, response, url, method, actor, store, audit, copilot, onConfigurationChanged })) return
 
-        if (method === 'GET' && url.pathname === '/api/preferences') return sendJson(response, 200, { theme: actor.theme })
-        if (method === 'PUT' && url.pathname === '/api/preferences') {
-          const body = await readJson(request), theme = optional(body, 'theme')
-          if (!['system', 'light', 'dark'].includes(theme)) throw new HttpError(400, 'theme must be system, light, or dark')
-          const account = store.setAdminTheme(actor.id, theme as 'system' | 'light' | 'dark')
-          audit('preferences.update', 'account', actor.id, `切换界面主题：${theme}`)
-          return sendJson(response, 200, { theme: account.theme })
-        }
+        if (await handleAdminRoute({ request, response, url, method, actor, store, audit, auth })) return
 
-        if (method === 'GET' && url.pathname === '/api/accounts/page') return sendJson(response, 200, page(store.listAdminAccounts(), url))
-        if (method === 'GET' && url.pathname === '/api/accounts') return sendJson(response, 200, store.listAdminAccounts())
-        if (method === 'POST' && url.pathname === '/api/accounts') {
-          const body = await readJson(request)
-          return sendJson(response, 201, await auth.createAccount({ loginName: required(body, 'loginName'), displayName: required(body, 'displayName'), password: required(body, 'password') }, actor, request))
-        }
-        const accountId = matchId(url.pathname, '/api/accounts/')
-        if (accountId && method === 'PUT') {
-          const body = await readJson(request), password = optional(body, 'password')
-          return sendJson(response, 200, await auth.updateAccount(accountId, { loginName: required(body, 'loginName'), displayName: required(body, 'displayName'), ...(password ? { password } : {}) }, actor, request))
-        }
-        if (accountId && method === 'DELETE') { auth.deleteAccount(accountId, actor, request); response.statusCode = 204; return response.end() }
-        if (method === 'GET' && url.pathname === '/api/audit-logs') {
-          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
-          const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0
-          return sendJson(response, 200, store.listAuditLogs({ limit: number(limit, 50), offset: number(offset, 0), actorAccountId: url.searchParams.get('actorAccountId') ?? '', action: url.searchParams.get('action') ?? '', query: url.searchParams.get('query') ?? '' }))
-        }
-        const auditLogId = matchId(url.pathname, '/api/audit-logs/')
-        if (auditLogId && method === 'GET') return sendJson(response, 200, store.getAuditLog(auditLogId))
+        if (await handleSkillRoute({ request, response, url, method, actor, store, audit, runtime, skills })) return
 
-        if (method === 'GET' && url.pathname === '/api/filesystem/directories') {
-          return sendJson(response, 200, listBrowsableDirectories(url.searchParams.get('path') ?? undefined))
-        }
-        if (method === 'GET' && url.pathname === '/api/feishu/message-types') {
-          const labels: Record<(typeof FEISHU_MESSAGE_TYPES)[number], string> = { text: '文本', post: '富文本', image: '图片', file: '文件', audio: '音频', media: '视频', interactive: '消息卡片' }
-          return sendJson(response, 200, FEISHU_MESSAGE_TYPES.map(value => ({ value, label: labels[value] })))
-        }
-        if (method === 'GET' && url.pathname === '/api/skills') {
-          const workspace = store.listWorkspaces().find(item => item.id === url.searchParams.get('workspaceId'))
-          if (!workspace) throw new HttpError(404, 'Workspace not found')
-          return sendJson(response, 200, (await runtime.listSkills(workspace.path, runtimeKind(url.searchParams.get('runtimeKind')))).filter(skill => skill.enabled))
-        }
-        if (method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, await runtime.listModels(runtimeKind(url.searchParams.get('runtimeKind'))))
-
-        if (method === 'GET' && url.pathname === '/api/skill-sources/page') return sendJson(response, 200, page(store.listSkillSources(), url))
-        if (method === 'GET' && url.pathname === '/api/skill-sources') return sendJson(response, 200, store.listSkillSources())
-        if (method === 'POST' && url.pathname === '/api/skill-sources') {
-          const body = await readJson(request), result = store.createSkillSource(skillSourceInput(body))
-          audit('skill_source.create', 'skill_source', result.id, `创建技能源 ${result.name}`, { workspaceId: result.workspaceId, repositoryUrl: result.repositoryUrl })
-          return sendJson(response, 201, result)
-        }
-        const skillSourceMatch = url.pathname.match(/^\/api\/skill-sources\/([^/]+)(?:\/(sync))?$/u)
-        if (skillSourceMatch) {
-          const sourceId = decodeURIComponent(skillSourceMatch[1]!), action = skillSourceMatch[2]
-          if (method === 'POST' && action === 'sync') {
-            const result = await runtime.workspaceAccess.maintain(store.getWorkspace(store.getSkillSource(sourceId).workspaceId).path, `skill-source:${sourceId}`, () => skills.sync(sourceId))
-            audit('skill_source.sync', 'skill_source', sourceId, `同步技能源 ${result.source.name}`, { commit: result.source.lastCommit, installed: result.installed, skipped: result.skipped })
-            return sendJson(response, 200, result)
-          }
-          if (!action && method === 'PUT') {
-            const result = store.updateSkillSource(sourceId, skillSourceInput(await readJson(request)))
-            audit('skill_source.update', 'skill_source', sourceId, `更新技能源 ${result.name}`)
-            return sendJson(response, 200, result)
-          }
-          if (!action && method === 'DELETE') {
-            const item = store.getSkillSource(sourceId)
-            store.deleteSkillSource(sourceId)
-            await skills.removeSource(sourceId)
-            audit('skill_source.delete', 'skill_source', sourceId, `删除技能源 ${item.name}`)
-            response.statusCode = 204; return response.end()
-          }
-        }
-        if (method === 'GET' && url.pathname === '/api/skill-catalog') {
-          const catalog = await skills.catalog({ workspaceId: url.searchParams.get('workspaceId') ?? '', sourceId: url.searchParams.get('sourceId') ?? '', status: url.searchParams.get('status') ?? '', query: url.searchParams.get('query') ?? '' })
-          if (url.searchParams.has('limit') || url.searchParams.has('offset')) {
-            const result = page(catalog, url)
-            return sendJson(response, 200, { ...result, statusCounts: catalog.reduce<Record<string, number>>((counts, item) => ({ ...counts, [item.status]: (counts[item.status] ?? 0) + 1 }), {}) })
-          }
-          return sendJson(response, 200, catalog)
-        }
-        if (method === 'GET' && url.pathname === '/api/workspace-resources') {
-          const workspace = store.getWorkspace(url.searchParams.get('workspaceId') ?? '')
-          const resources = await runtime.workspaceResources(workspace.path, url.searchParams.get('query') ?? '', runtimeKind(url.searchParams.get('runtimeKind')))
-          const knowledge = page(resources.knowledge, url)
-          return sendJson(response, 200, { ...resources, knowledge: knowledge.items, knowledgeTotal: knowledge.total })
-        }
-        if (method === 'POST' && url.pathname === '/api/skill-catalog/install') {
-          const body = await readJson(request)
-          const result = await runtime.workspaceAccess.maintain(store.getWorkspace(required(body, 'workspaceId')).path, `skill-install:${Date.now()}`, () => skills.install({ sourceId: required(body, 'sourceId'), workspaceId: required(body, 'workspaceId'), skillKeys: stringList(body.skillKeys), all: bool(body.all), force: bool(body.force) }))
-          audit('skill.install', 'skill_source', String(body.sourceId), `安装或更新 Skill：${result.installed} 个`, { installed: result.installed, skipped: result.skipped, errors: result.errors })
-          return sendJson(response, 200, result)
-        }
-
-        if (method === 'GET' && url.pathname === '/api/dashboard') return sendJson(response, 200, store.stats({
-          fromDate: url.searchParams.get('fromDate') ?? '',
-          toDate: url.searchParams.get('toDate') ?? '',
-          botId: url.searchParams.get('botId') ?? '',
-          chatId: url.searchParams.get('chatId') ?? '',
-          threadChannelId: url.searchParams.get('threadChannelId') ?? '',
-        }))
-        if (method === 'GET' && url.pathname === '/api/dashboard/dimensions') return sendJson(response, 200, store.dashboardDimensions())
-        if (method === 'GET' && url.pathname === '/api/chats') {
-          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 200
-          return sendJson(response, 200, store.listChatMetadata({ botId: url.searchParams.get('botId') ?? '', query: url.searchParams.get('query') ?? '', limit: number(limit, 200) }))
-        }
-        if (method === 'GET' && url.pathname === '/api/conversation-threads') {
-          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
-          const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0
-          return sendJson(response, 200, store.listConversationThreads({
-            limit: number(limit, 50),
-            offset: number(offset, 0),
-            botId: url.searchParams.get('botId') ?? '',
-            query: url.searchParams.get('query') ?? '',
-          }))
-        }
-        const conversationThreadId = matchId(url.pathname, '/api/conversation-threads/')
-        if (conversationThreadId && method === 'GET') return sendJson(response, 200, store.getConversationThread(conversationThreadId))
-        if (method === 'GET' && url.pathname === '/api/thread-routing-rules') return sendJson(response, 200, store.listThreadRoutingRules())
-        const threadRoutingSceneId = matchId(url.pathname, '/api/thread-routing-rules/')
-        if (threadRoutingSceneId && method === 'PUT') {
-          const body = await readJson(request)
-          const result = store.setThreadRoutingRule(threadRoutingSceneId, {
-            enabled: bool(body.enabled), reuseThreshold: number(body.reuseThreshold, 0.85), experienceThreshold: number(body.experienceThreshold, 0.55),
-            timeWindowHours: number(body.timeWindowHours, 72), maxCandidates: number(body.maxCandidates, 100),
-            structuredWeight: number(body.structuredWeight, 0.7), textWeight: number(body.textWeight, 0.3),
-          })
-          audit('thread_routing.update', 'scene', threadRoutingSceneId, `更新场景 ${result.sceneName} 的 Thread 路由规则`, { ...result })
-          return sendJson(response, 200, result)
-        }
-        if (method === 'GET' && url.pathname === '/api/thread-routing-profiles') {
-          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 100
-          const profiles = store.listThreadProfiles(url.searchParams.has('paged') ? 500 : number(limit, 100))
-          const sceneId = url.searchParams.get('sceneId') ?? '', query = (url.searchParams.get('query') ?? '').trim().toLocaleLowerCase()
-          const filtered = profiles.filter(item => (!sceneId || item.sceneId === sceneId) && (!query || [item.title, item.normalizedText, item.experienceSummary, ...Object.values(item.fields)].join(' ').toLocaleLowerCase().includes(query)))
-          return sendJson(response, 200, url.searchParams.has('paged') ? page(filtered, url) : filtered.slice(0, number(limit, 100)))
-        }
-        if (method === 'GET' && url.pathname === '/api/thread-routing-decisions') {
-          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
-          const items = store.listThreadRoutingDecisions(url.searchParams.has('paged') ? 500 : number(limit, 50))
-          if (url.searchParams.has('paged')) {
-            const result = page(items, url), typeCounts: Record<string, number> = {}
-            for (const item of items) typeCounts[item.type] = (typeCounts[item.type] ?? 0) + 1
-            return sendJson(response, 200, { ...result, typeCounts })
-          }
-          return sendJson(response, 200, items)
-        }
-        if (method === 'GET' && url.pathname === '/api/thread-channels') {
-          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 200
-          const items = store.listThreadChannels(url.searchParams.has('paged') ? 500 : number(limit, 200))
-          return sendJson(response, 200, url.searchParams.has('paged') ? page(items, url) : items)
-        }
-        if (method === 'GET' && url.pathname === '/api/thread-jobs') {
-          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 100
-          const items = store.listThreadJobs(url.searchParams.has('paged') ? 500 : number(limit, 100))
-          return sendJson(response, 200, url.searchParams.has('paged') ? page(items, url) : items)
-        }
-        if (method === 'GET' && url.pathname === '/api/message-logs') {
-          const limit = url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : 50
-          const offset = url.searchParams.has('offset') ? Number(url.searchParams.get('offset')) : 0
-          return sendJson(response, 200, store.listMessageLogs({
-            limit: number(limit, 50),
-            offset: number(offset, 0),
-            botId: url.searchParams.get('botId') ?? '',
-            sceneId: url.searchParams.get('sceneId') ?? '',
-            status: url.searchParams.get('status') ?? '',
-            query: url.searchParams.get('query') ?? '',
-          }))
-        }
-        const messageLogAction = url.pathname.match(/^\/api\/message-logs\/([^/]+)\/(attempts|retry)$/u)
-        if (messageLogAction) {
-          const logId = decodeURIComponent(messageLogAction[1]!), action = messageLogAction[2]
-          if (method === 'GET' && action === 'attempts') return sendJson(response, 200, store.listMessageAttempts(logId))
-          if (method === 'POST' && action === 'retry') {
-            const result = store.retryMessageLog(logId, actor)
-            audit('message.retry', 'message_log', logId, `重试失败消息 ${result.log.messageId}`, { attemptNumber: result.attempts.at(-1)?.attemptNumber, threadChannelId: result.log.threadChannelId, coreThreadId: result.log.coreThreadId })
-            await onMessageRetry?.()
-            return sendJson(response, 202, result)
-          }
-        }
-        const messageLogId = matchId(url.pathname, '/api/message-logs/')
-        if (messageLogId && method === 'GET') return sendJson(response, 200, store.getMessageLog(messageLogId))
-        if (method === 'GET' && url.pathname === '/api/settings') return sendJson(response, 200, store.getPlatformSettings())
-        if (method === 'PUT' && url.pathname === '/api/settings') {
-          const body = await readJson(request)
-          const input = { basePrompt: optional(body, 'basePrompt'), defaultModel: optional(body, 'defaultModel'), defaultReasoningEffort: optional(body, 'defaultReasoningEffort'), modelFallbackEnabled: bool(body.modelFallbackEnabled, true), threadProfileRefreshIntervalSeconds: number(body.threadProfileRefreshIntervalSeconds, 5), threadProfileBatchSize: number(body.threadProfileBatchSize, 20) }
-          await runtime.validateModelSelection('codex', input.defaultModel, input.defaultReasoningEffort)
-          const result = store.setPlatformSettings(input)
-          audit('settings.update', 'settings', 'platform', '更新平台设置', { defaultModel: result.defaultModel, defaultReasoningEffort: result.defaultReasoningEffort, modelFallbackEnabled: result.modelFallbackEnabled, threadProfileRefreshIntervalSeconds: result.threadProfileRefreshIntervalSeconds, threadProfileBatchSize: result.threadProfileBatchSize })
-          return sendJson(response, 200, result)
-        }
-        if (method === 'GET' && url.pathname === '/api/provisioning') return sendJson(response, 200, provisioning.list())
-        if (method === 'POST' && url.pathname === '/api/provisioning') {
-          const body = await readJson(request)
-          const defaultWorkspaceId = required(body, 'defaultWorkspaceId')
-          if (!store.listWorkspaces().some(item => item.id === defaultWorkspaceId)) throw new HttpError(400, 'Workspace not found')
-          const kind = runtimeKind(body.runtimeKind)
-          await runtime.validateModelSelection(kind, optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const input: ProvisioningRequest = { name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', botMessagePolicy: botMessagePolicy(body.botMessagePolicy), mentionSourceBot: bool(body.mentionSourceBot, true), botSourceAllowlist: stringList(body.botSourceAllowlist), maxBotReplyDepth: Math.max(0, Math.min(10, Math.trunc(number(body.maxBotReplyDepth, 1)))), runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId, workspaceIds: stringList(body.workspaceIds) }
-          const job = provisioning.start(input)
-          audit('bot.provision', 'provisioning', job.id, `发起飞书 Bot 自动注册：${input.name}`)
-          return sendJson(response, 202, job)
-        }
-        const provisioningId = matchId(url.pathname, '/api/provisioning/')
-        if (provisioningId && method === 'GET') return sendJson(response, 200, provisioning.get(provisioningId))
-        if (provisioningId && method === 'DELETE') {
-          const job = provisioning.cancel(provisioningId)
-          audit('bot.provision_cancel', 'provisioning', provisioningId, '取消飞书 Bot 自动注册')
-          return sendJson(response, 200, job)
-        }
-        if (method === 'GET' && url.pathname === '/api/workspaces/page') return sendJson(response, 200, page(store.listWorkspaces(), url))
-        if (method === 'GET' && url.pathname === '/api/workspaces') return sendJson(response, 200, store.listWorkspaces())
-        if (method === 'POST' && url.pathname === '/api/workspaces') {
-          const body = await readJson(request)
-          const directory = required(body, 'path')
-          if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new HttpError(400, 'Workspace path must be an existing local directory')
-          const result = store.createWorkspace({ name: required(body, 'name'), path: directory, prompt: optional(body, 'prompt') })
-          audit('workspace.create', 'workspace', result.id, `创建工作区 ${result.name}`, { path: result.path })
-          return sendJson(response, 201, result)
-        }
-        const workspaceId = matchId(url.pathname, '/api/workspaces/')
-        if (workspaceId && method === 'PUT') {
-          const body = await readJson(request), directory = required(body, 'path')
-          if (!existsSync(directory) || !statSync(directory).isDirectory()) throw new HttpError(400, 'Workspace path must be an existing local directory')
-          const result = store.updateWorkspace(workspaceId, { name: required(body, 'name'), path: directory, prompt: optional(body, 'prompt') })
-          audit('workspace.update', 'workspace', result.id, `更新工作区 ${result.name}`, { path: result.path })
-          return sendJson(response, 200, result)
-        }
-        if (workspaceId && method === 'DELETE') { const item = store.listWorkspaces().find(value => value.id === workspaceId); store.deleteWorkspace(workspaceId); audit('workspace.delete', 'workspace', workspaceId, `删除工作区 ${item?.name ?? workspaceId}`); response.statusCode = 204; return response.end() }
-
-        if (method === 'GET' && url.pathname === '/api/bots/page') return sendJson(response, 200, page(store.listBots(), url))
-        if (method === 'GET' && url.pathname === '/api/bots') return sendJson(response, 200, store.listBots())
-        if (method === 'POST' && url.pathname === '/api/bots') {
-          const body = await readJson(request), secret = optional(body, 'appSecret')
-          const kind = runtimeKind(body.runtimeKind)
-          await runtime.validateModelSelection(kind, optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const result = store.createBot({ name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', botMessagePolicy: botMessagePolicy(body.botMessagePolicy), mentionSourceBot: bool(body.mentionSourceBot, true), botSourceAllowlist: stringList(body.botSourceAllowlist), maxBotReplyDepth: Math.max(0, Math.min(10, Math.trunc(number(body.maxBotReplyDepth, 1)))), runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
-          await onConfigurationChanged?.()
-          audit('bot.create', 'bot', result.id, `创建飞书 Bot ${result.name}`, { appId: result.appId })
-          return sendJson(response, 201, result)
-        }
-        const botId = matchId(url.pathname, '/api/bots/')
-        if (botId && method === 'PUT') {
-          const body = await readJson(request), secret = optional(body, 'appSecret')
-          const kind = runtimeKind(body.runtimeKind)
-          await runtime.validateModelSelection(kind, optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const result = store.updateBot(botId, { name: required(body, 'name'), description: optional(body, 'description'), appId: optional(body, 'appId'), ...(secret ? { appSecretEncrypted: vault.encrypt(secret) } : {}), prompt: optional(body, 'prompt'), permissions: stringList(body.permissions), operatorIds: stringList(body.operatorIds), conversationMode: body.conversationMode === 'topic' ? 'topic' : 'chat', botMessagePolicy: botMessagePolicy(body.botMessagePolicy), mentionSourceBot: bool(body.mentionSourceBot, true), botSourceAllowlist: stringList(body.botSourceAllowlist), maxBotReplyDepth: Math.max(0, Math.min(10, Math.trunc(number(body.maxBotReplyDepth, 1)))), runtimeKind: kind, model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), defaultWorkspaceId: required(body, 'defaultWorkspaceId'), workspaceIds: stringList(body.workspaceIds) })
-          await onConfigurationChanged?.()
-          audit('bot.update', 'bot', result.id, `更新飞书 Bot ${result.name}`, { appId: result.appId, secretChanged: Boolean(secret) })
-          return sendJson(response, 200, result)
-        }
-        if (botId && method === 'DELETE') { const item = store.listBots().find(value => value.id === botId); store.deleteBot(botId); await onConfigurationChanged?.(); audit('bot.delete', 'bot', botId, `删除飞书 Bot ${item?.name ?? botId}`); response.statusCode = 204; return response.end() }
-
-        if (method === 'GET' && url.pathname === '/api/scenes/page') return sendJson(response, 200, page(store.listScenes(), url))
-        if (method === 'GET' && url.pathname === '/api/scenes') return sendJson(response, 200, store.listScenes())
-        if (method === 'POST' && url.pathname === '/api/scenes') {
-          const body = await readJson(request)
-          const bot = store.listBots().find(item => item.id === required(body, 'botId'))
-          if (!bot) throw new HttpError(404, 'Bot not found')
-          await runtime.validateModelSelection(bot.runtimeKind, optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const result = store.createScene(sceneInput(body))
-          audit('scene.create', 'scene', result.id, `创建场景 ${result.name}`)
-          return sendJson(response, 201, result)
-        }
-        const sceneId = matchId(url.pathname, '/api/scenes/')
-        if (sceneId && method === 'PUT') { const body = await readJson(request); const bot = store.listBots().find(item => item.id === required(body, 'botId')); if (!bot) throw new HttpError(404, 'Bot not found'); await runtime.validateModelSelection(bot.runtimeKind, optional(body, 'model'), optional(body, 'reasoningEffort')); const result = store.updateScene(sceneId, sceneInput(body)); audit('scene.update', 'scene', result.id, `更新场景 ${result.name}`); return sendJson(response, 200, result) }
-        if (sceneId && method === 'DELETE') { const item = store.listScenes().find(value => value.id === sceneId); store.deleteScene(sceneId); audit('scene.delete', 'scene', sceneId, `删除场景 ${item?.name ?? sceneId}`); response.statusCode = 204; return response.end() }
-
-        if (method === 'GET' && url.pathname === '/api/skill-packages/page') return sendJson(response, 200, page(store.listSkillPackages(), url))
-        if (method === 'GET' && url.pathname === '/api/skill-packages') return sendJson(response, 200, store.listSkillPackages())
-        if (method === 'POST' && url.pathname === '/api/skill-packages') { const result = store.createSkillPackage(skillPackageInput(await readJson(request))); audit('skill_package.create', 'skill_package', result.id, `创建技能包 ${result.name}`); return sendJson(response, 201, result) }
-        const packageId = matchId(url.pathname, '/api/skill-packages/')
-        if (packageId && method === 'PUT') { const result = store.updateSkillPackage(packageId, skillPackageInput(await readJson(request))); audit('skill_package.update', 'skill_package', result.id, `更新技能包 ${result.name}`); return sendJson(response, 200, result) }
-        if (packageId && method === 'DELETE') { const item = store.listSkillPackages().find(value => value.id === packageId); store.deleteSkillPackage(packageId); audit('skill_package.delete', 'skill_package', packageId, `删除技能包 ${item?.name ?? packageId}`); response.statusCode = 204; return response.end() }
-
-        if (method === 'GET' && url.pathname === '/api/tools/page') return sendJson(response, 200, page(store.listTools(), url))
-        if (method === 'GET' && url.pathname === '/api/tools') return sendJson(response, 200, store.listTools())
-        if (method === 'POST' && url.pathname === '/api/tools') { const result = store.createTool(toolInput(await readJson(request))); syncToolSource(store, result); audit('tool.create', 'tool', result.id, `创建工具 ${result.name}`); return sendJson(response, 201, result) }
-        const toolVersions = url.pathname.match(/^\/api\/tools\/([^/]+)\/versions$/u)
-        if (toolVersions && method === 'GET') return sendJson(response, 200, store.listToolScriptVersions(decodeURIComponent(toolVersions[1]!)))
-        const toolId = matchId(url.pathname, '/api/tools/')
-        if (toolId && method === 'PUT') { const previous = store.getTool(toolId); const result = store.updateTool(toolId, toolInput(await readJson(request))); if (previous.workspaceId !== result.workspaceId) removeToolSource(store, previous); syncToolSource(store, result); audit('tool.update', 'tool', result.id, `更新工具 ${result.name}`); return sendJson(response, 200, result) }
-        if (toolId && method === 'DELETE') { const item = store.getTool(toolId); store.deleteTool(toolId); removeToolSource(store, item); audit('tool.delete', 'tool', toolId, `删除工具 ${item.name}`); response.statusCode = 204; return response.end() }
-
-        if (method === 'GET' && url.pathname === '/api/tool-packages/page') return sendJson(response, 200, page(store.listToolPackages(), url))
-        if (method === 'GET' && url.pathname === '/api/tool-packages') return sendJson(response, 200, store.listToolPackages())
-        if (method === 'GET' && url.pathname === '/api/tool-package-executions') return sendJson(response, 200, page(store.listToolPackageExecutions(500), url))
-        if (method === 'POST' && url.pathname === '/api/tool-packages') { const result = store.createToolPackage(toolPackageInput(await readJson(request), store)); audit('tool_package.create', 'tool_package', result.id, `创建工具包 ${result.name}`); return sendJson(response, 201, result) }
-        const toolPackageId = matchId(url.pathname, '/api/tool-packages/')
-        if (toolPackageId && method === 'PUT') { const result = store.updateToolPackage(toolPackageId, toolPackageInput(await readJson(request), store)); audit('tool_package.update', 'tool_package', result.id, `更新工具包 ${result.name}`); return sendJson(response, 200, result) }
-        if (toolPackageId && method === 'DELETE') { const item = store.listToolPackages().find(value => value.id === toolPackageId); store.deleteToolPackage(toolPackageId); audit('tool_package.delete', 'tool_package', toolPackageId, `删除工具包 ${item?.name ?? toolPackageId}`); response.statusCode = 204; return response.end() }
+        if (await handleInsightsRoute({ request, response, url, method, actor, store, audit, onMessageRetry })) return
+        if (await handleConfigurationRoute({ request, response, url, method, actor, store, audit, vault, runtime, provisioning, onConfigurationChanged })) return
         throw new HttpError(404, 'Route not found')
       }
       await serveWeb(url.pathname, response, webDist)
@@ -482,72 +99,12 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
   return server
 }
 
-const matchId = (pathname: string, prefix: string): string | null => {
-  if (!pathname.startsWith(prefix)) return null
-  const value = pathname.slice(prefix.length)
-  return value && !value.includes('/') ? decodeURIComponent(value) : null
-}
-
 const requestIp = (request: IncomingMessage): string => {
   const forwarded = request.headers['x-forwarded-for']
   const value = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0]
   return value?.trim() || request.socket.remoteAddress || ''
 }
 
-const sceneTimeoutInput = (value: unknown): number => {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > 35791) throw new HttpError(400, '任务超时必须为 1–35791 分钟的整数')
-  return value
-}
-const sceneInput = (body: Json): Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'requireMention' | 'turnTimeoutMinutes'> & { skillPackageIds: string[]; requireMention?: boolean; turnTimeoutMinutes?: number } => {
-  const matcher = (body.matcher && typeof body.matcher === 'object' ? body.matcher : {}) as Json
-  const retrieval = (body.retrieval && typeof body.retrieval === 'object' ? body.retrieval : {}) as Json
-  const skillBoosts = (Array.isArray(retrieval.skillBoosts) ? retrieval.skillBoosts : []).flatMap(item => {
-    if (!item || typeof item !== 'object') return []
-    const value = item as Json
-    const keyword = optional(value, 'keyword').trim()
-    const weight = Math.min(100, Math.max(0, number(value.weight, 0)))
-    return keyword && weight > 0 ? [{ keyword, weight }] : []
-  })
-  const supportedMessageTypes = new Set<string>(FEISHU_MESSAGE_TYPES)
-  return { ...(body.turnTimeoutMinutes === undefined ? {} : { turnTimeoutMinutes: sceneTimeoutInput(body.turnTimeoutMinutes) }), ...(body.requireMention === undefined ? {} : { requireMention: bool(body.requireMention, true) }), completionStatisticsEnabled: bool(body.completionStatisticsEnabled, false), botId: required(body, 'botId'), workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), prompt: optional(body, 'prompt'), priority: number(body.priority, 100), enabled: bool(body.enabled, true), model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), retrieval: { skillBoosts, skillCandidateLimit: number(retrieval.skillCandidateLimit, 12), knowledgeCandidateLimit: number(retrieval.knowledgeCandidateLimit, 12), minimumScore: number(retrieval.minimumScore, 1) }, matcher: { chatIds: stringList(matcher.chatIds), messageTypes: stringList(matcher.messageTypes).filter(value => supportedMessageTypes.has(value)), textIncludes: stringList(matcher.textIncludes), cardTitleIncludes: stringList(matcher.cardTitleIncludes) }, skillPackageIds: stringList(body.skillPackageIds) }
-}
-
-const skillPackageInput = (body: Json): Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => ({
-  workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), skills: stringList(body.skills), toolPackageIds: stringList(body.toolPackageIds), fallbackMode: ['mixed', 'package_only'].includes(String(body.fallbackMode)) ? String(body.fallbackMode) as 'mixed' | 'package_only' : 'package_first',
-})
-
-const objectValue = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-const toolInput = (body: Json): Omit<ToolRecord, 'id' | 'createdAt' | 'updatedAt' | 'scriptVersion'> => {
-  const requestedType = String(body.executorType ?? 'bits_rpc')
-  const executorType: ToolRecord['executorType'] = requestedType === 'bits_rpc' ? 'bits_rpc' : 'command'
-  const rpc = objectValue(body.rpcConfig), requestTemplate = objectValue(rpc.requestTemplate)
-  const rpcConfig: ToolRecord['rpcConfig'] = {
-    service: optional(rpc, 'service'), method: optional(rpc, 'method'), vregion: optional(rpc, 'vregion'),
-    environment: optional(rpc, 'environment') || 'prod', cluster: optional(rpc, 'cluster') || 'default', requestTemplate,
-  }
-  if (executorType === 'bits_rpc' && (!rpcConfig.service || !rpcConfig.method)) throw new HttpError(400, 'Bits RPC service and method are required')
-  const language: ToolRecord['scriptLanguage'] = body.scriptLanguage === 'shell' || body.scriptLanguage === 'node' ? body.scriptLanguage : 'python'
-  const scriptContent = requestedType === 'script' ? rawString(body, 'scriptContent') : ''
-  if (requestedType === 'script' && !scriptContent.trim()) throw new HttpError(400, 'Script content is required')
-  const command = executorType === 'bits_rpc' ? (optional(body, 'command') || 'gdpa-cli') : requestedType === 'script' ? '' : required(body, 'command')
-  return { workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), description: optional(body, 'description'), executorType, command, argumentsTemplate: stringList(body.argumentsTemplate), inputSchema: objectValue(body.inputSchema), rpcConfig, scriptLanguage: scriptContent ? language : '', scriptContent, timeoutSeconds: Math.min(900, Math.max(1, number(body.timeoutSeconds, 60))), enabled: bool(body.enabled, true) }
-}
-const toolPackageInput = (body: Json, store: HubStore): Omit<ToolPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => {
-  const workspaceId = required(body, 'workspaceId'), tools = new Map(store.listTools().map(item => [item.id, item]))
-  const steps = (Array.isArray(body.steps) ? body.steps : []).flatMap((value, position) => {
-    const row = objectValue(value), toolId = optional(row, 'toolId'), tool = tools.get(toolId)
-    if (!tool) return []
-    if (tool.workspaceId !== workspaceId) throw new HttpError(400, 'Tool Package and Tool must use the same Workspace')
-    const phase: 'precheck' | 'execute' | 'verify' = row.phase === 'precheck' || row.phase === 'verify' ? row.phase : 'execute'
-    return [{ toolId, toolName: tool.name, phase, position, arguments: objectValue(row.arguments) }]
-  })
-  return { workspaceId, name: required(body, 'name'), description: optional(body, 'description'), prompt: optional(body, 'prompt'), approvalRequired: bool(body.approvalRequired, true), approverIds: stringList(body.approverIds), cardTitle: optional(body, 'cardTitle'), cardDescription: optional(body, 'cardDescription'), enabled: bool(body.enabled, true), steps }
-}
-
-const skillSourceInput = (body: Json) => ({
-  name: required(body, 'name'), repositoryUrl: required(body, 'repositoryUrl'), branch: optional(body, 'branch') || 'main', workspaceId: required(body, 'workspaceId'),
-  skillRoots: stringList(body.skillRoots).length ? stringList(body.skillRoots) : ['skills', '.codex/skills', '.agents/skills'], knowledgeRoots: stringList(body.knowledgeRoots), autoInstall: bool(body.autoInstall),
-})
 
 const messageStatus = (error: unknown): number => {
   const message = error instanceof Error ? error.message : ''

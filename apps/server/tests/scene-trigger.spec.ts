@@ -42,6 +42,8 @@ describe('Scene mention-only configuration', () => {
       const scene = store.createScene({ ...input, requireMention: false })
       store.db.exec('ALTER TABLE scenes DROP COLUMN require_mention')
       store.db.exec('ALTER TABLE scenes DROP COLUMN turn_timeout_minutes')
+      // Model a database created before schema version tracking existed.
+      store.db.exec('DROP TABLE schema_migrations')
       store.close()
       store = new HubStore(dbPath)
       expect(store.listScenes()[0]?.requireMention).toBe(false)

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CodexModelOption } from '@codycodeagent/cody-web-core/session'
-import { rankSkillCandidates, resolveRuntimeModel } from '../src/runtime.js'
+import { rankSkillCandidates, resolveRuntimeModel } from '../src/runtime-selection.js'
 
 const model = (id: string, efforts: string[], isDefault = false): CodexModelOption => ({
   id, model: id, label: id, description: '', hidden: false, isDefault,

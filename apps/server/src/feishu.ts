@@ -8,64 +8,14 @@ import type { CodyBotRuntime, RuntimeAttachment, RuntimeProgress, RuntimeResolve
 import type { FeishuManagerHealthRecord, ResolvedRoute } from './types.js'
 import { ToolPackageRunner } from './tool-execution.js'
 import { taskStatisticsMarkdown, type TaskTokenUsage } from './task-statistics.js'
+import { FeishuChannelDispatcher } from './feishu/dispatch.js'
+import { shouldAcceptRoutedMessage, shouldSendTaskStatistics, senderOpenId } from './feishu/ingress.js'
+import { FeishuPresentation } from './feishu/presentation.js'
+import { FeishuApproval } from './feishu/approval.js'
 
 type ManagedProvider = { provider: FeishuProvider; fingerprint: string; botName: string; state: string; error: string }
 
-export const shouldAcceptRoutedMessage = (
-  message: ChannelInboundMessage,
-  options: { hasScene: boolean; independentlyMatches: boolean; ownSender: boolean; requireMention?: boolean; botMessagePolicy?: ResolvedRoute['bot']['botMessagePolicy']; botSourceAllowlist?: string[]; botReplyDepth?: number; maxBotReplyDepth?: number },
-): boolean => {
-  if (options.ownSender) return false
-  if (message.conversation.scope !== 'private' && options.requireMention && !message.addressedToAgent) return false
-  if (message.sender.type !== 'user') {
-    const policy = options.botMessagePolicy ?? 'mentioned_or_scene'
-    if (policy === 'reject') return false
-    const senderIds = new Set([message.sender.id, ...(message.sender.identities ?? []).map(identity => identity.id)])
-    if (options.botSourceAllowlist?.length && !options.botSourceAllowlist.some(id => senderIds.has(id))) return false
-    if ((options.botReplyDepth ?? 1) > (options.maxBotReplyDepth ?? 1)) return false
-    if (policy === 'mentioned') return message.addressedToAgent
-    return message.addressedToAgent || (options.hasScene && options.independentlyMatches)
-  }
-  if (message.conversation.scope !== 'private' && !message.addressedToAgent && !options.independentlyMatches) return false
-  return true
-}
-
-export type ReplyMentionSelection = { openIds: string[]; targetsBot: boolean }
-
-export const shouldSendTaskStatistics = (route: ResolvedRoute, message: ChannelInboundMessage): boolean => Boolean(
-  route.scene?.completionStatisticsEnabled && message.sender.type === 'user'
-  && message.addressedToAgent && message.mentions?.some(mention => mention.isAgent)
-)
-
-const senderOpenId = (message: ChannelInboundMessage): string => (
-  message.sender.idType === 'open_id' || (!message.sender.idType && message.sender.id.startsWith('ou_'))
-    ? message.sender.id
-    : message.sender.identities?.find(identity => identity.idType === 'open_id')?.id ?? ''
-)
-
-/** Select visible reply recipients without guessing from display names. A user
- * who explicitly mentions peer Bots is orchestrating collaboration, so those
- * Bots take precedence over the human sender. Other mentioned humans are not
- * propagated. Bot-authored turns continue to address their source Bot when the
- * Bot policy enables it. */
-export const selectReplyMentions = (
-  message: ChannelInboundMessage,
-  peerBotOpenIds: ReadonlySet<string>,
-  mentionSourceBot: boolean,
-): ReplyMentionSelection => {
-  if (message.conversation.scope === 'private' || !message.addressedToAgent) return { openIds: [], targetsBot: false }
-  if (message.sender.type !== 'user') {
-    if (!mentionSourceBot) return { openIds: [], targetsBot: false }
-    const openId = senderOpenId(message)
-    return { openIds: openId ? [openId] : [], targetsBot: Boolean(openId) }
-  }
-  const collaborators = [...new Set((message.mentions ?? [])
-    .filter(mention => !mention.isAgent && mention.idType === 'open_id' && peerBotOpenIds.has(mention.id))
-    .map(mention => mention.id))]
-  if (collaborators.length) return { openIds: collaborators, targetsBot: true }
-  const openId = senderOpenId(message)
-  return { openIds: openId ? [openId] : [], targetsBot: false }
-}
+export { shouldAcceptRoutedMessage, shouldSendTaskStatistics, selectReplyMentions, type ReplyMentionSelection } from './feishu/ingress.js'
 
 export class FeishuBotManager {
   private scheduledActionHandler: ((botId: string, actorId: string, actionId: string, reject: boolean) => Promise<Record<string, unknown>>) | null = null
@@ -73,28 +23,21 @@ export class FeishuBotManager {
   async sendScheduledCard(botId: string, chatId: string, card: FeishuCard, uuid: string): Promise<string> {
     const provider = this.providers.get(botId)?.provider
     if (!provider) throw new Error('飞书 Bot 尚未连接')
-    return this.retryDelivery(provider, () => provider.sendCard(chatId, card, createHash('sha256').update(uuid).digest('hex').slice(0,32)))
+    return this.presentation.retryDelivery(provider, () => provider.sendCard(chatId, card, createHash('sha256').update(uuid).digest('hex').slice(0,32)))
   }
   async updateScheduledCard(botId: string, messageId: string, card: FeishuCard): Promise<void> {
     const provider = this.providers.get(botId)?.provider
     if (!provider) throw new Error('飞书 Bot 尚未连接')
-    await this.retryDelivery(provider, () => provider.updateCard(messageId, card))
+    await this.presentation.retryDelivery(provider, () => provider.updateCard(messageId, card))
   }
   async mayApproveScheduled(botId: string, packageId: string, actorId: string): Promise<boolean> {
-    const bot = this.store.listBots().find(b => b.id === botId), pack = this.store.getToolPackage(packageId)
-    if (!bot || !bot.workspaceIds.includes(pack.workspaceId)) return false
-    if (pack.approverIds.includes(actorId) || bot.operatorIds.includes(actorId)) return true
-    if (pack.approverIds.length || bot.operatorIds.length) return false
-    const provider = this.providers.get(botId)?.provider
-    if (!provider) return false
-    let timer: ReturnType<typeof setTimeout> | undefined
-    try { return (await Promise.race([provider.applicationAdministrators(), new Promise<never>((_, reject) => { timer=setTimeout(()=>reject(new Error('管理员身份查询超时')),1200) })])).administratorIds.includes(actorId) }
-    catch { return false } finally { if(timer)clearTimeout(timer) }
+    return this.approval.mayApproveScheduled(botId, packageId, actorId, this.providers.get(botId)?.provider)
   }
 
   private readonly providers = new Map<string, ManagedProvider>()
-  private readonly channelQueues = new Map<string, Promise<void>>()
-  private readonly scheduledJobs = new Set<string>()
+  private readonly dispatcher = new FeishuChannelDispatcher()
+  private readonly presentation = new FeishuPresentation()
+  private readonly approval: FeishuApproval
   private readonly pendingReceipts = new Set<string>()
   private reloadTail = Promise.resolve()
   private queueTimer: ReturnType<typeof setInterval> | null = null
@@ -109,7 +52,10 @@ export class FeishuBotManager {
     private readonly vault: SecretVault,
     private readonly runtime: CodyBotRuntime,
     private readonly attachmentRoot: string,
-  ) { this.toolRunner = new ToolPackageRunner(store) }
+  ) {
+    this.toolRunner = new ToolPackageRunner(store)
+    this.approval = new FeishuApproval(store, this.presentation, id => this.scheduleToolExecution(id), (execution, provider) => this.scheduleToolContinuation(execution, provider))
+  }
 
   reload(): Promise<void> {
     this.reloadTail = this.reloadTail.then(() => this.reloadNow()).catch(error => {
@@ -161,7 +107,7 @@ export class FeishuBotManager {
     if (this.draining) return
     this.draining = true
     this.drainStartedAt = new Date().toISOString()
-    console.info(`[feishu] drain started; active=${this.scheduledJobs.size} pendingReceipts=${this.pendingReceipts.size}`)
+    console.info(`[feishu] drain started; active=${this.dispatcher.activeJobs} pendingReceipts=${this.pendingReceipts.size}`)
   }
 
   cancelDrain(): void {
@@ -203,7 +149,7 @@ export class FeishuBotManager {
       })
       : feishuTextCard(`工具包已进入队列：${pack.name}`, `**执行原因**\n${call.reason || '未提供'}\n\n系统会在当前 Codex Thread 空闲后串行执行。`, { color: 'blue', note: `执行 ID：${execution.id}` })
     let cardMessageId = ''
-    try { cardMessageId = await this.replyCard(provider, log.messageId, card, Boolean(log.topicId), `tool-package:${execution.id}`) }
+    try { cardMessageId = await this.presentation.replyCard(provider, log.messageId, card, Boolean(log.topicId), `tool-package:${execution.id}`) }
     catch (error) {
       const detail = provider.classifyError(error).message
       this.store.updateToolPackageExecution(execution.id, { status: 'failed', error: `无法发送工具包卡片：${detail}`, completedAt: new Date().toISOString() })
@@ -222,16 +168,8 @@ export class FeishuBotManager {
     const execution = this.store.getToolPackageExecution(executionId)
     if (this.draining || execution.status !== 'queued') return
     const key = `tool:${executionId}`
-    if (this.scheduledJobs.has(key)) return
-    this.scheduledJobs.add(key)
-    const previous = this.channelQueues.get(execution.threadChannelId) ?? Promise.resolve()
-    const current = previous.catch(() => undefined).then(() => this.runToolExecution(executionId))
-    this.channelQueues.set(execution.threadChannelId, current)
-    const cleanup = () => {
-      this.scheduledJobs.delete(key)
-      if (this.channelQueues.get(execution.threadChannelId) === current) this.channelQueues.delete(execution.threadChannelId)
-    }
-    void current.then(cleanup, cleanup)
+    void this.dispatcher.enqueue(execution.threadChannelId, key, () => this.runToolExecution(executionId))
+      .catch(error => console.error('[feishu] tool execution failed:', error))
   }
 
   private async runToolExecution(executionId: string): Promise<void> {
@@ -247,7 +185,7 @@ export class FeishuBotManager {
     const provider = this.providers.get(execution.botId)?.provider
     if (!provider) throw new Error('Feishu Bot is not connected')
     execution = this.store.updateToolPackageExecution(execution.id, { status: 'running' })
-    if (execution.cardMessageId) await this.retryDelivery(provider, () => provider.updateCard(execution.cardMessageId, feishuTextCard(`正在执行：${pack.name}`, `已通过确认，正在按顺序执行 ${pack.steps.length} 个步骤。`, { color: 'blue', note: `执行 ID：${execution.id}` }))).catch(() => undefined)
+    if (execution.cardMessageId) await this.presentation.retryDelivery(provider, () => provider.updateCard(execution.cardMessageId, feishuTextCard(`正在执行：${pack.name}`, `已通过确认，正在按顺序执行 ${pack.steps.length} 个步骤。`, { color: 'blue', note: `执行 ID：${execution.id}` }))).catch(() => undefined)
     try {
       const sourceLog = this.store.getMessageLogByBotMessage(execution.botId, execution.sourceMessageId)
       const stillAuthorized = this.store.listSkillPackages().some(item => sourceLog.skillPackages.some(link => link.id === item.id) && item.toolPackageIds.includes(pack.id))
@@ -257,13 +195,13 @@ export class FeishuBotManager {
       if (configurationChanged) throw new Error('工具包或工具配置在本次申请后发生变化，已拒绝执行；请让 AI 基于最新配置重新发起申请')
       const results = await this.toolRunner.run(pack, execution.arguments, workspace.path)
       execution = this.store.updateToolPackageExecution(execution.id, { status: 'completed', result: results, completedAt: new Date().toISOString() })
-      if (execution.cardMessageId) await this.retryDelivery(provider, () => provider.updateCard(execution.cardMessageId, feishuTextCard(`执行完成：${pack.name}`, results.map(item => `- ${item.phase} · ${item.toolName}：成功（${item.durationMs}ms）`).join('\n'), { color: 'green', note: `执行 ID：${execution.id}` }))).catch(error => console.warn('[feishu] failed to patch completed tool card:', error))
+      if (execution.cardMessageId) await this.presentation.retryDelivery(provider, () => provider.updateCard(execution.cardMessageId, feishuTextCard(`执行完成：${pack.name}`, results.map(item => `- ${item.phase} · ${item.toolName}：成功（${item.durationMs}ms）`).join('\n'), { color: 'green', note: `执行 ID：${execution.id}` }))).catch(error => console.warn('[feishu] failed to patch completed tool card:', error))
       await this.continueAfterToolExecution(execution, provider).catch(error => console.error('[feishu] failed to continue completed tool execution:', error))
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       const partialResults = error && typeof error === 'object' && 'partialResults' in error && Array.isArray(error.partialResults) ? error.partialResults : []
       execution = this.store.updateToolPackageExecution(execution.id, { status: 'failed', result: partialResults, error: detail, completedAt: new Date().toISOString() })
-      if (execution.cardMessageId) await this.retryDelivery(provider, () => provider.updateCard(execution.cardMessageId, feishuTextCard(`执行失败：${pack.name}`, `**错误**\n${detail}`, { color: 'red', note: `执行 ID：${execution.id}` }))).catch(() => undefined)
+      if (execution.cardMessageId) await this.presentation.retryDelivery(provider, () => provider.updateCard(execution.cardMessageId, feishuTextCard(`执行失败：${pack.name}`, `**错误**\n${detail}`, { color: 'red', note: `执行 ID：${execution.id}` }))).catch(() => undefined)
       await this.continueAfterToolExecution(execution, provider).catch(continuationError => console.error('[feishu] failed to continue tool execution:', continuationError))
     }
   }
@@ -283,21 +221,21 @@ export class FeishuBotManager {
     const sourceLog = this.store.getMessageLogForToolInvocation(originalLog.id, execution.threadChannelId)
     const answer = await this.runtime.execute(route, message, [], undefined, undefined, undefined, undefined, sourceLog.id, false)
     const cards = feishuMarkdownCards(answer, { note: `工具包：${execution.toolPackageName}  |  Thread：${execution.coreThreadId}` })
-    for (let index = 0; index < cards.length; index += 1) await this.replyCard(provider, execution.sourceMessageId, cards[index]!, Boolean(execution.topicId), `tool-package:${execution.id}:answer:${index}`)
+    for (let index = 0; index < cards.length; index += 1) await this.presentation.replyCard(provider, execution.sourceMessageId, cards[index]!, Boolean(execution.topicId), `tool-package:${execution.id}:answer:${index}`)
   }
 
   deploymentStatus(): { draining: boolean; drainStartedAt: string; activeJobs: number; pendingReceipts: number; activeChannels: number } {
     return {
       draining: this.draining,
       drainStartedAt: this.drainStartedAt,
-      activeJobs: this.scheduledJobs.size,
+      activeJobs: this.dispatcher.activeJobs,
       pendingReceipts: this.pendingReceipts.size,
-      activeChannels: this.channelQueues.size,
+      activeChannels: this.dispatcher.activeChannels,
     }
   }
 
   async waitForIdle(): Promise<void> {
-    while (this.scheduledJobs.size || this.pendingReceipts.size) await new Promise(resolve => setTimeout(resolve, 200))
+    while (this.dispatcher.activeJobs || this.pendingReceipts.size) await new Promise(resolve => setTimeout(resolve, 200))
   }
 
   health(): FeishuManagerHealthRecord {
@@ -311,8 +249,8 @@ export class FeishuBotManager {
       configuredBots: configured.length,
       activeProviders: this.providers.size,
       connectedProviders: providers.filter(item => !['failed', 'disconnected', 'stopped'].includes(item.state)).length,
-      scheduledJobs: this.scheduledJobs.size + this.pendingReceipts.size,
-      activeChannels: this.channelQueues.size,
+      scheduledJobs: this.dispatcher.activeJobs + this.pendingReceipts.size,
+      activeChannels: this.dispatcher.activeChannels,
       lastQueueScanAt: this.lastQueueScanAt,
       lastError: this.lastError,
       providers,
@@ -407,7 +345,7 @@ export class FeishuBotManager {
     this.lastQueueScanAt = new Date().toISOString()
     for (const { job, message } of this.store.listQueuedThreadJobs()) {
       const provider = this.providers.get(job.botId)?.provider
-      if (!provider || this.scheduledJobs.has(job.id) || this.pendingReceipts.has(job.id)) continue
+      if (!provider || this.dispatcher.has(job.id) || this.pendingReceipts.has(job.id)) continue
       if (minimumAgeMs > 0 && Date.now() - Date.parse(job.createdAt) < minimumAgeMs) continue
       try {
         const baseRoute = this.store.resolveRoute(job.botId, message)
@@ -420,7 +358,7 @@ export class FeishuBotManager {
         this.lastError = detail
         try { this.store.failThreadJob(job.id, detail) }
         catch (persistError) { console.error(`[feishu] failed to persist restore error for Thread job ${job.id}:`, persistError) }
-        void this.finishReaction(provider, message.messageId, job.receiptReactionId, 'ERROR')
+        void this.presentation.finishReaction(provider, message.messageId, job.receiptReactionId, 'ERROR')
         console.error(`[feishu] failed to restore Thread job ${job.id}:`, error)
       }
     }
@@ -428,11 +366,7 @@ export class FeishuBotManager {
 
   private scheduleJob(jobId: string, logId: string, botId: string, provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage, receiptReactionId: string): Promise<void> {
     if (this.draining) return Promise.resolve()
-    if (this.scheduledJobs.has(jobId)) return Promise.resolve()
-    this.scheduledJobs.add(jobId)
-    const channelId = route.threadChannelId
-    const previous = this.channelQueues.get(channelId) ?? Promise.resolve()
-    const current = previous.catch(() => undefined).then(async () => {
+    return this.dispatcher.enqueue(route.threadChannelId, jobId, async () => {
       if (!this.store.startThreadJob(jobId)) return
       try {
         const result = await this.onMessage(jobId, botId, provider, route, message, logId, receiptReactionId)
@@ -440,16 +374,9 @@ export class FeishuBotManager {
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error)
         this.store.failThreadJob(jobId, detail)
-        await this.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
+        await this.presentation.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
       }
     })
-    this.channelQueues.set(channelId, current)
-    const cleanup = () => {
-      this.scheduledJobs.delete(jobId)
-      if (this.channelQueues.get(channelId) === current) this.channelQueues.delete(channelId)
-    }
-    void current.then(cleanup, cleanup)
-    return current
   }
 
   private async refreshKnownChats(botId: string, provider: FeishuProvider): Promise<void> {
@@ -482,8 +409,8 @@ export class FeishuBotManager {
       catch (error) { console.warn('[feishu] failed to add receipt reaction:', provider.classifyError(error).message) }
     }
     if (message.sender.type === 'user' && !route.scene && message.conversation.scope !== 'private' && this.store.claimScenePicker(botId, message.conversation.id)) await this.sendScenePicker(botId, provider, message).catch(error => console.warn('[feishu] failed to send scene picker:', provider.classifyError(error).message))
-    let note = this.responseNote(route)
-    const replyMention = await this.replyMention(provider, route, message)
+    let note = this.presentation.responseNote(route)
+    const replyMention = await this.presentation.replyMention(provider, route, message)
     const answerMention = replyMention.targetsBot ? replyMention.markdown : ''
     let streamMessageId = ''
     // A Bot mention must be sent only with the completed answer. Mentioning a
@@ -491,7 +418,7 @@ export class FeishuBotManager {
     // has produced anything useful and can create an avoidable ping-pong turn.
     if (!replyMention.targetsBot) {
       try {
-        streamMessageId = await this.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', note }), route.replyInTopic, `${message.eventId}:answer`)
+        streamMessageId = await this.presentation.replyCard(provider, message.messageId, feishuStreamingCard({ state: 'received', note }), route.replyInTopic, `${message.eventId}:answer`)
         this.store.recordOutboundMessage(log.id, botId, streamMessageId, log.botReplyDepth)
       } catch (error) {
         console.warn('[feishu] failed to create streaming card:', provider.classifyError(error).message)
@@ -504,7 +431,7 @@ export class FeishuBotManager {
     const enqueuePatch = () => {
       if (!streamMessageId) return
       const snapshot = latestProgress
-      patchTail = patchTail.then(() => this.retryDelivery(provider, () => provider.updateCard(streamMessageId, feishuStreamingCard({
+      patchTail = patchTail.then(() => this.presentation.retryDelivery(provider, () => provider.updateCard(streamMessageId, feishuStreamingCard({
         state: snapshot.phase === 'answering' ? 'answering' : 'thinking',
         answer: snapshot.answer,
         note,
@@ -530,7 +457,7 @@ export class FeishuBotManager {
         schedulePatch,
         model => {
           this.store.setMessageLogModel(log.id, model)
-          note = this.responseNote(route, model)
+          note = this.presentation.responseNote(route, model)
         },
         trace => this.store.setMessageLogInvestigation(log.id, trace),
         threadId => this.store.setMessageLogThread(log.id, threadId),
@@ -554,14 +481,14 @@ export class FeishuBotManager {
         }
       }
       if (streamMessageId) {
-        await this.retryDelivery(provider, () => provider.updateCard(streamMessageId, cards[0]!))
+        await this.presentation.retryDelivery(provider, () => provider.updateCard(streamMessageId, cards[0]!))
         for (let index = 1; index < cards.length; index += 1) {
-          const outboundId = await this.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
+          const outboundId = await this.presentation.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
           this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth)
         }
       } else {
         for (let index = 0; index < cards.length; index += 1) {
-          const outboundId = await this.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
+          const outboundId = await this.presentation.replyCard(provider, message.messageId, cards[index]!, route.replyInTopic, `${message.eventId}:answer:${index}`)
           this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth)
         }
       }
@@ -571,13 +498,13 @@ export class FeishuBotManager {
         try {
           const statisticsCard = feishuTextCard('处理完成 · 任务统计', taskStatisticsMarkdown(statisticsMention, Date.now() - processingStartedAt, message.text, text, tokenUsage), { color: 'green' })
           const uuid = createHash('sha256').update(`${botId}:${message.eventId}:statistics`).digest('hex').slice(0, 40)
-          const outboundId = await this.replyCard(provider, message.messageId, statisticsCard, route.replyInTopic, uuid)
+          const outboundId = await this.presentation.replyCard(provider, message.messageId, statisticsCard, route.replyInTopic, uuid)
           this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth)
         } catch (error) {
           console.warn('[feishu] task statistics notification failed:', provider.classifyError(error).message)
         }
       }
-      await this.finishReaction(provider, message.messageId, receiptReactionId, 'DONE')
+      await this.presentation.finishReaction(provider, message.messageId, receiptReactionId, 'DONE')
       return { ok: true, error: '' }
     } catch (error) {
       if (patchTimer) clearTimeout(patchTimer)
@@ -586,31 +513,17 @@ export class FeishuBotManager {
       const errorNote = replyMention.markdown && !replyMention.targetsBot ? `回复 ${replyMention.markdown}\n${note}` : note
       const errorCard = feishuStreamingCard({ state: 'failed', error: answerMention ? `${answerMention}\n${detail}` : detail, note: errorNote })
       const sendError = streamMessageId
-        ? this.retryDelivery(provider, () => provider.updateCard(streamMessageId, errorCard))
-        : this.replyCard(provider, message.messageId, errorCard, route.replyInTopic, `${message.eventId}:error`).then(outboundId => { this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth) })
+        ? this.presentation.retryDelivery(provider, () => provider.updateCard(streamMessageId, errorCard))
+        : this.presentation.replyCard(provider, message.messageId, errorCard, route.replyInTopic, `${message.eventId}:error`).then(outboundId => { this.store.recordOutboundMessage(log.id, botId, outboundId, log.botReplyDepth) })
       await sendError.catch(deliveryError => {
         console.error('[feishu] failed to send error card:', deliveryError)
       })
       this.store.finishMessageLog(log.id, { responseContent: latestProgress.answer, error: detail })
-      await this.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
+      await this.presentation.finishReaction(provider, message.messageId, receiptReactionId, 'ERROR')
       return { ok: false, error: detail }
     }
   }
 
-  private async replyMention(provider: FeishuProvider, route: ResolvedRoute, message: ChannelInboundMessage): Promise<{ markdown: string; targetsBot: boolean }> {
-    let peerBotOpenIds = new Set<string>()
-    if (message.sender.type === 'user' && message.mentionsOtherRecipient) {
-      try { peerBotOpenIds = new Set((await provider.chatBots(message.conversation.id)).map(bot => bot.id)) }
-      catch (error) { console.warn('[feishu] failed to resolve peer Bot mentions:', provider.classifyError(error).message) }
-    }
-    const selection = selectReplyMentions(message, peerBotOpenIds, route.bot.mentionSourceBot)
-    return { markdown: selection.openIds.map(feishuCardMention).filter(Boolean).join(' '), targetsBot: selection.targetsBot }
-  }
-
-  private async finishReaction(provider: FeishuProvider, messageId: string, receiptReactionId: string, finalEmoji: 'DONE' | 'ERROR'): Promise<void> {
-    if (receiptReactionId) await provider.removeReaction(messageId, receiptReactionId).catch(error => console.warn('[feishu] failed to remove receipt reaction:', provider.classifyError(error).message))
-    await provider.addReaction(messageId, finalEmoji).catch(error => console.warn('[feishu] failed to add final reaction:', provider.classifyError(error).message))
-  }
 
   private async downloadAttachments(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<RuntimeAttachment[]> {
     if (!message.attachments.length) return []
@@ -622,25 +535,12 @@ export class FeishuBotManager {
     }))
   }
 
-  private responseNote(route: ResolvedRoute, resolvedModel?: RuntimeResolvedModel): string {
-    const model = resolvedModel?.model || route.modelConfig.model || 'Codex 默认'
-    const reasoningEffort = resolvedModel?.reasoningEffort || route.modelConfig.reasoningEffort
-    const modelLabel = `${model}${reasoningEffort ? ` · ${reasoningEffort}` : ''}${resolvedModel?.fallback ? ' · 已回退' : ''}`
-    return [
-      `工作区：${route.workspace.name}`,
-      `场景：${route.scene?.name ?? '默认路由'}`,
-      `引擎：${route.bot.runtimeKind === 'traex' ? 'TraeX' : 'Codex'}`,
-      `技能包：${route.skillPackages.map(item => item.name).join('、') || '无'}`,
-      `模型：${modelLabel}`,
-      '权限：YOLO · 允许网络与工具',
-    ].join('  |  ')
-  }
 
   private async sendScenePicker(botId: string, provider: FeishuProvider, message: ChannelInboundMessage): Promise<void> {
     const scenes = this.store.listScenes().filter(scene => scene.botId === botId && scene.enabled)
     if (!scenes.length || message.conversation.scope === 'private') return
     const card = feishuSelectionCard('选择群场景', '这条消息已经在默认工作区中处理。选择后，它会作为这个群的默认场景；匹配到更具体的场景时仍会按消息动态路由。', scenes.map(scene => ({ text: scene.name, value: { action: 'bind_scene', botId, chatId: message.conversation.id, sceneId: scene.id } })), '只在群首次接入时提示。只有 Bot 管理员或平台中配置的操作人可以保存绑定。')
-    await this.replyCard(provider, message.messageId, card, false, `${message.eventId}:scene-picker`)
+    await this.presentation.replyCard(provider, message.messageId, card, false, `${message.eventId}:scene-picker`)
   }
 
   private async onAction(botId: string, provider: FeishuProvider, action: FeishuCardAction): Promise<Record<string, unknown>> {
@@ -649,7 +549,7 @@ export class FeishuBotManager {
       try { return await this.scheduledActionHandler(botId, action.actorId, String(action.value.executionId ?? ''), action.value.action === 'scheduled_tool_reject') }
       catch (error) { return { toast: { type: 'error', content: error instanceof Error ? error.message : String(error) } } }
     }
-    if (['tool_package_approve', 'tool_package_reject'].includes(String(action.value.action))) return this.onToolPackageAction(botId, provider, action)
+    if (['tool_package_approve', 'tool_package_reject'].includes(String(action.value.action))) return this.approval.onToolPackageAction(botId, provider, action)
     if (action.value.action !== 'bind_scene' || action.value.botId !== botId) return { toast: { type: 'warning', content: '这个操作已失效' } }
     const bot = this.store.listBots().find(item => item.id === botId)
     if (!bot) return { toast: { type: 'error', content: 'Bot 不存在' } }
@@ -663,72 +563,16 @@ export class FeishuBotManager {
     if (!chatId || !sceneId) return { toast: { type: 'error', content: '场景参数不完整' } }
     this.store.bindGroupScene(botId, chatId, sceneId, action.actorId)
     const scene = this.store.listScenes().find(item => item.id === sceneId)
-    if (action.remoteMessageId) await this.retryDelivery(provider, () => provider.updateCard(action.remoteMessageId, feishuTextCard('群默认场景已绑定', `未命中更具体规则时，将使用场景：**${scene?.name ?? sceneId}**`, { color: 'green' })))
+    if (action.remoteMessageId) await this.presentation.retryDelivery(provider, () => provider.updateCard(action.remoteMessageId, feishuTextCard('群默认场景已绑定', `未命中更具体规则时，将使用场景：**${scene?.name ?? sceneId}**`, { color: 'green' })))
     return { toast: { type: 'success', content: '场景已绑定' } }
   }
 
-  private async onToolPackageAction(botId: string, provider: FeishuProvider, action: FeishuCardAction): Promise<Record<string, unknown>> {
-    if (action.value.botId !== botId) return { toast: { type: 'warning', content: '这个操作已失效' } }
-    const executionId = String(action.value.executionId ?? '')
-    const execution = this.store.getToolPackageExecution(executionId)
-    if (execution.botId !== botId) return { toast: { type: 'warning', content: '这个操作不属于当前 Bot' } }
-    if (execution.status !== 'awaiting_approval') return { toast: { type: 'info', content: `当前状态：${execution.status}` } }
-    const pack = this.store.getToolPackage(execution.toolPackageId)
-    const bot = this.store.listBots().find(item => item.id === botId)
-    let allowed = pack.approverIds.includes(action.actorId) || Boolean(bot?.operatorIds.includes(action.actorId))
-    if (!pack.approverIds.length && !bot?.operatorIds.length) {
-      try {
-        const administrators = await Promise.race([
-          provider.applicationAdministrators(),
-          new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error('administrator lookup timed out')), 1_200)),
-        ])
-        allowed = administrators.administratorIds.includes(action.actorId)
-      } catch { allowed = false }
-    }
-    if (!allowed) {
-      console.warn(`[feishu] tool package approval denied: execution=${execution.id} package=${pack.id} bot=${botId} actor=${action.actorId}`)
-      return { toast: { type: 'error', content: `当前 Bot 身份 ${action.actorId} 不在工具包审批人或 Bot 操作人列表中` } }
-    }
-    if (action.value.action === 'tool_package_reject') {
-      const rejected = this.store.transitionToolPackageExecution(execution.id, 'awaiting_approval', 'rejected', action.actorId, new Date().toISOString())
-      if (!rejected) return { toast: { type: 'info', content: '这个请求已经被处理' } }
-      if (action.remoteMessageId) void this.retryDelivery(provider, () => provider.updateCard(action.remoteMessageId, feishuTextCard(`已拒绝：${pack.name}`, `操作人 ${action.actorId} 拒绝了本次执行。`, { color: 'red', note: `执行 ID：${execution.id}` }))).catch(error => console.warn('[feishu] failed to patch rejected tool card:', error))
-      this.scheduleToolContinuation(rejected, provider)
-      return { toast: { type: 'success', content: '已拒绝执行' } }
-    }
-    const queued = this.store.transitionToolPackageExecution(execution.id, 'awaiting_approval', 'queued', action.actorId)
-    if (!queued) return { toast: { type: 'info', content: '这个请求已经被处理' } }
-    if (action.remoteMessageId) void this.retryDelivery(provider, () => provider.updateCard(action.remoteMessageId, feishuTextCard(`已确认：${pack.name}`, '已进入当前 Thread Channel 的串行执行队列。', { color: 'blue', note: `执行 ID：${execution.id}` }))).catch(error => console.warn('[feishu] failed to patch approved tool card:', error))
-    this.scheduleToolExecution(execution.id)
-    return { toast: { type: 'success', content: '已确认，开始执行' } }
-  }
 
   private scheduleToolContinuation(execution: ReturnType<HubStore['getToolPackageExecution']>, provider: FeishuProvider): void {
     const key = `tool-continuation:${execution.id}`
-    if (this.draining || this.scheduledJobs.has(key)) return
-    this.scheduledJobs.add(key)
-    const previous = this.channelQueues.get(execution.threadChannelId) ?? Promise.resolve()
-    const current = previous.catch(() => undefined).then(() => this.continueAfterToolExecution(execution, provider))
-    this.channelQueues.set(execution.threadChannelId, current)
-    const cleanup = () => { this.scheduledJobs.delete(key); if (this.channelQueues.get(execution.threadChannelId) === current) this.channelQueues.delete(execution.threadChannelId) }
-    void current.then(cleanup, error => { console.error('[feishu] failed to continue rejected tool execution:', error); cleanup() })
+    if (this.draining || this.dispatcher.has(key)) return
+    void this.dispatcher.enqueue(execution.threadChannelId, key, () => this.continueAfterToolExecution(execution, provider))
+      .catch(error => console.error('[feishu] failed to continue rejected tool execution:', error))
   }
 
-  private replyCard(provider: FeishuProvider, messageId: string, card: FeishuCard, replyInThread: boolean, uuid: string): Promise<string> {
-    return this.retryDelivery(provider, () => provider.replyCard(messageId, card, replyInThread, uuid))
-  }
-
-  private async retryDelivery<T>(provider: FeishuProvider, operation: () => Promise<T>): Promise<T> {
-    const delays = [0, 250, 1_000]
-    let lastError: unknown
-    for (const delay of delays) {
-      if (delay) await new Promise(resolve => setTimeout(resolve, delay))
-      try { return await operation() }
-      catch (error) {
-        lastError = error
-        if (!provider.classifyError(error).retryable) throw error
-      }
-    }
-    throw lastError
-  }
 }
