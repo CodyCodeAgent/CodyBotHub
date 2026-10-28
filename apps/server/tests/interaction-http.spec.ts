@@ -25,7 +25,7 @@ async function fixture() {
     return 'Local answer'
   })
   const tasks = new HubTaskService(store, { execute } as never)
-  const server = createHubServer({ store, vault, runtime: {} as never, provisioning: {} as never, skills: {} as never, copilot: {} as never, tasks })
+  const server = createHubServer({ store, vault, runtime: { validateModelSelection: vi.fn(async () => {}) } as never, provisioning: {} as never, skills: {} as never, copilot: {} as never, tasks })
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('Missing address')
@@ -50,6 +50,51 @@ async function fixture() {
 }
 
 describe('identity and group-message HTTP API', () => {
+  it('lists only authorized enabled Scenes and public rules without creating work or exposing internal prompts', async () => {
+    const { url, store, bot, api, admin, create, execute } = await fixture()
+    const { token } = await create('Scene catalog client')
+    const input = { name: '支付故障', description: '分析支付服务告警、超时和错误率异常。', botId: bot.id, workspaceId: bot.defaultWorkspaceId, prompt: 'INTERNAL_PROMPT_MUST_NOT_LEAK', priority: 5, enabled: true,
+      matcher: { chatIds: ['oc_payment'], messageTypes: ['interactive'], textIncludes: ['支付', 'payment'], cardTitleIncludes: ['告警'] } }
+    const created = await admin('/api/scenes', 'POST', input)
+    expect(created.status).toBe(201)
+    const scene = await created.json() as { id: string }
+    store.createScene({ ...input, name: 'Fallback', description: '', priority: 100, matcher: { chatIds: [], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
+    store.createScene({ ...input, name: 'Disabled', enabled: false })
+    const otherBot = store.createBot({ name: 'Unauthorized', defaultWorkspaceId: bot.defaultWorkspaceId })
+    store.createScene({ ...input, botId: otherBot.id, name: 'Hidden scene' })
+    const before = ['hub_tasks', 'thread_channels', 'conversation_bindings', 'topic_route_contexts'].map(table => store.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()!.count)
+    expect((await api('invalid', '/scenes')).status).toBe(401)
+    expect((await api(token, `/scenes?botId=${otherBot.id}`)).status).toBe(403)
+    expect((await api(token, '/scenes?botId=bad')).status).toBe(400)
+    const response = await api(token, '/scenes')
+    expect(response.status).toBe(200)
+    const catalog = await response.json() as { scenes: Array<Record<string, unknown>>; matchSemantics: unknown }
+    expect(catalog.matchSemantics).toMatchObject({ acrossFields: 'AND', withinField: 'OR', emptyField: 'unrestricted', priority: 'ascending' })
+    expect(catalog.scenes).toHaveLength(2)
+    expect(catalog.scenes[0]).toMatchObject({ sceneId: scene.id, botId: bot.id, description: input.description, isFallback: false, matcher: input.matcher, executionMode: 'read_only' })
+    expect(catalog.scenes[1]).toMatchObject({ name: 'Fallback', isFallback: true })
+    for (const item of catalog.scenes) {
+      expect(item).not.toHaveProperty('prompt')
+      expect(item).not.toHaveProperty('workspaceId')
+      expect(item).not.toHaveProperty('skillPackageIds')
+    }
+    expect(JSON.stringify(catalog)).not.toContain(input.prompt)
+    expect((await (await api(token, `/scenes?botId=${bot.id}`)).json() as { scenes: unknown[] }).scenes).toEqual(catalog.scenes)
+    const cli = fileURLToPath(new URL('../../cli/src/cli.mjs', import.meta.url))
+    const result = await promisify(execFile)(process.execPath, [cli, 'scene', 'list', '--json'], { env: { ...process.env, CODYBOTHUB_URL: url, CODYBOTHUB_TOKEN: token } })
+    expect(JSON.parse(result.stdout)).toEqual(catalog)
+    const after = ['hub_tasks', 'thread_channels', 'conversation_bindings', 'topic_route_contexts'].map(table => store.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()!.count)
+    expect(after).toEqual(before)
+    expect(execute).not.toHaveBeenCalled()
+    // Older admin clients omitting description must preserve the public description.
+    const { description: _description, ...oldClientInput } = input
+    expect((await admin(`/api/scenes/${scene.id}`, 'PUT', oldClientInput)).status).toBe(200)
+    expect(store.botScenes.getScene(scene.id).description).toBe(input.description)
+    expect((await admin(`/api/scenes/${scene.id}`, 'PUT', { ...input, description: 'x'.repeat(2001) })).status).toBe(400)
+    expect((await admin(`/api/scenes/${scene.id}`, 'PUT', { ...input, description: '' })).status).toBe(200)
+    expect(store.botScenes.getScene(scene.id).description).toBe('')
+  })
+
   it('enforces admin and token boundaries, validates payloads, isolates tasks and never exposes stored secrets', async () => {
     const { url, store, bot, api, admin, create, message, execute } = await fixture()
     expect((await fetch(`${url}/api/identities`)).status).toBe(401)
@@ -99,14 +144,16 @@ describe('identity and group-message HTTP API', () => {
   })
 
   it('executes the actual CLI against the HTTP server for sync/async results and failure exit codes', async () => {
-    const { url, create } = await fixture()
+    const { url, create, store, bot } = await fixture()
     const { token } = await create('CLI test')
+    const scene = store.createScene({ name: 'Explicit CLI scene', botId: bot.id, workspaceId: bot.defaultWorkspaceId, prompt: '', enabled: true, priority: 100,
+      matcher: { chatIds: ['different_group'], messageTypes: [], textIncludes: ['different_text'], cardTitleIncludes: [] } })
     const cli = fileURLToPath(new URL('../../cli/src/cli.mjs', import.meta.url))
     const env = { ...process.env, CODYBOTHUB_URL: url, CODYBOTHUB_TOKEN: token }
     const exec = promisify(execFile)
-    const args = ['message', 'submit', '--chat-id', 'oc_cli', '--message-id', 'om_cli', '--sender-id', 'ou_cli', '--text', 'Explain']
+    const args = ['message', 'submit', '--scene-id', scene.id, '--chat-id', 'oc_cli', '--message-id', 'om_cli', '--sender-id', 'ou_cli', '--text', 'Explain']
     const sync = await exec(process.execPath, [cli, ...args, '--json'], { env })
-    expect(JSON.parse(sync.stdout)).toMatchObject({ answer: 'Local answer', status: 'completed' })
+    expect(JSON.parse(sync.stdout)).toMatchObject({ answer: 'Local answer', status: 'completed', route: { sceneId: scene.id, routeSource: 'explicit' } })
     const asyncResult = await exec(process.execPath, [cli, ...args, '--async'], { env })
     const task = JSON.parse(asyncResult.stdout) as { taskId: string }
     expect(task.taskId).toBe(JSON.parse(sync.stdout).taskId)

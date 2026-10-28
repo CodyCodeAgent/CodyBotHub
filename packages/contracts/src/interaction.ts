@@ -22,6 +22,7 @@ export interface IdentityCredential {
 
 export interface GroupMessageInput {
   botId?: string
+  sceneId?: string
   chatId: string
   chatName?: string
   topicId?: string
@@ -35,7 +36,7 @@ export interface GroupMessageInput {
     idType?: 'open_id' | 'user_id' | 'union_id'
   }
   message: {
-    type?: 'text' | 'post' | 'card' | 'image' | 'file' | 'audio' | 'video' | 'unknown'
+    type?: 'text' | 'post' | 'card' | 'interactive' | 'image' | 'file' | 'audio' | 'video' | 'media' | 'unknown'
     text: string
     title?: string
     raw?: unknown
@@ -44,6 +45,34 @@ export interface GroupMessageInput {
   mentions?: Array<{ id: string; name?: string; type?: 'user' | 'bot' | 'app'; isCurrentBot?: boolean }>
   createdAt?: string
   metadata?: Record<string, unknown>
+}
+
+export interface InteractionSceneCatalog {
+  matchSemantics: {
+    acrossFields: 'AND'
+    withinField: 'OR'
+    emptyField: 'unrestricted'
+    textMatch: 'case_insensitive_substring'
+    idMatch: 'exact'
+    priority: 'ascending'
+  }
+  scenes: Array<{
+    sceneId: string
+    botId: string
+    botName: string
+    name: string
+    description: string
+    priority: number
+    isFallback: boolean
+    conversationMode: 'chat' | 'topic'
+    executionMode: 'read_only'
+    matcher: {
+      chatIds: string[]
+      messageTypes: string[]
+      textIncludes: string[]
+      cardTitleIncludes: string[]
+    }
+  }>
 }
 
 export interface InteractionTask {

@@ -44,6 +44,7 @@ export interface ThreadProfileRecord {
 }
 
 export interface SceneRecord {
+  description: string
   requireMention: boolean
   turnTimeoutMinutes: number
   completionStatisticsEnabled: boolean

@@ -12,7 +12,9 @@ const sceneTimeoutInput = (value: unknown): number => {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1 || value > 35791) throw new HttpError(400, '任务超时必须为 1–35791 分钟的整数')
   return value
 }
-export const sceneInput = (body: Json): Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'requireMention' | 'turnTimeoutMinutes'> & { skillPackageIds: string[]; requireMention?: boolean; turnTimeoutMinutes?: number } => {
+export const sceneInput = (body: Json): Omit<SceneRecord, 'id' | 'createdAt' | 'updatedAt' | 'requireMention' | 'turnTimeoutMinutes' | 'description'> & { skillPackageIds: string[]; requireMention?: boolean; turnTimeoutMinutes?: number; description?: string } => {
+  const description = body.description === undefined ? {} : { description: optional(body, 'description') }
+  if (body.description !== undefined && (typeof body.description !== 'string' || body.description.length > 2000)) throw new HttpError(400, 'Scene description must contain at most 2000 characters')
   const matcher = (body.matcher && typeof body.matcher === 'object' ? body.matcher : {}) as Json
   const retrieval = (body.retrieval && typeof body.retrieval === 'object' ? body.retrieval : {}) as Json
   const skillBoosts = (Array.isArray(retrieval.skillBoosts) ? retrieval.skillBoosts : []).flatMap(item => {
@@ -23,7 +25,7 @@ export const sceneInput = (body: Json): Omit<SceneRecord, 'id' | 'createdAt' | '
     return keyword && weight > 0 ? [{ keyword, weight }] : []
   })
   const supportedMessageTypes = new Set<string>(FEISHU_MESSAGE_TYPES)
-  return { ...(body.turnTimeoutMinutes === undefined ? {} : { turnTimeoutMinutes: sceneTimeoutInput(body.turnTimeoutMinutes) }), ...(body.requireMention === undefined ? {} : { requireMention: bool(body.requireMention, true) }), completionStatisticsEnabled: bool(body.completionStatisticsEnabled, false), botId: required(body, 'botId'), workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), prompt: optional(body, 'prompt'), priority: number(body.priority, 100), enabled: bool(body.enabled, true), model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), retrieval: { skillBoosts, skillCandidateLimit: number(retrieval.skillCandidateLimit, 12), knowledgeCandidateLimit: number(retrieval.knowledgeCandidateLimit, 12), minimumScore: number(retrieval.minimumScore, 1) }, matcher: { chatIds: stringList(matcher.chatIds), messageTypes: stringList(matcher.messageTypes).filter(value => supportedMessageTypes.has(value)), textIncludes: stringList(matcher.textIncludes), cardTitleIncludes: stringList(matcher.cardTitleIncludes) }, skillPackageIds: stringList(body.skillPackageIds) }
+  return { ...description, ...(body.turnTimeoutMinutes === undefined ? {} : { turnTimeoutMinutes: sceneTimeoutInput(body.turnTimeoutMinutes) }), ...(body.requireMention === undefined ? {} : { requireMention: bool(body.requireMention, true) }), completionStatisticsEnabled: bool(body.completionStatisticsEnabled, false), botId: required(body, 'botId'), workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), prompt: optional(body, 'prompt'), priority: number(body.priority, 100), enabled: bool(body.enabled, true), model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), retrieval: { skillBoosts, skillCandidateLimit: number(retrieval.skillCandidateLimit, 12), knowledgeCandidateLimit: number(retrieval.knowledgeCandidateLimit, 12), minimumScore: number(retrieval.minimumScore, 1) }, matcher: { chatIds: stringList(matcher.chatIds), messageTypes: stringList(matcher.messageTypes).filter(value => supportedMessageTypes.has(value)), textIncludes: stringList(matcher.textIncludes), cardTitleIncludes: stringList(matcher.cardTitleIncludes) }, skillPackageIds: stringList(body.skillPackageIds) }
 }
 
 export const skillPackageInput = (body: Json): Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => ({

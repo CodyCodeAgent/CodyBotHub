@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
-import type { InteractionIdentity, InteractionTask } from '@cody-bot-hub/contracts/interaction'
+import type { InteractionIdentity, InteractionSceneCatalog, InteractionTask } from '@cody-bot-hub/contracts/interaction'
+import { hasSceneMatcher } from './scene-matching.js'
 import { groupMessageInput, type ParsedGroupMessageInput } from './interaction-input.js'
 import { HttpError } from './http/common.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
@@ -31,9 +32,30 @@ export class HubTaskService {
 
   constructor(private readonly store: HubStore, private readonly runtime: CodyBotRuntime) {}
 
+  sceneCatalog(identity: InteractionIdentity, botId?: string): InteractionSceneCatalog {
+    if (botId && !identity.allowedBotIds.includes(botId)) throw new HttpError(403, 'Bot is not allowed for this identity')
+    const bots = new Map(this.store.listBots().filter(bot => identity.allowedBotIds.includes(bot.id)).map(bot => [bot.id, bot]))
+    return {
+      matchSemantics: { acrossFields: 'AND', withinField: 'OR', emptyField: 'unrestricted', textMatch: 'case_insensitive_substring', idMatch: 'exact', priority: 'ascending' },
+      scenes: this.store.listScenes().filter(scene => scene.enabled && bots.has(scene.botId) && (!botId || scene.botId === botId)).map(scene => ({
+        sceneId: scene.id, botId: scene.botId, botName: bots.get(scene.botId)!.name,
+        name: scene.name, description: scene.description, priority: scene.priority, isFallback: !hasSceneMatcher(scene.matcher),
+        conversationMode: bots.get(scene.botId)!.conversationMode, executionMode: 'read_only', matcher: scene.matcher,
+      })),
+    }
+  }
+
+  private selectedScene(sceneId: string, identity: InteractionIdentity, botId?: string) {
+    const scene = this.store.listScenes().find(item => item.id === sceneId && item.enabled && identity.allowedBotIds.includes(item.botId))
+    if (!scene) throw new HttpError(404, 'Scene not found, disabled, or not allowed for this identity')
+    if (botId && botId !== scene.botId) throw new HttpError(400, 'Scene does not belong to the requested Bot')
+    return scene
+  }
+
   dispatchMessage(value: unknown, identity: InteractionIdentity, credentialId: string): InteractionTask {
     const input = groupMessageInput.parse(value)
-    const botId = input.botId ?? identity.defaultBotId
+    const selected = input.sceneId ? this.selectedScene(input.sceneId, identity, input.botId) : undefined
+    const botId = selected?.botId ?? input.botId ?? identity.defaultBotId
     if (!identity.allowedBotIds.includes(botId)) throw new HttpError(403, 'Bot is not allowed for this identity')
     const { eventId: _deliveryId, ...stableInput } = input
     const fingerprint = createHash('sha256').update(canonical({ ...stableInput, botId })).digest('hex')
@@ -98,13 +120,13 @@ export class HubTaskService {
 
   private groupRoute(input: ParsedGroupMessageInput, botId: string, identityId: string, message: ChannelInboundMessage, fixedChannelId?: string): ResolvedRoute {
     const scopedChatId = `cli:${JSON.stringify([identityId, input.chatId])}`
-    const base = this.store.resolveRoute(botId, message, { contextChatId: scopedChatId })
+    const base = this.store.resolveRoute(botId, message, { contextChatId: scopedChatId, ...(input.sceneId ? { sceneId: input.sceneId } : {}) })
     // Match on the real chat ID, but keep CLI histories separate from Feishu and other identities.
     const scoped = { ...base, conversationKey: JSON.stringify(['cli', identityId, botId, input.chatId, base.topicId]) }
     // The binding table also has a unique Bot/chat/topic constraint; scope its stored chat ID too.
     const bindingMessage = { ...message, conversation: { ...message.conversation, id: scopedChatId } }
     const route = fixedChannelId ? { ...scoped, threadChannelId: fixedChannelId } : this.store.resolveThreadRouting(scoped, bindingMessage, { allowProfileReuse: false })
-    if (!fixedChannelId && route.scene && route.routeSource === 'matcher' && route.topicId) {
+    if (!fixedChannelId && route.scene && ['matcher', 'explicit'].includes(route.routeSource) && route.topicId) {
       this.store.rememberTopicRoute(botId, scopedChatId, route.topicId, route.scene.id)
     }
     return this.readOnlyRoute(route)
@@ -173,6 +195,7 @@ export class HubTaskService {
         const identity = this.store.identities.get(task.principal)
         if (!identity.enabled || !identity.allowedBotIds.includes(task.botId)) throw new Error('Identity disabled or Bot permission removed')
         const input = groupMessageInput.parse(task.input.message), message = this.groupMessage(input, task.botId)
+        if (input.sceneId) this.selectedScene(input.sceneId, identity, task.botId)
         this.schedule(task, this.groupRoute(input, task.botId, task.principal, message, task.threadChannelId), message)
       } catch (error) {
         this.transition(task.id, { type: 'fail', error: error instanceof Error ? error.message : String(error) })
@@ -240,6 +263,8 @@ export class HubTaskService {
       if (current.origin === 'cli') {
         const identity = this.store.identities.get(current.principal)
         if (!identity.enabled || !identity.allowedBotIds.includes(current.botId)) throw new Error('Identity disabled or Bot permission removed')
+        const input = groupMessageInput.parse(current.input.message)
+        if (input.sceneId) this.selectedScene(input.sceneId, identity, current.botId)
       }
       // Only user input carries caller-supplied metadata; it must never become trusted application instructions.
       const runtimeMessage = current.origin === 'cli'

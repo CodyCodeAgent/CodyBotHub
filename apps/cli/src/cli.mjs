@@ -7,13 +7,15 @@ const help = `CodyBotHub CLI
 
   codybothub identity whoami
   codybothub identity register       Use CODYBOTHUB_REGISTRATION_TOKEN (one time)
+  codybothub scene list [--bot-id ID] [--json]
   codybothub message submit --input message.json [--async] [--json]
+  codybothub message submit --scene-id ID --input message.json [--json]
   codybothub message submit --input -             Read JSON from stdin
   codybothub message submit --chat-id ID --message-id ID --sender-id ID --text TEXT
   codybothub task get TASK_ID [--json]
   codybothub task wait TASK_ID [--timeout 300] [--json]
 
-Message flags: --bot-id, --chat-name, --topic-id, --sender-name,
+Message flags: --bot-id, --scene-id, --chat-name, --topic-id, --sender-name,
                --sender-type (user|bot|app), --message-type, --title, --created-at
 Global flags:  --url URL, --json, --help
 Environment:   CODYBOTHUB_URL (default http://127.0.0.1:4310), CODYBOTHUB_TOKEN
@@ -38,7 +40,7 @@ async function stdinText(stream) {
 export async function run(argv, { env = process.env, stdin = process.stdin, stdout = process.stdout, stderr = process.stderr, signal } = {}) {
   let json = argv.includes('--json'), latestTask
   try {
-    const stringOptions = ['url', 'input', 'timeout', 'bot-id', 'chat-id', 'chat-name', 'topic-id', 'message-id', 'sender-id', 'sender-name', 'sender-type', 'message-type', 'title', 'text', 'created-at']
+    const stringOptions = ['url', 'input', 'timeout', 'bot-id', 'scene-id', 'chat-id', 'chat-name', 'topic-id', 'message-id', 'sender-id', 'sender-name', 'sender-type', 'message-type', 'title', 'text', 'created-at']
     const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
       ...Object.fromEntries(stringOptions.map(key => [key, { type: 'string' }])),
       async: { type: 'boolean' }, json: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
@@ -46,7 +48,7 @@ export async function run(argv, { env = process.env, stdin = process.stdin, stdo
     json = Boolean(values.json)
     if (values.help || !positionals.length) { stdout.write(help); return 0 }
     const [domain, command, taskId] = positionals
-    if (!['identity whoami', 'identity register', 'message submit', 'task get', 'task wait'].includes(`${domain} ${command}`)) throw new CliError('Unknown command. Use --help')
+    if (!['identity whoami', 'identity register', 'scene list', 'message submit', 'task get', 'task wait'].includes(`${domain} ${command}`)) throw new CliError('Unknown command. Use --help')
     if (positionals.length !== (domain === 'task' ? 3 : 2)) throw new CliError('Unexpected or missing command arguments')
     const base = new URL(values.url ?? env.CODYBOTHUB_URL ?? 'http://127.0.0.1:4310')
     if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password || base.search || base.hash || !['', '/'].includes(base.pathname)) throw new CliError('URL must be an HTTP(S) server origin')
@@ -72,21 +74,33 @@ export async function run(argv, { env = process.env, stdin = process.stdin, stdo
       if (registration) stderr.write('Save the returned token as CODYBOTHUB_TOKEN. It will not be shown again.\n')
       return 0
     }
+    if (domain === 'scene') {
+      const query = values['bot-id'] ? `?botId=${encodeURIComponent(values['bot-id'])}` : ''
+      const result = await request(`/api/v1/scenes${query}`)
+      stdout.write(`${JSON.stringify(result, null, 2)}\n`)
+      return 0
+    }
     if (domain === 'message') {
       const messageOptions = stringOptions.filter(key => !['url', 'input', 'timeout'].includes(key))
       let input
       if (values.input) {
-        if (messageOptions.some(key => values[key] !== undefined)) throw new CliError('--input cannot be combined with message flags')
+        if (messageOptions.some(key => !['bot-id', 'scene-id'].includes(key) && values[key] !== undefined)) throw new CliError('--input can only be combined with --bot-id or --scene-id')
         const text = values.input === '-' ? await stdinText(stdin) : await readFile(values.input, 'utf8')
         if (Buffer.byteLength(text) > 1024 * 1024) throw new CliError('Input exceeds 1 MiB')
         input = JSON.parse(text)
+        for (const [flag, key] of [['bot-id', 'botId'], ['scene-id', 'sceneId']]) {
+          if (values[flag] === undefined) continue
+          if (!input || typeof input !== 'object' || Array.isArray(input)) throw new CliError('Message input must be a JSON object')
+          if (input[key] !== undefined && input[key] !== values[flag]) throw new CliError(`--${flag} conflicts with ${key} in the input JSON`)
+          input[key] = values[flag]
+        }
       } else {
         for (const key of ['chat-id', 'message-id', 'sender-id', 'text']) if (!values[key]) throw new CliError(`--${key} is required (or use --input)`)
         input = {
           chatId: values['chat-id'], messageId: values['message-id'],
           sender: { id: values['sender-id'], ...(values['sender-name'] ? { name: values['sender-name'] } : {}), ...(values['sender-type'] ? { type: values['sender-type'] } : {}) },
           message: { text: values.text, ...(values['message-type'] ? { type: values['message-type'] } : {}), ...(values.title ? { title: values.title } : {}) },
-          ...Object.fromEntries([['bot-id', 'botId'], ['chat-name', 'chatName'], ['topic-id', 'topicId'], ['created-at', 'createdAt']].filter(([flag]) => values[flag] !== undefined).map(([flag, key]) => [key, values[flag]])),
+          ...Object.fromEntries([['bot-id', 'botId'], ['scene-id', 'sceneId'], ['chat-name', 'chatName'], ['topic-id', 'topicId'], ['created-at', 'createdAt']].filter(([flag]) => values[flag] !== undefined).map(([flag, key]) => [key, values[flag]])),
         }
       }
       latestTask = await request('/api/v1/messages', 'POST', input)

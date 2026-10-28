@@ -33,6 +33,11 @@ export async function handleInteractionRoute(context: {
     sendJson(response, 200, { identity, credentialId })
     return true
   }
+  if (url.pathname === '/api/v1/scenes' && method === 'GET') {
+    const botId = url.searchParams.has('botId') ? z.uuid().parse(url.searchParams.get('botId')) : undefined
+    sendJson(response, 200, tasks.sceneCatalog(identity, botId))
+    return true
+  }
   if (url.pathname === '/api/v1/message-schema' && method === 'GET') {
     sendJson(response, 200, z.toJSONSchema(groupMessageInput))
     return true

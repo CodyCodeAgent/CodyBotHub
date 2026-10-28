@@ -50,6 +50,7 @@ export class HubStore {
       { version: 1, name: 'legacy-baseline', up: migrateLegacySchema },
       { version: 2, name: 'scheduled-schema', up: migrateScheduledSchema },
       { version: 3, name: 'interaction-identities', up: migrateIdentitySchema },
+      { version: 4, name: 'scene-public-description', up: db => { db.exec("ALTER TABLE scenes ADD COLUMN description TEXT NOT NULL DEFAULT ''") } },
     ])
   }
 

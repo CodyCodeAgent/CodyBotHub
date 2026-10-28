@@ -28,22 +28,30 @@ try {
   const workspacePath = path.join(directory, 'workspace')
   mkdirSync(workspacePath)
   const workspace = store.createWorkspace({ name: 'CLI smoke', path: workspacePath })
-  const bot = store.createBot({ name: 'CLI smoke', defaultWorkspaceId: workspace.id })
+  const bot = store.createBot({ name: 'CLI smoke', defaultWorkspaceId: workspace.id, conversationMode: 'topic' })
+  const scene = store.createScene({ botId: bot.id, workspaceId: workspace.id, name: 'CLI scene smoke', description: '只读验证场景与会话连续性。', prompt: '', priority: 100, enabled: true,
+    matcher: { chatIds: ['oc_does_not_match'], messageTypes: [], textIncludes: [], cardTitleIncludes: [] } })
   const identity = store.identities.create({ name: 'CLI smoke', type: 'service', defaultBotId: bot.id })
   const { token } = store.identities.issue(identity.id, 'local-smoke')
   const cli = fileURLToPath(new URL('../../cli/src/cli.mjs', import.meta.url))
+  const env = { ...process.env, CODYBOTHUB_URL: url, CODYBOTHUB_TOKEN: token }
+  const catalog = JSON.parse((await promisify(execFile)(process.execPath, [cli, 'scene', 'list', '--json'], { env })).stdout) as { scenes: Array<{ sceneId: string }> }
+  if (!catalog.scenes.some(item => item.sceneId === scene.id)) throw new Error('Scene discovery failed')
+  console.log('PASS authenticated CLI scene catalog')
   const marker = `LOCAL_CLI_OK_${randomBytes(4).toString('hex')}`
-  const call = async (messageId: string, text: string) => {
-    const result = await promisify(execFile)(process.execPath, [cli, 'message', 'submit', '--chat-id', 'oc_local_smoke', '--message-id', messageId, '--sender-id', 'ou_local_smoke', '--text', text, '--json', '--timeout', '120'], {
-      env: { ...process.env, CODYBOTHUB_URL: url, CODYBOTHUB_TOKEN: token }, timeout: 150_000,
+  const call = async (messageId: string, text: string, explicit = true) => {
+    const result = await promisify(execFile)(process.execPath, [cli, 'message', 'submit', ...(explicit ? ['--scene-id', scene.id] : []), '--chat-id', 'oc_local_smoke', '--topic-id', 'om_smoke_topic', '--message-id', messageId, '--sender-id', 'ou_local_smoke', '--text', text, '--json', '--timeout', '120'], {
+      env, timeout: 150_000,
     })
-    return JSON.parse(result.stdout) as { taskId: string; answer: string; status: string; route: { threadChannelId: string } }
+    return JSON.parse(result.stdout) as { taskId: string; answer: string; status: string; route: { threadChannelId: string; sceneId: string; routeSource: string } }
   }
   const first = await call('om_smoke_first', `本轮是本地 CLI 验证。请记住标记 ${marker}。不要调用工具，只回答这个标记。`)
   if (first.status !== 'completed' || !first.answer.includes(marker)) throw new Error(`First turn failed: ${JSON.stringify(first)}`)
+  if (first.route.sceneId !== scene.id || first.route.routeSource !== 'explicit') throw new Error('Explicit scene routing failed')
   console.log(`PASS real CLI → HTTP → identity → Codex: ${first.taskId}`)
-  const next = await call('om_smoke_followup', '请回忆上一轮我要求记住的验证标记，只输出那个标记，不要调用工具。')
+  const next = await call('om_smoke_followup', '请回忆上一轮我要求记住的验证标记，只输出那个标记，不要调用工具。', false)
   if (!next.answer.includes(marker) || next.route.threadChannelId !== first.route.threadChannelId) throw new Error(`Thread continuity failed: ${JSON.stringify(next)}`)
+  if (next.route.sceneId !== scene.id || next.route.routeSource !== 'topic_context') throw new Error('Explicit scene topic inheritance failed')
   const duplicate = await call('om_smoke_first', `本轮是本地 CLI 验证。请记住标记 ${marker}。不要调用工具，只回答这个标记。`)
   if (duplicate.taskId !== first.taskId) throw new Error('Idempotency failed')
   console.log('PASS native Thread continuity and duplicate message idempotency')

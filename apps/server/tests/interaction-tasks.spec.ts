@@ -14,6 +14,44 @@ function fixture(mode: 'chat' | 'topic' = 'chat') {
 }
 
 describe('CLI group task routing', () => {
+  it('infers the authorized Bot from sceneId, pins explicit routing across recovery and rejects stale or conflicting selections', async () => {
+    const { store, workspace, bot, identity, message } = fixture('topic')
+    const target = store.createBot({ name: 'Other authorized Bot', defaultWorkspaceId: workspace.id, conversationMode: 'topic' })
+    const caller = store.identities.update(identity.id, { ...identity, allowedBotIds: [bot.id, target.id], enabled: true })
+    const base = { botId: target.id, workspaceId: workspace.id, prompt: '', priority: 100, enabled: true, matcher: { chatIds: ['not_this_group'], messageTypes: ['interactive'], textIncludes: ['never_match'], cardTitleIncludes: [] } }
+    const scene = store.createScene({ ...base, name: 'Selected' })
+    const alternate = store.createScene({ ...base, name: 'Alternate' })
+    const stopped = new HubTaskService(store, {} as never)
+    stopped.beginDrain()
+    const selectedMessage = { ...message, sceneId: scene.id }
+    const task = stopped.dispatchMessage(selectedMessage, caller, 'cred')
+    expect(task.route).toMatchObject({ botId: target.id, sceneId: scene.id, routeSource: 'explicit' })
+    expect(stopped.dispatchMessage({ ...selectedMessage, botId: target.id }, caller, 'cred').taskId).toBe(task.taskId)
+    expect(() => stopped.dispatchMessage({ ...selectedMessage, sceneId: alternate.id }, caller, 'cred')).toThrow('different content')
+    expect(() => stopped.dispatchMessage({ ...selectedMessage, botId: bot.id }, caller, 'cred')).toThrow('does not belong')
+    expect(() => stopped.dispatchMessage(selectedMessage, identity, 'cred')).toThrow('not allowed')
+    expect(() => stopped.dispatchMessage({ ...message, sceneId: '00000000-0000-4000-8000-000000000000' }, caller, 'cred')).toThrow('Scene not found')
+    const disabled = stopped.dispatchMessage({ ...message, topicId: 'om_disabled_topic', messageId: 'om_disabled', sceneId: alternate.id }, caller, 'cred')
+    store.updateScene(alternate.id, { ...base, name: 'Alternate', enabled: false })
+    const deletedScene = store.createScene({ ...base, name: 'Will delete' })
+    const deleted = stopped.dispatchMessage({ ...message, topicId: 'om_deleted_topic', messageId: 'om_deleted', sceneId: deletedScene.id }, caller, 'cred')
+    store.deleteScene(deletedScene.id)
+    // A higher-priority matching Scene must not replace an explicitly selected Scene after restart.
+    store.createScene({ ...base, name: 'Competing automatic scene', priority: 1, matcher: { chatIds: [], messageTypes: [], textIncludes: ['alert'], cardTitleIncludes: [] } })
+    const execute = vi.fn(async (_route: ResolvedRoute) => 'explicit answer')
+    const restarted = new HubTaskService(store, { execute } as never)
+    try {
+      restarted.resumeQueuedTasks()
+      expect((await restarted.waitInteraction(task.taskId, caller.id, 1000)).answer).toBe('explicit answer')
+      expect(execute.mock.calls[0]![0].scene?.id).toBe(scene.id)
+      expect(restarted.getInteraction(disabled.taskId, caller.id).status).toBe('failed')
+      expect(restarted.getInteraction(deleted.taskId, caller.id).status).toBe('failed')
+      expect(execute).toHaveBeenCalledOnce()
+      const next = restarted.dispatchMessage({ ...message, botId: target.id, messageId: 'om_followup', message: { type: 'text', text: 'continue' } }, caller, 'cred')
+      expect(next.route).toMatchObject({ sceneId: scene.id, routeSource: 'topic_context', threadChannelId: task.route.threadChannelId })
+    } finally { await restarted.waitForIdle(); store.close() }
+  })
+
   it('matches real group metadata, keeps native threads per identity/topic, deduplicates and enforces read-only execution', async () => {
     const { store, workspace, bot, identity, message } = fixture('topic')
     const pack = store.createSkillPackage({ workspaceId: workspace.id, name: 'Guide', description: '', prompt: '', skills: [], fallbackMode: 'package_first' })

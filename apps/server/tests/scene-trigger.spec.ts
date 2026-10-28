@@ -42,6 +42,7 @@ describe('Scene mention-only configuration', () => {
       const scene = store.createScene({ ...input, requireMention: false })
       store.db.exec('ALTER TABLE scenes DROP COLUMN require_mention')
       store.db.exec('ALTER TABLE scenes DROP COLUMN turn_timeout_minutes')
+      store.db.exec('ALTER TABLE scenes DROP COLUMN description')
       // Model a database created before schema version tracking existed.
       store.db.exec('DROP TABLE identity_credentials; DROP TABLE identity_invitations; DROP TABLE interaction_identities')
       store.db.exec('DROP TABLE schema_migrations')

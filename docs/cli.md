@@ -44,6 +44,64 @@ pnpm cli identity register
 
 ## 提交消息
 
+### 先查询场景，再由上游数字人选择
+
+```bash
+pnpm cli scene list --json
+# 可选：只查询一个已授权 Bot 的场景。
+pnpm cli scene list --bot-id BOT_UUID --json
+```
+
+场景目录通过当前交互 Token 鉴权，只返回授权 Bot 下已启用的场景；没有可用场景时返回空数组。查询不启动模型、不创建 Task、Thread 或话题绑定。
+
+```json
+{
+  "matchSemantics": {
+    "acrossFields": "AND",
+    "withinField": "OR",
+    "emptyField": "unrestricted",
+    "textMatch": "case_insensitive_substring",
+    "idMatch": "exact",
+    "priority": "ascending"
+  },
+  "scenes": [
+    {
+      "sceneId": "11111111-1111-4111-8111-111111111111",
+      "botId": "22222222-2222-4222-8222-222222222222",
+      "botName": "支付助手",
+      "name": "支付故障排查",
+      "description": "分析支付服务告警、超时和错误率异常。",
+      "priority": 100,
+      "isFallback": false,
+      "conversationMode": "topic",
+      "executionMode": "read_only",
+      "matcher": {
+        "chatIds": ["oc_payment_alerts"],
+        "messageTypes": ["text", "interactive"],
+        "textIncludes": ["支付", "payment"],
+        "cardTitleIncludes": []
+      }
+    }
+  ]
+}
+```
+
+管理员在「场景路由 → 编辑场景 → 对外能力说明」维护 description（最多 2000 字符）；已有场景默认为空，可逐个补齐。目录不包含内部 Prompt、工作区路径或技能包的内部配置。
+
+路由规则的不同字段之间为 AND，同一字段内为 OR，空字段不限制；群 ID 和消息类型精确匹配，正文/标题按不区分大小写的子串匹配。目录沿用现有路由排序：优先级数值小的在前，同优先级按名称排序。四类匹配条件都为空时标记 `isFallback: true`，表示兜底场景，不应据此把所有消息都委托给 Hub。
+
+上游 AI 可结合说明与规则决定是否委托，选中后直接传 sceneId：
+
+```bash
+pnpm cli message submit --scene-id SCENE_UUID --input message.json --json
+```
+
+也可以在消息 JSON 中添加 `"sceneId": "SCENE_UUID"`。服务端从场景确定所属 Bot，调用方无需填写 botId；如果同时填写，两者必须一致，且 Bot 必须属于身份授权范围。目录查询和提交之间场景被停用、删除或失去授权时会返回错误。
+
+显式指定场景时不要求 matcher 命中，也不再按关键词选择其他场景；这些 matcher 是自动选择规则，身份授权才是执行权限边界。群和话题继续决定 Thread 连续性，切换同一 Bot 下的场景不会拆分 Thread。在话题模式下，显式选定的场景会被后续未指定场景、且未命中新规则的消息继承。
+
+未选择场景时，上游数字人可以自行处理消息；CLI 不自动替它做委托判断。原有不传 sceneId 的提交方式继续支持自动路由。
+
 可以直接传入常见字段：
 
 ```bash
@@ -55,7 +113,7 @@ pnpm cli message submit \
   --json
 ```
 
-也可保存以下 JSON 为 `message.json`，用 `pnpm cli message submit --input message.json --json` 提交。`--input -` 从 stdin 读取 JSON，不可与消息字段 flags 混用。
+也可保存以下 JSON 为 `message.json`，用 `pnpm cli message submit --input message.json --json` 提交。`--input -` 从 stdin 读取 JSON，可以搭配 `--scene-id`、`--bot-id`；若 flag 与 JSON 中的对应 ID 不一致则报错，不会覆盖。其他消息字段 flags 不可与 `--input` 混用。
 
 ```json
 {
@@ -80,7 +138,7 @@ pnpm cli message submit \
 }
 ```
 
-最小必填：`chatId`、`messageId`、`sender.id`、`message.text`。`botId` 可省略，使用身份默认 Bot；显式传入时必须在该身份授权范围内。`eventId` 可省略，服务端使用 `messageId`。完整 Schema 可通过带 Token 的 `GET /api/v1/message-schema` 获取，它与服务端入参校验使用同一个定义。
+最小必填：`chatId`、`messageId`、`sender.id`、`message.text`。`botId` 可省略：有 sceneId 时使用场景所属 Bot，否则使用身份默认 Bot；显式传入时必须在该身份授权范围内。`eventId` 可省略，服务端使用 `messageId`。完整 Schema 可通过带 Token 的 `GET /api/v1/message-schema` 获取，它与服务端入参校验使用同一个定义。消息类型支持飞书原生的 `interactive`（卡片）和 `media`，同时保留已有 `card`、`video` 值，自动匹配时按类型原值精确比较。
 
 所有可选字段见 `packages/contracts/src/interaction.ts`。可提供 `mentions`、`addressedToBot` 和 `metadata`；CLI 为显式提交，服务端始终处理，不用 `addressedToBot` 决定是否执行。首版图片、文件等仅接受提取后的文本与元数据，不上传、下载或读取客户端本地附件路径。
 
@@ -104,9 +162,10 @@ JSON 包含 `taskId`、`status`、`answer`、`error`、`progress`、`route`、`c
 ## 路由、隔离与恢复
 
 - 场景匹配使用真实 `chatId`、消息类型、正文和标题，沿用 Hub 的匹配优先级与群绑定。
+- 指定 sceneId 时固定使用该场景，返回 `routeSource: explicit`；排空恢复与重启恢复保留选择。场景已停用、被删除或移出原 Bot 时，尚未开始的显式任务失败，不改投默认场景。
 - 会话按「CLI + 身份 + 执行 Bot + 群 + 有效话题」隔离。同一身份的多个 Token 共享会话；不同身份与飞书入口不会共享 Thread。话题是否参与由 Bot 的会话模式决定；话题模式下无 `topicId` 时使用 `messageId` 作为新话题根。CLI 首版不跨会话进行画像相似度 Thread 复用。
 - CLI 的话题场景继承也按身份隔离；内部绑定表保存带入口和身份命名空间的群键，原始群 ID 保存在 Task 输入与审计中。
-- 「身份 + 执行 Bot + messageId」为幂等键。重投仅改变 `eventId` 时返回原 Task；其他字段变化返回 409，不重新执行。重试时应保留同一 Bot；改变默认 Bot 后建议显式传原 `botId`。
+- 「身份 + 执行 Bot + messageId」为幂等键。重投仅改变 `eventId` 时返回原 Task；其他字段变化（包括同一 Bot 下换 sceneId）返回 409，不重新执行。重试时应保留同一 Bot 和 sceneId；改变默认 Bot 后建议显式传原 `botId`。
 - 同一 Thread Channel 串行，不同群可并行。任务持久化后恢复排队；已进入 running 的任务在进程重启时标记失败，不自动重放。排空期间接受并持久排队，恢复后执行。停用身份或移除 Bot 授权会阻止尚未开始的任务执行，已运行任务不会强制中断。
 - 任务使用原生只读沙箱，并移除 Tool Package 调用。不发送飞书消息、卡片或表情，也不进入飞书审批流程。调用方负责把结果回复给原群。
 
@@ -118,6 +177,7 @@ JSON 包含 `taskId`、`status`、`answer`、`error`、`progress`、`route`、`c
 | --- | --- | --- |
 | POST | `/api/v1/identities/register` | 使用一次性注册 Token 注册，body 为 `{}` |
 | GET | `/api/v1/identity` | 当前身份、授权 Bot 和 Credential ID |
+| GET | `/api/v1/scenes?botId=BOT_UUID` | 查询可用场景、对外说明、规则及兜底标记；botId 可省略 |
 | GET | `/api/v1/message-schema` | JSON Schema |
 | POST | `/api/v1/messages?waitMs=0` | 提交，返回 202；内联等待最多 25000ms |
 | GET | `/api/v1/tasks/:id` | 查询本人身份的 Task |
@@ -134,4 +194,4 @@ pnpm check
 pnpm --filter @cody-bot-hub/server exec tsx scripts/verify-cli-local.ts
 ```
 
-自动测试覆盖身份与 Token、单次注册、权限隔离、幂等、场景匹配、话题和群隔离、串行与并行、排空恢复、故障、真实 CLI 子进程和等待超时。真实 Turn 验证脚本使用临时 SQLite、工作区和动态 loopback 端口，不启动飞书 Provider；结束后删除自己的临时测试目录，不触及已有 Hub 数据，不部署服务。
+自动测试覆盖身份与 Token、单次注册、权限隔离、幂等、场景目录过滤与无副作用、显式场景选择与恢复、场景停用/删除、话题和群隔离、串行与并行、排空恢复、故障、真实 CLI 子进程和等待超时。真实 Turn 验证脚本先通过 CLI 查询场景，再指定一个不命中 matcher 的场景执行两轮原生会话，验证话题继承与幂等；使用临时 SQLite、工作区和动态 loopback 端口，不启动飞书 Provider；结束后删除自己的临时测试目录，不触及已有 Hub 数据，不部署服务。

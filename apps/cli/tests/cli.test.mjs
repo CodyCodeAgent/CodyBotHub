@@ -30,11 +30,22 @@ test('stdin JSON is forwarded intact, only Authorization carries credentials, an
   t.after(() => new Promise(resolve => { server.closeAllConnections(); server.close(resolve) }))
   const input = { chatId: 'oc_group', topicId: 'root', sender: { id: 'ou_user' }, message: { type: 'card', text: '调查', raw: { service: 'payments' } }, messageId: 'om_message' }
   const io = output()
-  assert.equal(await run(['message', 'submit', '--input', '-', '--async'], { ...io, stdin: Readable.from([JSON.stringify(input)]), env: { CODYBOTHUB_URL: `http://127.0.0.1:${server.address().port}`, CODYBOTHUB_TOKEN: 'test-secret' } }), 0)
-  assert.deepEqual(received, input)
+  assert.equal(await run(['message', 'submit', '--input', '-', '--scene-id', 'selected-scene', '--async'], { ...io, stdin: Readable.from([JSON.stringify(input)]), env: { CODYBOTHUB_URL: `http://127.0.0.1:${server.address().port}`, CODYBOTHUB_TOKEN: 'test-secret' } }), 0)
+  assert.deepEqual(received, { ...input, sceneId: 'selected-scene' })
   assert.equal(headers.authorization, 'Bearer test-secret')
   assert.equal(JSON.parse(io.result().stdout).taskId, 'local-task')
   assert.doesNotMatch(io.result().stdout + io.result().stderr, /test-secret/)
+})
+
+test('routing flags cannot silently override conflicting values in input JSON', async () => {
+  for (const [flag, key] of [['--scene-id', 'sceneId'], ['--bot-id', 'botId']]) {
+    const io = output()
+    const code = await run(['message', 'submit', '--input', '-', flag, 'new', '--json'], {
+      ...io, stdin: Readable.from([JSON.stringify({ [key]: 'original' })]), env: { CODYBOTHUB_TOKEN: 'test' },
+    })
+    assert.equal(code, 2)
+    assert.match(JSON.parse(io.result().stdout).error, /conflicts/)
+  }
 })
 
 test('wait timeout returns 124 with taskId and does not cancel server work', async t => {

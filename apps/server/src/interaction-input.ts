@@ -13,6 +13,7 @@ export const inviteInput = identityInput.extend({ expiresInMinutes: z.number().i
 
 export const groupMessageInput = z.strictObject({
   botId: z.uuid().optional(),
+  sceneId: z.uuid().optional(),
   chatId: id,
   chatName: z.string().max(500).optional(),
   topicId: id.optional(),
@@ -26,7 +27,7 @@ export const groupMessageInput = z.strictObject({
     idType: z.enum(['open_id', 'user_id', 'union_id']).optional(),
   }),
   message: z.strictObject({
-    type: z.enum(['text', 'post', 'card', 'image', 'file', 'audio', 'video', 'unknown']).default('text'),
+    type: z.enum(['text', 'post', 'card', 'interactive', 'image', 'file', 'audio', 'video', 'media', 'unknown']).default('text'),
     text: z.string().min(1).max(200_000).refine(value => Boolean(value.trim()), 'Message text must not be blank'),
     title: z.string().max(2000).optional(),
     raw: z.json().optional(),
