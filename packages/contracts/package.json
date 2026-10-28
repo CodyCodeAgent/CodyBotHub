@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./interaction": "./src/interaction.ts",
     "./scheduled": "./src/scheduled.ts",
     "./platform": "./src/platform.ts",
     "./domain": "./src/domain.ts"

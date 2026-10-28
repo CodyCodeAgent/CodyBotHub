@@ -52,7 +52,8 @@ export class HubTaskRepository {
     if (input.status) { filters.push('status = ?'); params.push(input.status) }
     if (input.origin) { filters.push('origin = ?'); params.push(input.origin) }
     params.push(Math.min(500, Math.max(1, input.limit ?? 100)))
-    return (this.db.prepare(`SELECT * FROM hub_tasks ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''} ORDER BY created_at DESC LIMIT ?`).all(...params) as Row[]).map(this.hubTask)
+    const order = input.status === 'queued' ? 'created_at ASC, rowid ASC' : 'created_at DESC, rowid DESC'
+    return (this.db.prepare(`SELECT * FROM hub_tasks ${filters.length ? `WHERE ${filters.join(' AND ')}` : ''} ORDER BY ${order} LIMIT ?`).all(...params) as Row[]).map(this.hubTask)
   }
 
   latestHubTaskForSource(sourceKind: string, sourceId: string): HubTaskRecord | null {

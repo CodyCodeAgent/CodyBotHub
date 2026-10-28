@@ -16,6 +16,7 @@ import { CopilotRepository } from './persistence/copilot-repository.js'
 import { PlatformSettingsRepository } from './persistence/platform-settings-repository.js'
 import { StoreReadModel } from './persistence/store-read-model.js'
 import { ConversationRepository } from './persistence/conversation-repository.js'
+import { IdentityRepository, migrateIdentitySchema } from './persistence/identity-repository.js'
 
 export class HubStore {
   readonly db: DatabaseSync
@@ -25,6 +26,7 @@ export class HubStore {
     this.db = new DatabaseSync(filename)
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;')
     this.migrate()
+    this.identities = new IdentityRepository(this.db)
     this.accounts = new AdminRepository(this.db)
     this.audit = new AuditRepository(this.db)
     this.workspaces = new WorkspaceRepository(this.db)
@@ -47,10 +49,12 @@ export class HubStore {
     applyMigrations(this.db, [
       { version: 1, name: 'legacy-baseline', up: migrateLegacySchema },
       { version: 2, name: 'scheduled-schema', up: migrateScheduledSchema },
+      { version: 3, name: 'interaction-identities', up: migrateIdentitySchema },
     ])
   }
 
   readonly accounts: AdminRepository
+  readonly identities: IdentityRepository
   readonly hasAdmin = (...args: Parameters<AdminRepository['hasAdmin']>): ReturnType<AdminRepository['hasAdmin']> => this.accounts.hasAdmin(...args)
   readonly listAdminAccounts = (...args: Parameters<AdminRepository['listAdminAccounts']>): ReturnType<AdminRepository['listAdminAccounts']> => this.accounts.listAdminAccounts(...args)
   readonly getAdminAccount = (...args: Parameters<AdminRepository['getAdminAccount']>): ReturnType<AdminRepository['getAdminAccount']> => this.accounts.getAdminAccount(...args)

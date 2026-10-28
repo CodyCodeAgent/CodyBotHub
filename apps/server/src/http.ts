@@ -20,6 +20,7 @@ import { handleAdminRoute } from './http/admin-router.js'
 import { handleSkillRoute } from './http/skill-router.js'
 import { handleInsightsRoute } from './http/insights-router.js'
 import { handleConfigurationRoute } from './http/configuration-router.js'
+import { handleIdentityAdminRoute, handleInteractionRoute } from './http/interaction-router.js'
 
 export interface HubServerOptions {
   store: HubStore
@@ -64,9 +65,12 @@ export const createHubServer = ({ store, vault, runtime, webDist, onConfiguratio
           const body = await readJson(request); await auth.login(optional(body, 'loginName'), required(body, 'password'), request, response); return sendJson(response, 200, auth.status(request))
         }
         if (method === 'POST' && url.pathname === '/api/auth/logout') { auth.logout(request, response); return sendJson(response, 200, { ok: true }) }
+        if (await handleInteractionRoute({ request, response, url, method, store, tasks })) return
         if (!auth.isAuthenticated(request)) throw new HttpError(401, 'Authentication required')
         const actor = auth.currentAccount(request)!
         const audit = (action: string, targetType: string, targetId: string, summary: string, details: Record<string, unknown> = {}) => store.createAuditLog({ actor, action, targetType, targetId, summary, details, ipAddress: requestIp(request) })
+
+        if (await handleIdentityAdminRoute({ request, response, url, method, actor, store, audit })) return
 
         if (await handleScheduledRoute({ request, response, url, method, actor, store, scheduled, audit })) return
 

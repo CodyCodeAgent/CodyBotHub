@@ -1,4 +1,7 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import type { InteractionIdentity, InteractionTask } from '@cody-bot-hub/contracts/interaction'
+import { groupMessageInput, type ParsedGroupMessageInput } from './interaction-input.js'
+import { HttpError } from './http/common.js'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import { TaskEventBus, taskIsTerminal, type TaskEvent } from '@codycodeagent/cody-web-core/task'
 import type { HubStore } from './db.js'
@@ -16,6 +19,9 @@ type AgentTaskInput = {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 const requestKey = (principal: string, requestId: string): string => JSON.stringify([principal, requestId])
+const canonical = (value: unknown): string => JSON.stringify(value, (_key, item: unknown) =>
+  item && typeof item === 'object' && !Array.isArray(item)
+    ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)
 
 export class HubTaskService {
   private readonly channelQueues = new Map<string, Promise<void>>()
@@ -24,6 +30,85 @@ export class HubTaskService {
   private draining = false
 
   constructor(private readonly store: HubStore, private readonly runtime: CodyBotRuntime) {}
+
+  dispatchMessage(value: unknown, identity: InteractionIdentity, credentialId: string): InteractionTask {
+    const input = groupMessageInput.parse(value)
+    const botId = input.botId ?? identity.defaultBotId
+    if (!identity.allowedBotIds.includes(botId)) throw new HttpError(403, 'Bot is not allowed for this identity')
+    const { eventId: _deliveryId, ...stableInput } = input
+    const fingerprint = createHash('sha256').update(canonical({ ...stableInput, botId })).digest('hex')
+    const idempotencyKey = JSON.stringify([identity.id, botId, input.messageId])
+    const existing = this.store.findHubTask('cli', idempotencyKey)
+    if (existing) {
+      if (existing.input.fingerprint !== fingerprint) throw new HttpError(409, 'Message ID was already submitted with different content')
+      return this.interactionSnapshot(existing)
+    }
+    if (JSON.stringify(input).length > 800_000) throw new HttpError(413, 'Message payload is too large')
+    const message = this.groupMessage(input, botId)
+    const route = this.groupRoute(input, botId, identity.id, message)
+    const task = this.store.createHubTask({
+      kind: 'agent_turn', origin: 'cli', principal: identity.id, idempotencyKey,
+      taskInput: { message: input, fingerprint, credentialId, route: { workspaceId: route.workspace.id, routeSource: route.routeSource } },
+      botId, sceneId: route.scene?.id ?? '', threadChannelId: route.threadChannelId,
+      sourceKind: 'cli_message', sourceId: input.messageId,
+    })
+    this.store.createAuditLog({ action: 'interaction.submit', targetType: 'task', targetId: task.id,
+      summary: `${identity.name} 提交群消息任务`, details: { identityId: identity.id, credentialId, botId, chatId: input.chatId, messageId: input.messageId, sender: input.sender } })
+    if (!this.draining) this.schedule(task, route, message)
+    return this.interactionSnapshot(task)
+  }
+
+  getInteraction(taskId: string, identityId: string): InteractionTask {
+    return this.interactionSnapshot(this.ownedInteraction(taskId, identityId))
+  }
+
+  async waitInteraction(taskId: string, identityId: string, timeoutMs: number): Promise<InteractionTask> {
+    const task = await this.events.waitFor(taskId, () => this.ownedInteraction(taskId, identityId),
+      snapshot => taskIsTerminal(snapshot.status), Math.min(25_000, Math.max(0, timeoutMs)))
+    return this.interactionSnapshot(task)
+  }
+
+  private ownedInteraction(taskId: string, identityId: string): HubTaskRecord {
+    const task = this.store.getHubTask(taskId)
+    if (task.origin !== 'cli' || task.principal !== identityId) throw new HttpError(404, 'Task not found')
+    return task
+  }
+
+  private interactionSnapshot(task: HubTaskRecord): InteractionTask {
+    const route = task.input.route as { workspaceId: string; routeSource: string }
+    return {
+      taskId: task.id, status: task.status, answer: task.result?.text ?? null, error: task.error, progress: task.progress,
+      route: { botId: task.botId, sceneId: task.sceneId, workspaceId: route.workspaceId, routeSource: route.routeSource, threadChannelId: task.threadChannelId },
+      createdAt: task.createdAtIso, updatedAt: task.updatedAtIso,
+    }
+  }
+
+  private groupMessage(input: ParsedGroupMessageInput, botId: string): ChannelInboundMessage {
+    return {
+      provider: 'cli', accountId: botId, eventId: input.eventId ?? input.messageId, messageId: input.messageId,
+      conversation: { id: input.chatId, scope: input.topicId ? 'topic' : 'group', ...(input.topicId ? { rootId: input.topicId } : {}), ...(input.chatName ? { name: input.chatName } : {}) },
+      sender: { id: input.sender.id, type: input.sender.type ?? 'user', ...(input.sender.name ? { name: input.sender.name } : {}), ...(input.sender.idType ? { idType: input.sender.idType } : {}) },
+      content: { type: input.message.type ?? 'text', ...(input.message.title !== undefined ? { title: input.message.title } : {}), raw: input.message.raw },
+      text: input.message.text, attachments: [], addressedToAgent: true,
+      mentionsOtherRecipient: Boolean(input.mentions?.some(mention => !mention.isCurrentBot)),
+      mentions: (input.mentions ?? []).map(mention => ({ id: mention.id, idType: 'unknown', type: mention.type ?? 'user', name: mention.name ?? '', isAgent: mention.isCurrentBot ?? false })),
+      createdAtIso: input.createdAt ?? new Date().toISOString(),
+    }
+  }
+
+  private groupRoute(input: ParsedGroupMessageInput, botId: string, identityId: string, message: ChannelInboundMessage, fixedChannelId?: string): ResolvedRoute {
+    const scopedChatId = `cli:${JSON.stringify([identityId, input.chatId])}`
+    const base = this.store.resolveRoute(botId, message, { contextChatId: scopedChatId })
+    // Match on the real chat ID, but keep CLI histories separate from Feishu and other identities.
+    const scoped = { ...base, conversationKey: JSON.stringify(['cli', identityId, botId, input.chatId, base.topicId]) }
+    // The binding table also has a unique Bot/chat/topic constraint; scope its stored chat ID too.
+    const bindingMessage = { ...message, conversation: { ...message.conversation, id: scopedChatId } }
+    const route = fixedChannelId ? { ...scoped, threadChannelId: fixedChannelId } : this.store.resolveThreadRouting(scoped, bindingMessage, { allowProfileReuse: false })
+    if (!fixedChannelId && route.scene && route.routeSource === 'matcher' && route.topicId) {
+      this.store.rememberTopicRoute(botId, scopedChatId, route.topicId, route.scene.id)
+    }
+    return this.readOnlyRoute(route)
+  }
 
   inspectPlatform(input: { requestId: string; principal: string }): HubTaskRecord {
     const idempotencyKey = requestKey(input.principal, input.requestId)
@@ -82,7 +167,19 @@ export class HubTaskService {
 
   resumeQueuedTasks(): void {
     if (this.draining) return
+    for (const task of this.store.listHubTasks({ status: 'queued', origin: 'cli', limit: 500 })) {
+      if (this.scheduled.has(task.id)) continue
+      try {
+        const identity = this.store.identities.get(task.principal)
+        if (!identity.enabled || !identity.allowedBotIds.includes(task.botId)) throw new Error('Identity disabled or Bot permission removed')
+        const input = groupMessageInput.parse(task.input.message), message = this.groupMessage(input, task.botId)
+        this.schedule(task, this.groupRoute(input, task.botId, task.principal, message, task.threadChannelId), message)
+      } catch (error) {
+        this.transition(task.id, { type: 'fail', error: error instanceof Error ? error.message : String(error) })
+      }
+    }
     for (const task of this.store.listHubTasks({ status: 'queued', origin: 'mcp', limit: 500 })) {
+      if (this.scheduled.has(task.id)) continue
       const input = task.input
       if (typeof input.botId !== 'string' || typeof input.prompt !== 'string' || typeof input.sessionId !== 'string' || typeof input.requestId !== 'string' || (input.sceneId !== undefined && typeof input.sceneId !== 'string')) {
         this.transition(task.id, { type: 'fail', error: 'Queued task payload is invalid' })
@@ -111,7 +208,7 @@ export class HubTaskService {
   }
 
   health(): { draining: boolean; activeTasks: number; queuedTasks: number } {
-    return { draining: this.draining, activeTasks: this.scheduled.size, queuedTasks: this.store.listHubTasks({ status: 'queued', origin: 'mcp', limit: 500 }).length }
+    return { draining: this.draining, activeTasks: this.scheduled.size, queuedTasks: ['mcp', 'cli'].reduce((count, origin) => count + this.store.listHubTasks({ status: 'queued', origin, limit: 500 }).length, 0) }
   }
 
   private schedule(task: HubTaskRecord, route: ResolvedRoute, message: ChannelInboundMessage): void {
@@ -140,7 +237,15 @@ export class HubTaskService {
       catch (error) { console.warn(`[tasks] failed to persist progress for ${taskId}:`, error) }
     }
     try {
-      const text = await this.runtime.execute(route, message, [], onProgress, undefined, undefined, undefined, '', false, 'read_only')
+      if (current.origin === 'cli') {
+        const identity = this.store.identities.get(current.principal)
+        if (!identity.enabled || !identity.allowedBotIds.includes(current.botId)) throw new Error('Identity disabled or Bot permission removed')
+      }
+      // Only user input carries caller-supplied metadata; it must never become trusted application instructions.
+      const runtimeMessage = current.origin === 'cli'
+        ? { ...message, text: `消息上下文（调用方提供）：\n${JSON.stringify(current.input.message)}\n\n消息正文：\n${message.text}` }
+        : message
+      const text = await this.runtime.execute(route, runtimeMessage, [], onProgress, undefined, undefined, undefined, '', false, 'read_only')
       this.transition(taskId, { type: 'complete', result: { text } })
     } catch (error) {
       this.transition(taskId, { type: 'fail', error: error instanceof Error ? error.message : String(error) })
@@ -167,7 +272,7 @@ export class HubTaskService {
     return {
       ...route,
       skillPackages: route.skillPackages.map(item => ({ ...item, toolPackageIds: [] })),
-      turnInstructions: [route.turnInstructions, '# MCP 只读任务\n本轮可读取工作区、知识库和查询型能力，但不得修改文件、配置或外部系统；不得调用 Tool Package。需要产生副作用时，请说明应转到飞书审批流程。'].filter(Boolean).join('\n\n'),
+      turnInstructions: [route.turnInstructions, '# MCP 只读任务 / CLI 只读任务\n本轮可读取工作区、知识库和查询型能力，但不得修改文件、配置或外部系统；不得调用 Tool Package。需要产生副作用时，请说明应转到飞书审批流程。'].filter(Boolean).join('\n\n'),
     }
   }
 }

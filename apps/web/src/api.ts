@@ -1,4 +1,7 @@
 import type { ScheduledTaskInput, ScheduledTask, ScheduledRun, ScheduledRunSummary, ScheduledTemplate, SchedulerHealth, ScheduleConfig, WorkspaceRepository } from './types'
+import type { InteractionIdentity, IdentityCredential, IdentityType } from '@cody-bot-hub/contracts/interaction'
+
+export type IdentityInput = { name: string; type: IdentityType; defaultBotId: string; allowedBotIds?: string[] }
 import type { AdminAccount, AgentRuntimeKind, AuditLog, Bot, ChatMetadata, ConversationThread, CopilotProposal, CopilotState, DashboardDimensions, DashboardOverview, MessageAttempt, MessageLog, ModelCatalog, PlatformSettings, ProvisioningJob, Scene, SkillCatalogItem, SkillPackage, SkillSource, SystemHealth, ThemePreference, ThreadChannel, ThreadJob, ThreadProfile, ThreadRoutingDecisionRecord, ThreadRoutingRule, Tool, ToolPackage, ToolPackageExecution, ToolScriptVersion, Workspace, WorkspaceResources } from './types'
 
 export interface DirectoryListing { roots: Array<{ name: string; path: string }>; current: string; parent: string | null; directories: Array<{ name: string; path: string }> }
@@ -19,6 +22,13 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
 }
 
 export const api = {
+  identities: () => request<InteractionIdentity[]>('/identities'),
+  createIdentity: (value: IdentityInput) => request<{ identity: InteractionIdentity; credential: IdentityCredential; token: string }>('/identities', { method: 'POST', body: JSON.stringify(value) }),
+  updateIdentity: (id: string, value: IdentityInput & { enabled: boolean }) => request<InteractionIdentity>(`/identities/${id}`, { method: 'PUT', body: JSON.stringify(value) }),
+  identityCredentials: (id: string) => request<IdentityCredential[]>(`/identities/${id}/credentials`),
+  issueIdentityCredential: (id: string, name: string) => request<{ credential: IdentityCredential; token: string }>(`/identities/${id}/credentials`, { method: 'POST', body: JSON.stringify({ name }) }),
+  revokeIdentityCredential: (id: string, credentialId: string) => request<void>(`/identities/${id}/credentials/${credentialId}`, { method: 'DELETE' }),
+  inviteIdentity: (value: IdentityInput) => request<{ invitationId: string; registrationToken: string; expiresAt: string }>('/identity-invitations', { method: 'POST', body: JSON.stringify(value) }),
   scheduledTemplates: () => request<ScheduledTemplate[]>('/scheduled-templates'),
   scheduledMaintenance: (workspaceId:string) => request<{paused:boolean;reason:string}>(`/scheduled-maintenance?workspaceId=${encodeURIComponent(workspaceId)}`),
   resumeScheduledWorkspace: (workspaceId:string) => request<{ok:boolean}>('/scheduled-maintenance',{method:'POST',body:JSON.stringify({workspaceId})}),

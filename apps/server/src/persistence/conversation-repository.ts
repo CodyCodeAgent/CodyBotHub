@@ -460,13 +460,13 @@ export class ConversationRepository {
       .run(botId, chatId, topicId, sceneId, timestamp, timestamp)
   }
 
-  resolveRoute(botId: string, message: ChannelInboundMessage, options: { sceneId?: string } = {}): ResolvedRoute {
+  resolveRoute(botId: string, message: ChannelInboundMessage, options: { sceneId?: string; contextChatId?: string } = {}): ResolvedRoute {
     const bot = this.deps.botScenes.getBot(botId)
     const topicId = bot.conversationMode === 'topic' && message.conversation.scope !== 'private'
       ? (message.conversation.rootId || message.messageId)
       : ''
     const topicContext = topicId
-      ? this.db.prepare('SELECT scene_id FROM topic_route_contexts WHERE bot_id = ? AND chat_id = ? AND topic_id = ?').get(botId, message.conversation.id, topicId) as Row | undefined
+      ? this.db.prepare('SELECT scene_id FROM topic_route_contexts WHERE bot_id = ? AND chat_id = ? AND topic_id = ?').get(botId, options.contextChatId ?? message.conversation.id, topicId) as Row | undefined
       : undefined
     const groupBinding = this.db.prepare('SELECT scene_id FROM group_scene_bindings WHERE bot_id = ? AND chat_id = ?').get(botId, message.conversation.id) as Row | undefined
     const candidates = this.deps.botScenes.listScenes().filter(scene => scene.botId === botId && scene.enabled)

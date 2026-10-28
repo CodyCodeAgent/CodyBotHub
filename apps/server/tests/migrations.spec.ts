@@ -7,7 +7,7 @@ describe('database migrations', () => {
   it('creates scheduled tables through a versioned HubStore migration', () => {
     const store = new HubStore(':memory:')
     const versions = store.db.prepare('SELECT version FROM schema_migrations ORDER BY version').all() as Array<{ version: number }>
-    expect(versions.map(row => row.version)).toEqual([1, 2])
+    expect(versions.map(row => row.version)).toEqual([1, 2, 3])
     expect(store.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='scheduled_runs'").get()).toBeTruthy()
     store.close()
   })

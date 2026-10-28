@@ -8,6 +8,8 @@ importers:
 
   .: {}
 
+  apps/cli: {}
+
   apps/server:
     dependencies:
       '@cody-bot-hub/contracts':

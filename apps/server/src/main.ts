@@ -39,6 +39,11 @@ const skills = new SkillSyncService(store, path.join(dataDir, 'skill-sources'))
 const copilot = new CopilotService(store, runtime, (botId, query) => feishu.resolveObservedUserIdentities(botId, query))
 runtime.setCopilotToolInvoker(call => copilot.invokeTool(call))
 const tasks = new HubTaskService(store, runtime)
+const taskQueueTimer = setInterval(() => {
+  try { tasks.resumeQueuedTasks() }
+  catch (error) { console.error('[tasks] queue scan failed:', error) }
+}, 1_000)
+taskQueueTimer.unref()
 const scheduled = new ScheduledTaskService(store, runtime, skills, dataDir, {
   send: (botId, chatId, card, uuid) => feishu.sendScheduledCard(botId, chatId, card, uuid),
   update: (botId, messageId, card) => feishu.updateScheduledCard(botId, messageId, card),
@@ -92,6 +97,7 @@ const shutdown = async (signal: string) => {
   if (shuttingDown) return
   shuttingDown = true
   clearInterval(threadProfileTimer)
+  clearInterval(taskQueueTimer)
   feishu.beginDrain()
   tasks.beginDrain()
   scheduled.beginDrain()

@@ -19,6 +19,7 @@ export const routes: RouteRecordRaw[] = [
   { path: '/skills', name: 'skills', component: () => import('./views/SkillsView.vue') },
   { path: '/messages', name: 'messages', component: () => import('./views/MessagesView.vue') },
   { path: '/accounts', name: 'accounts', component: () => import('./views/AccountsView.vue') },
+  { path: '/identities', name: 'identities', component: () => import('./views/IdentitiesView.vue') },
   { path: '/audit-logs', name: 'audit-logs', component: () => import('./views/AuditLogsView.vue') },
   { path: '/settings', name: 'settings', component: () => import('./views/SettingsView.vue') },
 ]
