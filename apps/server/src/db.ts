@@ -15,6 +15,7 @@ import { ToolCatalogRepository } from './persistence/tool-catalog-repository.js'
 import { CopilotRepository } from './persistence/copilot-repository.js'
 import { PlatformSettingsRepository } from './persistence/platform-settings-repository.js'
 import { StoreReadModel } from './persistence/store-read-model.js'
+import { installProcessingRecords } from './persistence/processing-records.js'
 import { ConversationRepository } from './persistence/conversation-repository.js'
 import { IdentityRepository, migrateIdentitySchema } from './persistence/identity-repository.js'
 
@@ -26,6 +27,7 @@ export class HubStore {
     this.db = new DatabaseSync(filename)
     this.db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;')
     this.migrate()
+    installProcessingRecords(this.db)
     this.identities = new IdentityRepository(this.db)
     this.accounts = new AdminRepository(this.db)
     this.audit = new AuditRepository(this.db)
@@ -157,6 +159,7 @@ export class HubStore {
   readonly latestHubTaskForSource = (...args: Parameters<HubTaskRepository['latestHubTaskForSource']>): ReturnType<HubTaskRepository['latestHubTaskForSource']> => this.hubTasks.latestHubTaskForSource(...args)
   readonly transitionHubTask = (...args: Parameters<HubTaskRepository['transitionHubTask']>): ReturnType<HubTaskRepository['transitionHubTask']> => this.hubTasks.transitionHubTask(...args)
   readonly updateHubTaskProgressForSource = (...args: Parameters<HubTaskRepository['updateHubTaskProgressForSource']>): ReturnType<HubTaskRepository['updateHubTaskProgressForSource']> => this.hubTasks.updateHubTaskProgressForSource(...args)
+  readonly updateHubTaskAudit = (...args: Parameters<HubTaskRepository['updateHubTaskAudit']>): ReturnType<HubTaskRepository['updateHubTaskAudit']> => this.hubTasks.updateHubTaskAudit(...args)
 
   readonly conversation: ConversationRepository
   readonly createMessageLog = (...args: Parameters<ConversationRepository['createMessageLog']>): ReturnType<ConversationRepository['createMessageLog']> => this.conversation.createMessageLog(...args)

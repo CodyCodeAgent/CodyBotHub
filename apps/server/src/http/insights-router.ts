@@ -9,6 +9,7 @@ export const handleInsightsRoute = async ({ request, response, url, method, acto
           botId: url.searchParams.get('botId') ?? '',
           chatId: url.searchParams.get('chatId') ?? '',
           threadChannelId: url.searchParams.get('threadChannelId') ?? '',
+          origin: url.searchParams.get('origin') ?? '',
         }))
         if (method === 'GET' && url.pathname === '/api/dashboard/dimensions') return sendJson(response, 200, store.dashboardDimensions())
         if (method === 'GET' && url.pathname === '/api/chats') {
@@ -76,6 +77,7 @@ export const handleInsightsRoute = async ({ request, response, url, method, acto
             sceneId: url.searchParams.get('sceneId') ?? '',
             status: url.searchParams.get('status') ?? '',
             query: url.searchParams.get('query') ?? '',
+            origin: url.searchParams.get('origin') ?? '',
           }))
         }
         const messageLogAction = url.pathname.match(/^\/api\/message-logs\/([^/]+)\/(attempts|retry)$/u)
@@ -83,6 +85,7 @@ export const handleInsightsRoute = async ({ request, response, url, method, acto
           const logId = decodeURIComponent(messageLogAction[1]!), action = messageLogAction[2]
           if (method === 'GET' && action === 'attempts') return sendJson(response, 200, store.listMessageAttempts(logId))
           if (method === 'POST' && action === 'retry') {
+            if (store.getMessageLog(logId).origin !== 'feishu') throw new HttpError(400, 'CLI/MCP 任务请通过原调用方处理重试')
             const result = store.retryMessageLog(logId, actor)
             audit('message.retry', 'message_log', logId, `重试失败消息 ${result.log.messageId}`, { attemptNumber: result.attempts.at(-1)?.attemptNumber, threadChannelId: result.log.threadChannelId, coreThreadId: result.log.coreThreadId })
             await onMessageRetry?.()

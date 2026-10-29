@@ -200,6 +200,11 @@ export interface InvestigationTraceRecord {
 
 export interface MessageLogRecord {
   id: string
+  origin: 'feishu' | 'cli' | 'mcp'
+  taskId: string
+  taskStatus: string
+  auditAvailable: boolean
+  routeSource: string
   eventId: string
   messageId: string
   botId: string

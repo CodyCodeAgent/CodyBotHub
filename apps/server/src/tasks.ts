@@ -70,7 +70,7 @@ export class HubTaskService {
     const route = this.groupRoute(input, botId, identity.id, message)
     const task = this.store.createHubTask({
       kind: 'agent_turn', origin: 'cli', principal: identity.id, idempotencyKey,
-      taskInput: { message: input, fingerprint, credentialId, route: { workspaceId: route.workspace.id, routeSource: route.routeSource } },
+      taskInput: { message: input, fingerprint, credentialId, route: { workspaceId: route.workspace.id, routeSource: route.routeSource }, executionAudit: this.executionAudit(route) },
       botId, sceneId: route.scene?.id ?? '', threadChannelId: route.threadChannelId,
       sourceKind: 'cli_message', sourceId: input.messageId,
     })
@@ -165,7 +165,7 @@ export class HubTaskService {
     const route = this.readOnlyRoute(this.store.resolveThreadRouting(this.store.resolveRoute(input.botId, message, input.sceneId ? { sceneId: input.sceneId } : {}), message, { allowProfileReuse: false }))
     const task = this.store.createHubTask({
       kind: 'agent_turn', origin: 'mcp', principal: input.principal, idempotencyKey,
-      taskInput: { botId: input.botId, ...(input.sceneId ? { sceneId: input.sceneId } : {}), prompt: input.prompt, sessionId: input.sessionId, requestId: input.requestId },
+      taskInput: { botId: input.botId, ...(input.sceneId ? { sceneId: input.sceneId } : {}), prompt: input.prompt, sessionId: input.sessionId, requestId: input.requestId, executionAudit: this.executionAudit(route) },
       botId: input.botId, sceneId: route.scene?.id ?? '', threadChannelId: route.threadChannelId, sourceKind: 'mcp_request', sourceId: input.requestId,
     })
     if (!this.draining) this.schedule(task, route, message)
@@ -270,10 +270,24 @@ export class HubTaskService {
       const runtimeMessage = current.origin === 'cli'
         ? { ...message, text: `消息上下文（调用方提供）：\n${JSON.stringify(current.input.message)}\n\n消息正文：\n${message.text}` }
         : message
-      const text = await this.runtime.execute(route, runtimeMessage, [], onProgress, undefined, undefined, undefined, '', false, 'read_only')
+      this.store.updateHubTaskAudit(taskId, this.executionAudit(route))
+      const text = await this.runtime.execute(route, runtimeMessage, [], onProgress,
+        model => this.store.updateHubTaskAudit(taskId, { model }),
+        investigation => this.store.updateHubTaskAudit(taskId, { investigation }),
+        coreThreadId => this.store.updateHubTaskAudit(taskId, { coreThreadId }), '', false, 'read_only')
       this.transition(taskId, { type: 'complete', result: { text } })
     } catch (error) {
       this.transition(taskId, { type: 'fail', error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  private executionAudit(route: ResolvedRoute): Record<string, unknown> {
+    return {
+      botName: route.bot.name, runtimeKind: route.bot.runtimeKind,
+      workspaceId: route.workspace.id, workspaceName: route.workspace.name,
+      sceneName: route.scene?.name ?? '', routeSource: route.routeSource,
+      skillPackages: route.skillPackages.map(item => ({ id: item.id, name: item.name })),
+      threadRouting: route.threadRouting,
     }
   }
 

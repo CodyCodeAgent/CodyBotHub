@@ -57,7 +57,7 @@ const server = createHubServer({
   onMessageRetry: () => feishu.resumeQueuedJobs(),
   getDeploymentStatus: () => {
     const status = feishu.deploymentStatus(), taskHealth = tasks.health()
-    return { ...status, draining: status.draining || taskHealth.draining, activeJobs: status.activeJobs + taskHealth.activeTasks + scheduled.health().activeTasks, queuedJobs: store.systemHealth().queue.queued + taskHealth.queuedTasks + scheduled.health().queuedTasks }
+    return { ...status, draining: status.draining || taskHealth.draining, activeJobs: status.activeJobs + taskHealth.activeTasks + scheduled.health().activeTasks, queuedJobs: store.systemHealth().queue.queued + scheduled.health().queuedTasks }
   },
   getSystemHealth: () => {
     const checkedAt = new Date(), storeHealth = store.systemHealth(), feishuHealth = feishu.health(), runtimeHealth = runtime.health()

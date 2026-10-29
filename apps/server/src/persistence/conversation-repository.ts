@@ -323,6 +323,14 @@ export class ConversationRepository {
 
   listMessageAttempts(logId: string): MessageAttemptRecord[] {
     const log = this.getMessageLog(logId)
+    if (log.origin !== 'feishu') return [{
+      id: log.id, logId: log.id, attemptNumber: 1,
+      status: log.taskStatus === 'queued' ? 'queued' : log.status,
+      requestedByAccountId: '', requestedByLoginName: '', requestedByDisplayName: '',
+      responseContent: log.responseContent, error: log.error, model: log.model, reasoningEffort: log.reasoningEffort,
+      startedAt: log.startedAt, completedAt: log.completedAt, durationMs: log.durationMs,
+      createdAt: log.receivedAt, updatedAt: log.completedAt || log.startedAt || log.receivedAt,
+    }]
     const jobRow = this.db.prepare('SELECT * FROM thread_jobs WHERE log_id = ?').get(logId) as Row | undefined
     if (!jobRow) return []
     const rows = this.db.prepare('SELECT * FROM message_attempts WHERE log_id = ? ORDER BY attempt_number').all(logId) as Row[]
@@ -364,11 +372,12 @@ export class ConversationRepository {
     return rows.map(row => ({ id: String(row.id), botId: String(row.bot_id), botName: String(row.bot_name), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, coreThreadId: String(row.core_thread_id), bindingCount: Number(row.binding_count), queuedJobs: Number(row.queued_jobs), processingJobs: Number(row.processing_jobs), createdAt: String(row.created_at), updatedAt: String(row.updated_at) }))
   }
 
-  listMessageLogs(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}): { items: MessageLogRecord[]; total: number } {
+  listMessageLogs(input: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string; origin?: string } = {}): { items: MessageLogRecord[]; total: number } {
     const filters: string[] = []
     const params: Array<string | number> = []
     if (input.botId) { filters.push('bot_id = ?'); params.push(input.botId) }
     if (input.sceneId) { filters.push('scene_id = ?'); params.push(input.sceneId) }
+    if (input.origin) { filters.push('origin = ?'); params.push(input.origin) }
     if (input.status && ['processing', 'completed', 'failed'].includes(input.status)) { filters.push('status = ?'); params.push(input.status) }
     if (input.query?.trim()) {
       filters.push('(inbound_content LIKE ? ESCAPE \'\\\' OR response_content LIKE ? ESCAPE \'\\\' OR message_id LIKE ? OR id LIKE ? OR core_thread_id LIKE ? OR thread_channel_id LIKE ?)')
@@ -376,15 +385,15 @@ export class ConversationRepository {
       params.push(`%${escaped}%`, `%${escaped}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`, `%${input.query.trim()}%`)
     }
     const where = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
-    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM message_logs ${where}`).get(...params) as Row).count)
+    const total = Number((this.db.prepare(`SELECT COUNT(*) AS count FROM processing_records ${where}`).get(...params) as Row).count)
     const limit = Math.min(200, Math.max(1, Math.trunc(input.limit ?? 50)))
     const offset = Math.max(0, Math.trunc(input.offset ?? 0))
-    const rows = this.db.prepare(`SELECT * FROM message_logs ${where} ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
+    const rows = this.db.prepare(`SELECT * FROM processing_records ${where} ORDER BY received_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, limit, offset) as Row[]
     return { items: rows.map(this.messageLog), total }
   }
 
   getMessageLog(id: string): MessageLogRecord {
-    const row = this.db.prepare('SELECT * FROM message_logs WHERE id = ?').get(id) as Row | undefined
+    const row = this.db.prepare('SELECT * FROM processing_records WHERE id = ?').get(id) as Row | undefined
     if (!row) throw new Error('Message log not found')
     return this.messageLog(row)
   }
@@ -409,6 +418,8 @@ export class ConversationRepository {
 
   private messageLog = (row: Row): MessageLogRecord => ({
     id: String(row.id), eventId: String(row.event_id), messageId: String(row.message_id),
+    origin: String(row.origin || 'feishu') as MessageLogRecord['origin'], taskId: String(row.task_id || ''),
+    taskStatus: String(row.task_status || ''), auditAvailable: row.audit_available !== 0, routeSource: String(row.route_source || ''),
     botId: String(row.bot_id), botName: String(row.bot_name), runtimeKind: String(row.runtime_kind || 'codex') as AgentRuntimeKind, chatId: String(row.chat_id), topicId: String(row.topic_id), senderId: String(row.sender_id),
     messageType: String(row.message_type), inboundContent: String(row.inbound_content),
     inboundRaw: (() => { try { return JSON.parse(String(row.inbound_raw_json)) as unknown } catch { return null } })(),

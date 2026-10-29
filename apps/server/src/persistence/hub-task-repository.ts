@@ -42,6 +42,12 @@ export class HubTaskRepository {
     return this.hubTask(row)
   }
 
+  updateHubTaskAudit(id: string, patch: Record<string, unknown>): void {
+    this.db.prepare(`UPDATE hub_tasks SET input_json = json_set(input_json, '$.executionAudit',
+      json_patch(COALESCE(json_extract(input_json, '$.executionAudit'), '{}'), json(?))) WHERE id = ?`)
+      .run(JSON.stringify(patch), id)
+  }
+
   findHubTask(origin: string, idempotencyKey: string): HubTaskRecord | null {
     const row = this.db.prepare('SELECT * FROM hub_tasks WHERE origin = ? AND idempotency_key = ?').get(origin, idempotencyKey) as Row | undefined
     return row ? this.hubTask(row) : null

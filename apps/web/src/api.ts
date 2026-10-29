@@ -67,7 +67,7 @@ export const api = {
     return request<{ items: AuditLog[]; total: number }>(`/audit-logs${params.size ? `?${params.toString()}` : ''}`)
   },
   auditLog: (id: string) => request<AuditLog>(`/audit-logs/${encodeURIComponent(id)}`),
-  dashboard: (filters: { fromDate?: string; toDate?: string; botId?: string; chatId?: string; threadChannelId?: string } = {}) => {
+  dashboard: (filters: { fromDate?: string; toDate?: string; botId?: string; chatId?: string; threadChannelId?: string; origin?: string } = {}) => {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(filters)) if (value) params.set(key, value)
     return request<DashboardOverview>(`/dashboard${params.size ? `?${params.toString()}` : ''}`)
@@ -95,7 +95,7 @@ export const api = {
   threadChannelsPage: (limit = 20, offset = 0) => request<PageResult<ThreadChannel>>(`/thread-channels?paged=1&limit=${limit}&offset=${offset}`),
   threadJobs: (limit = 100) => request<ThreadJob[]>(`/thread-jobs?limit=${limit}`),
   threadJobsPage: (limit = 20, offset = 0) => request<PageResult<ThreadJob>>(`/thread-jobs?paged=1&limit=${limit}&offset=${offset}`),
-  messageLogs: (filters: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string } = {}) => {
+  messageLogs: (filters: { limit?: number; offset?: number; botId?: string; sceneId?: string; status?: string; query?: string; origin?: string } = {}) => {
     const params = new URLSearchParams()
     for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
     return request<{ items: MessageLog[]; total: number }>(`/message-logs${params.size ? `?${params.toString()}` : ''}`)
