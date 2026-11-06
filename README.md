@@ -192,6 +192,10 @@ CODY_BOT_HUB_TRAEX_COMMAND=/absolute/server/path/to/traex
 
 把示例路径替换为服务器实际路径，配置文件权限建议为 `600`。该文件由生成的 systemd unit 读取；本地 `.env.example` 只是配置说明，不会被 Node 自动加载。使用已有 unit 时，需要更新 unit 才能加载 `service.env`。CLI 登录应由服务账号在服务器上完成，不能直接使用开发机的路径或登录态。只使用 TraeX 时无需安装 Codex；引擎按需初始化，连接失败会保留在已认证的 `/api/system-health` 中，默认引擎失败时整体状态为 `attention`。未使用引擎的失败不会影响默认引擎健康状态。
 
+## 场景的引擎与模型继承
+
+场景可独立选择 Codex 或 TraeX，再配置模型与推理强度。场景明确选择引擎时，留空的模型和推理强度继承该引擎的平台默认值；平台未配置时使用引擎账户默认值。旧场景未指定引擎时继续继承 Bot 的引擎及模型配置。切换场景引擎不会修改 Bot 或其他场景，新消息绑定到对应引擎的 Thread，原历史记录保留。
+
 ## Core 依赖
 
 `@codycodeagent/cody-web-core` 固定到经过验证的 Git Tag，确保不同机器安装到相同的 Feishu 与 Agent 会话底座。Core 提供 Codex/TraeX Runtime Profile、App Server 生命周期、协议归一化、Session Manager 与通用 Task 状态机；Hub 负责 Task 持久化、Bot 选择、路由、队列、权限和管理界面。

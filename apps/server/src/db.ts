@@ -57,6 +57,9 @@ export class HubStore {
           if (!database.prepare(`PRAGMA table_info(${table})`).all().some(row => row.name === column)) database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT '${initial}'`)
         }
       } },
+      { version: 4, name: 'scene-runtime-selection', up: database => {
+        if (!database.prepare('PRAGMA table_info(scenes)').all().some(row => row.name === 'runtime_kind')) database.exec("ALTER TABLE scenes ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT '' CHECK (runtime_kind IN ('', 'codex', 'traex'))")
+      } },
     ])
   }
 

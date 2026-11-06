@@ -1,3 +1,4 @@
+import { routeRuntimeKind } from '../route-runtime.js'
 import { FeishuProvider, feishuCardMention, type FeishuCard } from '@codycodeagent/cody-web-core/feishu'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
 import type { RuntimeResolvedModel } from '../runtime.js'
@@ -21,13 +22,13 @@ export class FeishuPresentation {
   }
 
   responseNote(route: ResolvedRoute, resolvedModel?: RuntimeResolvedModel): string {
-    const model = resolvedModel?.model || route.modelConfig.model || (route.bot.runtimeKind === 'traex' ? 'TraeX 默认' : 'Codex 默认')
+    const model = resolvedModel?.model || route.modelConfig.model || (routeRuntimeKind(route) === 'traex' ? 'TraeX 默认' : 'Codex 默认')
     const reasoningEffort = resolvedModel?.reasoningEffort || route.modelConfig.reasoningEffort
     const modelLabel = `${model}${reasoningEffort ? ` · ${reasoningEffort}` : ''}${resolvedModel?.fallback ? ' · 已回退' : ''}`
     return [
       `工作区：${route.workspace.name}`,
       `场景：${route.scene?.name ?? '默认路由'}`,
-      `引擎：${route.bot.runtimeKind === 'traex' ? 'TraeX' : 'Codex'}`,
+      `引擎：${routeRuntimeKind(route) === 'traex' ? 'TraeX' : 'Codex'}`,
       `技能包：${route.skillPackages.map(item => item.name).join('、') || '无'}`,
       `模型：${modelLabel}`,
       '权限：YOLO · 允许网络与工具',

@@ -6,6 +6,11 @@ import { HttpError, bool, number, optional, required, type Json } from './common
 export const rawString = (body: Json, key: string): string => typeof body[key] === 'string' ? String(body[key]) : ''
 export const stringList = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string').map(item => item.trim()).filter(Boolean) : []
 export const runtimeKind = (value: unknown): AgentRuntimeKind => value === 'traex' ? 'traex' : 'codex'
+export const sceneRuntimeKind = (value: unknown): AgentRuntimeKind | '' => {
+  if (value === undefined || value === '') return ''
+  if (value === 'codex' || value === 'traex') return value
+  throw new HttpError(400, 'Scene runtimeKind must be codex, traex, or empty to inherit the Bot')
+}
 export const botMessagePolicy = (value: unknown): BotMessagePolicy => value === 'reject' || value === 'mentioned' ? value : 'mentioned_or_scene'
 
 const sceneTimeoutInput = (value: unknown): number => {
@@ -23,7 +28,7 @@ export const sceneInput = (body: Json): Omit<SceneRecord, 'id' | 'createdAt' | '
     return keyword && weight > 0 ? [{ keyword, weight }] : []
   })
   const supportedMessageTypes = new Set<string>(FEISHU_MESSAGE_TYPES)
-  return { ...(body.turnTimeoutMinutes === undefined ? {} : { turnTimeoutMinutes: sceneTimeoutInput(body.turnTimeoutMinutes) }), ...(body.requireMention === undefined ? {} : { requireMention: bool(body.requireMention, true) }), completionStatisticsEnabled: bool(body.completionStatisticsEnabled, false), botId: required(body, 'botId'), workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), prompt: optional(body, 'prompt'), priority: number(body.priority, 100), enabled: bool(body.enabled, true), model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), retrieval: { skillBoosts, skillCandidateLimit: number(retrieval.skillCandidateLimit, 12), knowledgeCandidateLimit: number(retrieval.knowledgeCandidateLimit, 12), minimumScore: number(retrieval.minimumScore, 1) }, matcher: { chatIds: stringList(matcher.chatIds), messageTypes: stringList(matcher.messageTypes).filter(value => supportedMessageTypes.has(value)), textIncludes: stringList(matcher.textIncludes), cardTitleIncludes: stringList(matcher.cardTitleIncludes) }, skillPackageIds: stringList(body.skillPackageIds) }
+  return { ...(body.runtimeKind === undefined ? {} : { runtimeKind: sceneRuntimeKind(body.runtimeKind) }), ...(body.turnTimeoutMinutes === undefined ? {} : { turnTimeoutMinutes: sceneTimeoutInput(body.turnTimeoutMinutes) }), ...(body.requireMention === undefined ? {} : { requireMention: bool(body.requireMention, true) }), completionStatisticsEnabled: bool(body.completionStatisticsEnabled, false), botId: required(body, 'botId'), workspaceId: required(body, 'workspaceId'), name: required(body, 'name'), prompt: optional(body, 'prompt'), priority: number(body.priority, 100), enabled: bool(body.enabled, true), model: optional(body, 'model'), reasoningEffort: optional(body, 'reasoningEffort'), retrieval: { skillBoosts, skillCandidateLimit: number(retrieval.skillCandidateLimit, 12), knowledgeCandidateLimit: number(retrieval.knowledgeCandidateLimit, 12), minimumScore: number(retrieval.minimumScore, 1) }, matcher: { chatIds: stringList(matcher.chatIds), messageTypes: stringList(matcher.messageTypes).filter(value => supportedMessageTypes.has(value)), textIncludes: stringList(matcher.textIncludes), cardTitleIncludes: stringList(matcher.cardTitleIncludes) }, skillPackageIds: stringList(body.skillPackageIds) }
 }
 
 export const skillPackageInput = (body: Json): Omit<SkillPackageRecord, 'id' | 'createdAt' | 'updatedAt'> => ({
