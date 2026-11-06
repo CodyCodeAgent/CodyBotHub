@@ -488,8 +488,8 @@ export class ConversationRepository {
         ? '本轮同时检索技能包和当前 Agent 运行环境中的其他 Skill。'
         : skillNames.length ? '本轮优先使用技能包中的 Skill；无法满足时再检索当前 Agent 运行环境中的其他 Skill。' : ''
     const settings = this.deps.settings.getPlatformSettings()
-    const platformModel = bot.runtimeKind === 'codex' ? settings.defaultModel : ''
-    const platformEffort = bot.runtimeKind === 'codex' ? settings.defaultReasoningEffort : ''
+    const platformModel = bot.runtimeKind === 'codex' ? settings.defaultModel : settings.traexDefaultModel || ''
+    const platformEffort = bot.runtimeKind === 'codex' ? settings.defaultReasoningEffort : settings.traexDefaultReasoningEffort || ''
     const model = scene?.model || bot.model || platformModel
     const reasoningEffort = scene?.reasoningEffort || bot.reasoningEffort || platformEffort
     const modelSource: ModelConfigSource = scene?.model ? 'scene' : bot.model ? 'bot' : platformModel ? 'platform' : bot.runtimeKind === 'traex' ? 'runtime' : 'codex'

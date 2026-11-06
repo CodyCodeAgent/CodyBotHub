@@ -1,6 +1,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
+import { useRuntimeModels } from './useRuntimeModels'
 import { applySyncDraft, createScheduledTaskInput, validateDeliveryStep, validateTaskStep, type ScheduledSubmoduleOption } from '../scheduled-editor'
 import type { Bot, ChatMetadata, ModelCatalog, ScheduledTaskInput, ScheduledTemplate, SkillPackage, SkillSource, ToolPackage, Workspace, WorkspaceRepository } from '../types'
 
@@ -21,8 +22,11 @@ const workspaces = ref<Workspace[]>([]),
   sources = ref<SkillSource[]>([]),
   bots = ref<Bot[]>([]),
   chats = ref<ChatMetadata[]>([])
-const catalog = ref<ModelCatalog>({ items: [], defaultModel: '', defaultReasoningEffort: '' }),
-  inheritedModel = ref(''),
+const { catalog, loading: modelsLoading, error: modelError, load: fetchModels } = useRuntimeModels()
+const inheritedModel = computed(() => form.runtimeKind === 'traex' ? traexPlatformDefaultModel.value || catalog.value.defaultModel : platformDefaultModel.value || catalog.value.defaultModel)
+const
+  platformDefaultModel = ref(''),
+  traexPlatformDefaultModel = ref(''),
   dates = ref<string[]>([]),
   previewError = ref(''),
   repository = ref<WorkspaceRepository | null>(null),
@@ -42,11 +46,7 @@ const workspace = computed(() => workspaces.value.find((w) => w.id === form.work
 const isSync = computed(() => form.template === 'workspace_sync'),
   editTitle = computed(() => (id ? '编辑定时任务' : '新建定时任务'))
 const modelLoad = async () => {
-  try {
-    catalog.value = await api.models(form.runtimeKind)
-  } catch (e) {
-    error.value = e instanceof Error ? e.message : '无法加载模型目录'
-  }
+  if (await fetchModels(form.runtimeKind)) error.value = modelError.value
 }
 const preview = async () => {
   try {
@@ -207,7 +207,9 @@ onMounted(async () => {
     sources.value = so
     bots.value = bo
     chats.value = ch
-    inheritedModel.value = settings.defaultModel
+    platformDefaultModel.value = settings.defaultModel
+    traexPlatformDefaultModel.value = settings.traexDefaultModel ?? ''
+    form.runtimeKind = settings.defaultRuntimeKind ?? 'codex'
     if (id) {
       const task = await api.scheduledTask(id)
       Object.assign(form, task)
@@ -260,5 +262,5 @@ onUnmounted(() => {
   alive = false
   if (previewTimer) clearTimeout(previewTimer)
 })
-  return { id, step, loading, saving, error, notice, dirty, workspaces, catalog, inheritedModel, dates, previewError, repository, checking, skillRoots, preserveLocalFiles, moduleOptions, form, workspace, eligiblePackages, eligibleTools, eligibleSources, eligibleBots, eligibleChats, isSync, editTitle, inspect, changeWorkspace, next, previousStep, save, archive }
+  return { modelsLoading, id, step, loading, saving, error, notice, dirty, workspaces, catalog, inheritedModel, dates, previewError, repository, checking, skillRoots, preserveLocalFiles, moduleOptions, form, workspace, eligiblePackages, eligibleTools, eligibleSources, eligibleBots, eligibleChats, isSync, editTitle, inspect, changeWorkspace, next, previousStep, save, archive }
 }

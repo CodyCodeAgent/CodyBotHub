@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { GitBranch, RefreshCw } from 'lucide-vue-next'
+import EngineSelector from './EngineSelector.vue'
 import ModelConfigFields from './ModelConfigFields.vue'
 import type { ScheduledSubmoduleOption } from '../scheduled-editor'
 import type { ModelCatalog, ScheduledTaskInput, SkillPackage, SkillSource, ToolPackage, Workspace, WorkspaceRepository } from '../types'
@@ -8,6 +9,7 @@ defineProps<{
   workspaces: Workspace[]
   workspace: Workspace | undefined
   catalog: ModelCatalog
+  modelsLoading: boolean
   inheritedModel: string
   eligiblePackages: SkillPackage[]
   eligibleTools: ToolPackage[]
@@ -54,19 +56,15 @@ const changeWorkspace = () => emit('changeWorkspace')
                         <option v-for="w in workspaces" :key="w.id" :value="w.id">{{ w.name }}</option></select
                       ><small>{{ workspace?.path }} · 不需要绑定 Bot 或场景。</small>
                     </div>
-                    <div class="field">
-                      <label for="task-engine">AI 引擎</label
-                      ><select id="task-engine" v-model="form.runtimeKind">
-                        <option value="codex">Codex</option>
-                        <option value="traex">TraeX</option>
-                      </select>
-                    </div>
                   </div>
+                  <EngineSelector v-model="form.runtimeKind" />
                   <ModelConfigFields
+                    :disabled="modelsLoading"
                     :catalog="catalog"
                     v-model:model="form.model"
                     v-model:reasoning-effort="form.reasoningEffort"
-                    inherit-label="继承平台默认模型"
+                    :runtime-kind="form.runtimeKind"
+                    :inherit-label="form.runtimeKind === 'traex' ? '继承平台 TraeX 默认模型' : '继承平台 Codex 默认模型'"
                     :inherited-model="inheritedModel"
                   />
                   <div class="field">

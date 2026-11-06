@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { existsSync, mkdirSync } from 'node:fs'
+import { mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { SecretVault } from './crypto.js'
 import { HubStore } from './db.js'
@@ -11,6 +11,7 @@ import { SkillSyncService } from './skills.js'
 import { CopilotService } from './copilot.js'
 import { HubTaskService } from './tasks.js'
 import { ScheduledTaskService } from './scheduled.js'
+import { readRuntimeConfig } from './runtime-config.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const repositoryRoot = path.resolve(here, '../../..')
@@ -19,8 +20,12 @@ const webDist = process.env.CODY_BOT_HUB_WEB_DIST ?? path.join(repositoryRoot, '
 const host = process.env.CODY_BOT_HUB_HOST ?? '127.0.0.1'
 const port = Number(process.env.CODY_BOT_HUB_PORT ?? 4310)
 const startedAt = new Date()
+const runtimeConfig = readRuntimeConfig()
 
 const store = new HubStore(path.join(dataDir, 'cody-bot-hub.sqlite'))
+if (runtimeConfig.initialRuntime && !store.db.prepare('SELECT id FROM platform_settings WHERE id = 1').get()) {
+  store.setPlatformSettings({ ...store.getPlatformSettings(), defaultRuntimeKind: runtimeConfig.initialRuntime })
+}
 const interrupted = store.recoverInterruptedWork()
 if (interrupted.jobs || interrupted.messages || interrupted.tasks) console.warn(`[startup] recovered interrupted work: jobs=${interrupted.jobs} messages=${interrupted.messages} tasks=${interrupted.tasks}; queued jobs will resume`)
 const interruptedTools = store.recoverInterruptedToolExecutions()
@@ -28,10 +33,8 @@ if (interruptedTools) console.warn(`[startup] marked ${interruptedTools} interru
 const vault = await SecretVault.open(dataDir)
 const runtimeDirectory = path.join(dataDir, 'runtime')
 mkdirSync(runtimeDirectory, { recursive: true })
-const bundledCodex = '/Applications/ChatGPT.app/Contents/Resources/codex'
-const codexCommand = process.env.CODY_BOT_HUB_CODEX_COMMAND ?? process.env.CODEX_CLI_PATH ?? (process.platform === 'darwin' && existsSync(bundledCodex) ? bundledCodex : 'codex')
-const traexCommand = process.env.CODY_BOT_HUB_TRAEX_COMMAND ?? 'traex'
-const runtime = new CodyBotRuntime(store, runtimeDirectory, { codex: codexCommand, traex: traexCommand }, Number(process.env.CODY_BOT_HUB_TURN_TIMEOUT_MS ?? 15 * 60 * 1000))
+const runtime = new CodyBotRuntime(store, runtimeDirectory, runtimeConfig.commands, Number(process.env.CODY_BOT_HUB_TURN_TIMEOUT_MS ?? 15 * 60 * 1000))
+console.info(`[startup] default AI engine: ${store.getPlatformSettings().defaultRuntimeKind ?? 'codex'}; engines initialize on demand`)
 const feishu = new FeishuBotManager(store, vault, runtime, path.join(dataDir, 'attachments'))
 runtime.setToolPackageInvoker((call, binding) => feishu.invokeToolPackage(call, binding))
 const provisioning = new FeishuProvisioningService(store, vault, () => feishu.reload())
@@ -56,7 +59,8 @@ const server = createHubServer({
   },
   getSystemHealth: () => {
     const checkedAt = new Date(), storeHealth = store.systemHealth(), feishuHealth = feishu.health(), runtimeHealth = runtime.health()
-    const attention = feishuHealth.draining || !storeHealth.database.ok || storeHealth.queue.staleProcessing > 0 || feishuHealth.connectedProviders < feishuHealth.configuredBots
+    const defaultKind = store.getPlatformSettings().defaultRuntimeKind ?? 'codex'
+    const attention = feishuHealth.draining || !storeHealth.database.ok || storeHealth.queue.staleProcessing > 0 || feishuHealth.connectedProviders < feishuHealth.configuredBots || runtimeHealth.engines.some(engine => engine.kind === defaultKind && Boolean(engine.error))
     return {
       status: attention ? 'attention' : 'healthy', checkedAt: checkedAt.toISOString(), startedAt: startedAt.toISOString(),
       uptimeSeconds: Math.max(0, Math.floor((checkedAt.getTime() - startedAt.getTime()) / 1_000)), store: storeHealth, feishu: feishuHealth, runtime: runtimeHealth,

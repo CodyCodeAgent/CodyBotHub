@@ -13,8 +13,11 @@ export const handleConfigurationRoute = async ({ request, response, url, method,
         if (method === 'PUT' && url.pathname === '/api/settings') {
           const body = await readJson(request)
           const input = { basePrompt: optional(body, 'basePrompt'), defaultModel: optional(body, 'defaultModel'), defaultReasoningEffort: optional(body, 'defaultReasoningEffort'), modelFallbackEnabled: bool(body.modelFallbackEnabled, true), threadProfileRefreshIntervalSeconds: number(body.threadProfileRefreshIntervalSeconds, 5), threadProfileBatchSize: number(body.threadProfileBatchSize, 20) }
-          await runtime.validateModelSelection('codex', input.defaultModel, input.defaultReasoningEffort)
-          const result = store.setPlatformSettings(input)
+          const previous = store.getPlatformSettings()
+          const runtimeDefaults = { defaultRuntimeKind: body.defaultRuntimeKind === undefined ? previous.defaultRuntimeKind ?? 'codex' : runtimeKind(body.defaultRuntimeKind), traexDefaultModel: body.traexDefaultModel === undefined ? previous.traexDefaultModel ?? '' : optional(body, 'traexDefaultModel'), traexDefaultReasoningEffort: body.traexDefaultReasoningEffort === undefined ? previous.traexDefaultReasoningEffort ?? '' : optional(body, 'traexDefaultReasoningEffort') }
+          if (input.defaultModel !== previous.defaultModel || input.defaultReasoningEffort !== previous.defaultReasoningEffort) await runtime.validateModelSelection('codex', input.defaultModel, input.defaultReasoningEffort)
+          if (runtimeDefaults.traexDefaultModel !== (previous.traexDefaultModel ?? '') || runtimeDefaults.traexDefaultReasoningEffort !== (previous.traexDefaultReasoningEffort ?? '')) await runtime.validateModelSelection('traex', runtimeDefaults.traexDefaultModel, runtimeDefaults.traexDefaultReasoningEffort)
+          const result = store.setPlatformSettings({ ...input, ...runtimeDefaults })
           audit('settings.update', 'settings', 'platform', '更新平台设置', { defaultModel: result.defaultModel, defaultReasoningEffort: result.defaultReasoningEffort, modelFallbackEnabled: result.modelFallbackEnabled, threadProfileRefreshIntervalSeconds: result.threadProfileRefreshIntervalSeconds, threadProfileBatchSize: result.threadProfileBatchSize })
           return sendJson(response, 200, result)
         }

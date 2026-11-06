@@ -11,6 +11,24 @@ export type RuntimeResolvedModel = {
   fallback: boolean
 }
 
+export const scheduledModelRequest = (
+  kind: 'codex' | 'traex',
+  task: Pick<ResolvedModelConfig, 'model' | 'reasoningEffort' | 'fallbackEnabled'>,
+  platform: { model: string; reasoningEffort: string; traexModel?: string | undefined; traexReasoningEffort?: string | undefined },
+): ResolvedModelConfig => {
+  const platformModel = kind === 'codex' ? platform.model : platform.traexModel || ''
+  const platformEffort = kind === 'codex' ? platform.reasoningEffort : platform.traexReasoningEffort || ''
+  const model = task.model || platformModel
+  const reasoningEffort = task.reasoningEffort || platformEffort
+  return {
+    model,
+    reasoningEffort,
+    modelSource: model ? 'platform' : kind === 'traex' ? 'runtime' : 'codex',
+    reasoningEffortSource: reasoningEffort ? 'platform' : kind === 'traex' ? 'runtime' : 'codex',
+    fallbackEnabled: task.fallbackEnabled,
+  }
+}
+
 export const resolveRuntimeModel = (
   requested: ResolvedModelConfig,
   models: CodexModelOption[],
@@ -25,7 +43,7 @@ export const resolveRuntimeModel = (
   let fallback = false
   let modelSource = requested.modelSource
   if (requested.model && !selected) {
-    if (!requested.fallbackEnabled) throw new Error(`Model ${requested.model} is unavailable for the current Codex account`)
+    if (!requested.fallbackEnabled) throw new Error(`Model ${requested.model} is unavailable for the current ${runtimeDefaultSource === 'runtime' ? 'TraeX' : 'Codex'} account`)
     fallback = true
     modelSource = runtimeDefaultSource
   }

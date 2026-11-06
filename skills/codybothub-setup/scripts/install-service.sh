@@ -58,6 +58,7 @@ After=network-online.target
 
 [Service]
 EnvironmentFile=-$(escape_value "${HOME}/.config/codybothub/proxy.env")
+EnvironmentFile=-$(escape_value "${HOME}/.config/codybothub/service.env")
 Type=simple
 WorkingDirectory=$(escape_value "${REPOSITORY_DIR}")
 Environment=\"NODE_ENV=production\"

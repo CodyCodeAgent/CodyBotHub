@@ -15,20 +15,26 @@ export type EngineState = {
 export class EngineRegistry {
   private readonly states = new Map<AgentRuntimeKind, EngineState>()
   private readonly initializing = new Map<AgentRuntimeKind, Promise<EngineState>>()
+  private readonly failures = new Map<AgentRuntimeKind, string>()
 
   values(): IterableIterator<EngineState> { return this.states.values() }
 
   async ensure(kind: AgentRuntimeKind, create: () => Promise<EngineState>): Promise<EngineState> {
     const existing = this.states.get(kind)
     if (existing) {
-      await existing.host.ensureInitialized()
+      try { await existing.host.ensureInitialized(); this.failures.delete(kind) }
+      catch (error) { this.failures.set(kind, error instanceof Error ? error.message : String(error)); throw error }
       return existing
     }
     const pending = this.initializing.get(kind)
     if (pending) return pending
     const created = create().then(state => {
       this.states.set(kind, state)
+      this.failures.delete(kind)
       return state
+    }).catch(error => {
+      this.failures.set(kind, error instanceof Error ? error.message : String(error))
+      throw error
     }).finally(() => { this.initializing.delete(kind) })
     this.initializing.set(kind, created)
     return created
@@ -39,7 +45,8 @@ export class EngineRegistry {
     const engines = kinds.map(kind => {
       const engine = this.states.get(kind)
       const diagnostics = engine?.host.diagnostics()
-      return { kind, label: kind === 'traex' ? 'TraeX' : 'Codex', initialized: Boolean(engine && diagnostics?.initialized), attachedChannels: engine?.attached.size ?? 0, state: diagnostics?.lifecycle ?? 'not_started', error: diagnostics?.unavailableReason ?? '' }
+      const failure = this.failures.get(kind) || diagnostics?.unavailableReason || ''
+      return { kind, label: kind === 'traex' ? 'TraeX' : 'Codex', initialized: Boolean(engine && diagnostics?.initialized), attachedChannels: engine?.attached.size ?? 0, state: this.initializing.has(kind) ? 'initializing' : failure ? 'failed' : diagnostics?.lifecycle ?? 'not_started', error: failure }
     })
     return { initialized: engines.some(item => item.initialized), attachedChannels: engines.reduce((sum, item) => sum + item.attachedChannels, 0), engines }
   }
@@ -51,5 +58,6 @@ export class EngineRegistry {
       await engine.host.dispose()
     }))
     this.states.clear()
+    this.failures.clear()
   }
 }

@@ -5,7 +5,7 @@ import ScheduledTaskPlanStep from '../components/ScheduledTaskPlanStep.vue'
 import ScheduledTaskReviewStep from '../components/ScheduledTaskReviewStep.vue'
 import { formatTime } from '../scheduled'
 import { useScheduledTaskEditor } from '../composables/useScheduledTaskEditor'
-const { id, step, loading, saving, error, notice, dirty, workspaces, catalog, inheritedModel, dates, previewError, repository, checking, skillRoots, preserveLocalFiles, moduleOptions, form, workspace, eligiblePackages, eligibleTools, eligibleSources, eligibleBots, eligibleChats, isSync, editTitle, inspect, changeWorkspace, next, previousStep, save, archive } = useScheduledTaskEditor()
+const { modelsLoading, id, step, loading, saving, error, notice, dirty, workspaces, catalog, inheritedModel, dates, previewError, repository, checking, skillRoots, preserveLocalFiles, moduleOptions, form, workspace, eligiblePackages, eligibleTools, eligibleSources, eligibleBots, eligibleChats, isSync, editTitle, inspect, changeWorkspace, next, previousStep, save, archive } = useScheduledTaskEditor()
 </script>
 <template>
   <div class="page scheduler">
@@ -33,7 +33,7 @@ const { id, step, loading, saving, error, notice, dirty, workspaces, catalog, in
       <form @submit.prevent="step === 3 ? save() : next()">
         <div class="scheduler-editor-grid">
           <div class="scheduler-editor-main">
-            <ScheduledTaskGoalStep v-if="step === 1" :form="form" :workspaces="workspaces" :workspace="workspace" :catalog="catalog" :inherited-model="inheritedModel" :eligible-packages="eligiblePackages" :eligible-tools="eligibleTools" :eligible-sources="eligibleSources" :is-sync="isSync" :checking="checking" :repository="repository" :module-options="moduleOptions" v-model:skill-roots="skillRoots" v-model:preserve-local-files="preserveLocalFiles" @inspect="inspect" @change-workspace="changeWorkspace" />
+            <ScheduledTaskGoalStep v-if="step === 1" :form="form" :workspaces="workspaces" :workspace="workspace" :catalog="catalog" :models-loading="modelsLoading" :inherited-model="inheritedModel" :eligible-packages="eligiblePackages" :eligible-tools="eligibleTools" :eligible-sources="eligibleSources" :is-sync="isSync" :checking="checking" :repository="repository" :module-options="moduleOptions" v-model:skill-roots="skillRoots" v-model:preserve-local-files="preserveLocalFiles" @inspect="inspect" @change-workspace="changeWorkspace" />
             <ScheduledTaskPlanStep v-else-if="step === 2" :form="form" :preview-error="previewError" :eligible-bots="eligibleBots" :eligible-chats="eligibleChats" />
             <ScheduledTaskReviewStep v-else :form="form" :workspace="workspace" :inherited-model="inheritedModel" :is-sync="isSync" />
             <div v-if="error" class="error-banner" role="alert">{{ error }}</div>

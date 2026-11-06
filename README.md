@@ -165,6 +165,7 @@ pnpm dev
 - `CODY_BOT_HUB_WEB_DIST`：生产环境静态资源目录
 - `CODY_BOT_HUB_CODEX_COMMAND`：Codex CLI 可执行文件；macOS 会自动尝试 ChatGPT.app 内置的 Codex
 - `CODY_BOT_HUB_TRAEX_COMMAND`：TraeX CLI 可执行文件，默认 `traex`
+- `CODY_BOT_HUB_DEFAULT_RUNTIME`：新数据库的初始默认引擎，允许 `codex` / `traex`；已有平台设置不受此变量覆盖。
 - `CODY_BOT_HUB_MCP_TOKEN`：启用 `/mcp` 的 Bearer Token；未设置时 MCP 端点返回 503，飞书与管理端不受影响
 - `CODY_BOT_HUB_MCP_PRINCIPAL`：与上述 Token 绑定的稳定调用方身份，默认 `mcp-client`；客户端请求头不能覆盖该身份
 
@@ -181,6 +182,15 @@ pnpm dev
 服务器必须先安装所选 CLI，并确保服务账号能直接执行对应命令。TraeX 未安装时，现有 Codex Bot 继续正常运行；TraeX Bot 在首次读取模型或处理消息时会返回明确的 App Server 初始化错误。可以在运行总览的 Runtime 状态和服务日志中查看各引擎状态。
 
 Linux systemd 安装器会解析当前账号的 CLI 路径，并将 `~/.local/bin` 加入服务 PATH。TraeX 安装完成后，应以运行 CodyBotHub 的同一系统账号执行 `traex login status`；IDE Remote Server 的登录态不会自动等同于 TraeX CLI 登录态。
+
+服务端（包括 SG 环境）可在运行服务的账号下创建 `~/.config/codybothub/service.env`，为 systemd 单独配置引擎路径；代理配置仍放在同目录的 `proxy.env`。示例：
+
+```dotenv
+CODY_BOT_HUB_DEFAULT_RUNTIME=traex
+CODY_BOT_HUB_TRAEX_COMMAND=/absolute/server/path/to/traex
+```
+
+把示例路径替换为服务器实际路径，配置文件权限建议为 `600`。该文件由生成的 systemd unit 读取；本地 `.env.example` 只是配置说明，不会被 Node 自动加载。使用已有 unit 时，需要更新 unit 才能加载 `service.env`。CLI 登录应由服务账号在服务器上完成，不能直接使用开发机的路径或登录态。只使用 TraeX 时无需安装 Codex；引擎按需初始化，连接失败会保留在已认证的 `/api/system-health` 中，默认引擎失败时整体状态为 `attention`。未使用引擎的失败不会影响默认引擎健康状态。
 
 ## Core 依赖
 

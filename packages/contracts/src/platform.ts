@@ -36,6 +36,9 @@ export interface BotRecord {
 export type ModelConfigSource = 'scene' | 'bot' | 'platform' | 'codex' | 'runtime'
 
 export interface PlatformSettingsRecord {
+  defaultRuntimeKind?: AgentRuntimeKind
+  traexDefaultModel?: string
+  traexDefaultReasoningEffort?: string
   basePrompt: string
   defaultModel: string
   defaultReasoningEffort: string

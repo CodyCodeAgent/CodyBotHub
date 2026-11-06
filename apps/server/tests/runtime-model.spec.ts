@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CodexModelOption } from '@codycodeagent/cody-web-core/session'
-import { rankSkillCandidates, resolveRuntimeModel } from '../src/runtime-selection.js'
+import { rankSkillCandidates, resolveRuntimeModel, scheduledModelRequest } from '../src/runtime-selection.js'
 
 const model = (id: string, efforts: string[], isDefault = false): CodexModelOption => ({
   id, model: id, label: id, description: '', hidden: false, isDefault,
@@ -25,6 +25,25 @@ describe('model resolution', () => {
 
   it('rejects an unavailable model when fallback is disabled', () => {
     expect(() => resolveRuntimeModel({ model: 'removed-model', reasoningEffort: '', modelSource: 'scene', reasoningEffortSource: 'codex', fallbackEnabled: false }, models)).toThrow('unavailable')
+  })
+
+  it('reports the TraeX account when TraeX model fallback is disabled', () => {
+    expect(() => resolveRuntimeModel({ model: 'removed-model', reasoningEffort: '', modelSource: 'scene', reasoningEffortSource: 'runtime', fallbackEnabled: false }, models, '', '', 'runtime')).toThrow('current TraeX account')
+  })
+
+  it('keeps Codex platform defaults out of inherited TraeX scheduled tasks', () => {
+    expect(scheduledModelRequest('traex', { model: '', reasoningEffort: '', fallbackEnabled: true }, { model: 'codex-only', reasoningEffort: 'high' })).toEqual({
+      model: '', reasoningEffort: '', modelSource: 'runtime', reasoningEffortSource: 'runtime', fallbackEnabled: true,
+    })
+    expect(scheduledModelRequest('codex', { model: '', reasoningEffort: '', fallbackEnabled: true }, { model: 'codex-only', reasoningEffort: 'high' })).toEqual({
+      model: 'codex-only', reasoningEffort: 'high', modelSource: 'platform', reasoningEffortSource: 'platform', fallbackEnabled: true,
+    })
+  })
+
+  it('inherits the platform default for the selected engine before the account default', () => {
+    const platform = { model: 'codex-only', reasoningEffort: 'high', traexModel: 'fast-model', traexReasoningEffort: 'low' }
+    const requested = scheduledModelRequest('traex', { model: '', reasoningEffort: '', fallbackEnabled: false }, platform)
+    expect(resolveRuntimeModel(requested, models, 'default-model', 'medium', 'runtime')).toMatchObject({ model: 'fast-model', reasoningEffort: 'low', fallback: false })
   })
 })
 

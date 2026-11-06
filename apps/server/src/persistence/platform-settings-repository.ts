@@ -8,9 +8,10 @@ export class PlatformSettingsRepository {
   getPlatformSettings(): PlatformSettingsRecord {
     const row = this.db.prepare('SELECT * FROM platform_settings WHERE id = 1').get() as Row | undefined
     return row ? {
+      defaultRuntimeKind: row.default_runtime_kind === 'traex' ? 'traex' : 'codex', traexDefaultModel: String(row.traex_default_model), traexDefaultReasoningEffort: String(row.traex_default_reasoning_effort),
       basePrompt: String(row.base_prompt), defaultModel: String(row.default_model), defaultReasoningEffort: String(row.default_reasoning_effort), modelFallbackEnabled: Boolean(row.model_fallback_enabled),
       threadProfileRefreshIntervalSeconds: Number(row.thread_profile_refresh_interval_seconds), threadProfileBatchSize: Number(row.thread_profile_batch_size),
-    } : { basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true, threadProfileRefreshIntervalSeconds: 5, threadProfileBatchSize: 20 }
+    } : { defaultRuntimeKind: 'codex', traexDefaultModel: '', traexDefaultReasoningEffort: '', basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true, threadProfileRefreshIntervalSeconds: 5, threadProfileBatchSize: 20 }
   }
   getPlatformPrompt(): string { return this.getPlatformSettings().basePrompt }
   setPlatformPrompt(value: string): string {
@@ -23,6 +24,7 @@ export class PlatformSettingsRepository {
     this.db.prepare(`INSERT INTO platform_settings (id, base_prompt, default_model, default_reasoning_effort, model_fallback_enabled, thread_profile_refresh_interval_seconds, thread_profile_batch_size, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET base_prompt = excluded.base_prompt, default_model = excluded.default_model, default_reasoning_effort = excluded.default_reasoning_effort, model_fallback_enabled = excluded.model_fallback_enabled, thread_profile_refresh_interval_seconds = excluded.thread_profile_refresh_interval_seconds, thread_profile_batch_size = excluded.thread_profile_batch_size, updated_at = excluded.updated_at`)
       .run(input.basePrompt, input.defaultModel, input.defaultReasoningEffort, input.modelFallbackEnabled ? 1 : 0, interval, batchSize, now())
+    this.db.prepare('UPDATE platform_settings SET default_runtime_kind = ?, traex_default_model = ?, traex_default_reasoning_effort = ? WHERE id = 1').run(input.defaultRuntimeKind ?? 'codex', input.traexDefaultModel ?? '', input.traexDefaultReasoningEffort ?? '')
     return this.getPlatformSettings()
   }
 }
