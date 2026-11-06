@@ -89,13 +89,24 @@ export const handleConfigurationRoute = async ({ request, response, url, method,
           const body = await readJson(request)
           const bot = store.listBots().find(item => item.id === required(body, 'botId'))
           if (!bot) throw new HttpError(404, 'Bot not found')
-          await runtime.validateModelSelection(bot.runtimeKind, optional(body, 'model'), optional(body, 'reasoningEffort'))
-          const result = store.createScene(sceneInput(body))
+          const input = sceneInput(body)
+          await runtime.validateModelSelection(input.runtimeKind || bot.runtimeKind, input.model, input.reasoningEffort)
+          const result = store.createScene(input)
           audit('scene.create', 'scene', result.id, `创建场景 ${result.name}`)
           return sendJson(response, 201, result)
         }
         const sceneId = matchId(url.pathname, '/api/scenes/')
-        if (sceneId && method === 'PUT') { const body = await readJson(request); const bot = store.listBots().find(item => item.id === required(body, 'botId')); if (!bot) throw new HttpError(404, 'Bot not found'); await runtime.validateModelSelection(bot.runtimeKind, optional(body, 'model'), optional(body, 'reasoningEffort')); const result = store.updateScene(sceneId, sceneInput(body)); audit('scene.update', 'scene', result.id, `更新场景 ${result.name}`); return sendJson(response, 200, result) }
+        if (sceneId && method === 'PUT') {
+          const body = await readJson(request), input = sceneInput(body)
+          const bot = store.listBots().find(item => item.id === input.botId)
+          if (!bot) throw new HttpError(404, 'Bot not found')
+          const current = store.botScenes.getScene(sceneId)
+          const kind = (input.runtimeKind === undefined ? current.runtimeKind : input.runtimeKind) || bot.runtimeKind
+          await runtime.validateModelSelection(kind, input.model, input.reasoningEffort)
+          const result = store.updateScene(sceneId, input)
+          audit('scene.update', 'scene', result.id, `更新场景 ${result.name}`)
+          return sendJson(response, 200, result)
+        }
         if (sceneId && method === 'DELETE') { const item = store.listScenes().find(value => value.id === sceneId); store.deleteScene(sceneId); audit('scene.delete', 'scene', sceneId, `删除场景 ${item?.name ?? sceneId}`); response.statusCode = 204; return response.end() }
 
         if (method === 'GET' && url.pathname === '/api/skill-packages/page') return sendJson(response, 200, page(store.listSkillPackages(), url))

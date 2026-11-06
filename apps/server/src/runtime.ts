@@ -1,3 +1,4 @@
+import { routeRuntimeKind } from './route-runtime.js'
 import { existsSync, realpathSync } from 'node:fs'
 import { WorkspaceAccess } from './workspace-access.js'
 import type { ScheduledTaskInput } from './scheduled-types.js'
@@ -232,10 +233,10 @@ export class CodyBotRuntime {
 
   private async executeImpl(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true, executionMode: 'default' | 'read_only' = 'default', onTaskStatistics?: (statistics: RuntimeTaskStatistics) => void): Promise<string> {
     const channel = this.store.getThreadChannel(route.threadChannelId)
-    if (channel.runtimeKind !== route.bot.runtimeKind) throw new Error(`Thread Channel runtime mismatch: ${channel.runtimeKind} != ${route.bot.runtimeKind}`)
-    const engine = await this.ensureEngine(route.bot.runtimeKind)
+    if (channel.runtimeKind !== routeRuntimeKind(route)) throw new Error(`Thread Channel runtime mismatch: ${channel.runtimeKind} != ${routeRuntimeKind(route)}`)
+    const engine = await this.ensureEngine(routeRuntimeKind(route))
     const manager = engine.manager
-    const model = await this.resolveModel(manager, route.modelConfig, route.bot.runtimeKind)
+    const model = await this.resolveModel(manager, route.modelConfig, routeRuntimeKind(route))
     onModelResolved?.(model)
     const skillPlan = await this.resolveSkills(manager, route, message)
     onInvestigation?.(skillPlan.trace)
@@ -302,8 +303,8 @@ export class CodyBotRuntime {
       // Capture the baseline at native admission, after any earlier queued
       // turn finishes, so another task's tokens cannot enter this task.
       tokenTracker = new TaskTokenUsageTracker(engine.tokenTotals.get(activeThreadId) ?? null)
-      const outcome = await this.waitForCompletion(manager, channel.id, submission.completed, route.bot.runtimeKind, route.scene?.turnTimeoutMinutes)
-      if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || `${route.bot.runtimeKind === 'traex' ? 'TraeX' : 'Codex'} Turn failed`))
+      const outcome = await this.waitForCompletion(manager, channel.id, submission.completed, routeRuntimeKind(route), route.scene?.turnTimeoutMinutes)
+      if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || `${routeRuntimeKind(route) === 'traex' ? 'TraeX' : 'Codex'} Turn failed`))
       return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
     } finally {
       unsubscribeTokens()

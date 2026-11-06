@@ -215,7 +215,7 @@ export class FeishuBotManager {
       text: [scene?.matcher.textIncludes[0] ?? '', `工具包“${execution.toolPackageName}”执行结果如下。`, `执行状态：${execution.status}`, execution.error ? `错误：${execution.error}` : '', Array.isArray(execution.result) && execution.result.length ? `已成功步骤：${JSON.stringify(execution.result, null, 2)}` : execution.error ? '' : `结果：${JSON.stringify(execution.result, null, 2)}`, '请根据原任务和本次真实执行结果继续处理，并向用户说明最终状态。'].filter(Boolean).join('\n\n'),
       attachments: [], addressedToAgent: true, mentionsOtherRecipient: false, createdAtIso: new Date().toISOString(),
     }
-    const base = this.store.resolveRoute(execution.botId, message)
+    const base = this.store.resolveRoute(execution.botId, message, execution.sceneId ? { sceneId: execution.sceneId } : {})
     const route: ResolvedRoute = { ...base, threadChannelId: execution.threadChannelId, threadRouting: { type: 'fixed', matchedThreadId: execution.coreThreadId, score: 1, reason: '工具包执行结果续写原 Thread Channel' } }
     const originalLog = this.store.getMessageLogByBotMessage(execution.botId, execution.sourceMessageId)
     const sourceLog = this.store.getMessageLogForToolInvocation(originalLog.id, execution.threadChannelId)

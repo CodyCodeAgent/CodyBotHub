@@ -44,6 +44,7 @@ export interface ThreadProfileRecord {
 }
 
 export interface SceneRecord {
+  runtimeKind?: AgentRuntimeKind | ''
   requireMention: boolean
   turnTimeoutMinutes: number
   completionStatisticsEnabled: boolean

@@ -94,6 +94,7 @@ export class BotSceneRepository {
       this.db.prepare('UPDATE scenes SET completion_statistics_enabled = ? WHERE id = ?').run(input.completionStatisticsEnabled ? 1 : 0, id)
       this.db.prepare('UPDATE scenes SET require_mention = ? WHERE id = ?').run(input.requireMention === false ? 0 : 1, id)
       this.db.prepare('UPDATE scenes SET turn_timeout_minutes = ? WHERE id = ?').run(input.turnTimeoutMinutes ?? 15, id)
+      this.db.prepare('UPDATE scenes SET runtime_kind = ? WHERE id = ?').run(input.runtimeKind ?? '', id)
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getScene(id)
@@ -112,6 +113,7 @@ export class BotSceneRepository {
       this.db.prepare('UPDATE scenes SET completion_statistics_enabled = ? WHERE id = ?').run(input.completionStatisticsEnabled === undefined ? (this.getScene(id).completionStatisticsEnabled ? 1 : 0) : input.completionStatisticsEnabled ? 1 : 0, id)
       if (input.requireMention !== undefined) this.db.prepare('UPDATE scenes SET require_mention = ? WHERE id = ?').run(input.requireMention ? 1 : 0, id)
       if (input.turnTimeoutMinutes !== undefined) this.db.prepare('UPDATE scenes SET turn_timeout_minutes = ? WHERE id = ?').run(input.turnTimeoutMinutes, id)
+      if (input.runtimeKind !== undefined) this.db.prepare('UPDATE scenes SET runtime_kind = ? WHERE id = ?').run(input.runtimeKind, id)
       this.db.exec('COMMIT')
     } catch (error) { this.db.exec('ROLLBACK'); throw error }
     return this.getScene(id)
@@ -127,7 +129,7 @@ export class BotSceneRepository {
     let retrieval: Partial<SceneRecord['retrieval']> = {}
     try { retrieval = JSON.parse(String(row.retrieval_config_json)) as Partial<SceneRecord['retrieval']> } catch { /* use defaults */ }
     const skillPackageIds = (this.db.prepare('SELECT skill_package_id FROM scene_skill_packages WHERE scene_id = ? ORDER BY position').all(String(row.id)) as Row[]).map(item => String(item.skill_package_id))
-    return { turnTimeoutMinutes: Number(row.turn_timeout_minutes), requireMention: Boolean(row.require_mention), completionStatisticsEnabled: Boolean(row.completion_statistics_enabled), id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), model: String(row.model), reasoningEffort: String(row.reasoning_effort), retrieval: this.normalizeRetrieval(retrieval), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
+    return { runtimeKind: String(row.runtime_kind || '') as AgentRuntimeKind | '', turnTimeoutMinutes: Number(row.turn_timeout_minutes), requireMention: Boolean(row.require_mention), completionStatisticsEnabled: Boolean(row.completion_statistics_enabled), id: String(row.id), botId: String(row.bot_id), workspaceId: String(row.workspace_id), name: String(row.name), prompt: String(row.prompt), priority: Number(row.priority), enabled: Boolean(row.enabled), model: String(row.model), reasoningEffort: String(row.reasoning_effort), retrieval: this.normalizeRetrieval(retrieval), matcher: { chatIds: raw.chatIds ?? [], messageTypes: raw.messageTypes ?? [], textIncludes: raw.textIncludes ?? [], cardTitleIncludes: raw.cardTitleIncludes ?? [] }, skillPackageIds, createdAt: String(row.created_at), updatedAt: String(row.updated_at) }
   }
   private normalizeRetrieval(value?: Partial<SceneRecord['retrieval']>): SceneRecord['retrieval'] {
     const skillBoosts = Array.isArray(value?.skillBoosts) ? value.skillBoosts

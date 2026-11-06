@@ -1,3 +1,4 @@
+import { routeRuntimeKind } from '../route-runtime.js'
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type { ChannelInboundMessage } from '@codycodeagent/cody-web-core/channel'
@@ -38,7 +39,7 @@ export class ConversationRepository {
       thread_match_score, thread_match_reason, thread_channel_id, received_at, started_at, bot_reply_depth
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
-        id, message.eventId, message.messageId, botId, route.bot.name, route.bot.runtimeKind,
+        id, message.eventId, message.messageId, botId, route.bot.name, routeRuntimeKind(route),
         message.conversation.id, route.topicId, message.sender.id,
         message.content?.type ?? 'unknown', message.text.slice(0, 200_000), JSON.stringify(message.content?.raw ?? null).slice(0, 500_000),
         route.workspace.id, route.workspace.name, route.scene?.id ?? '', route.scene?.name ?? '',
@@ -477,6 +478,8 @@ export class ConversationRepository {
     const matched = candidates.find(candidate => hasSceneMatcher(candidate.matcher) && sceneMatches(candidate.matcher, message)) ?? null
     const fallback = candidates.find(candidate => !hasSceneMatcher(candidate.matcher)) ?? null
     const scene = explicit ?? matched ?? topicBound ?? groupBound ?? fallback
+    const selectedRuntime = scene?.runtimeKind || bot.runtimeKind
+    const inheritBotModel = !scene?.runtimeKind
     const routeSource: ResolvedRoute['routeSource'] = explicit ? 'explicit' : matched ? 'matcher' : topicBound ? 'topic_context' : groupBound ? 'group_binding' : 'default'
     const workspace = this.deps.workspaces.getWorkspace(scene?.workspaceId ?? bot.defaultWorkspaceId)
     const packages = scene ? this.deps.toolCatalog.listSkillPackages().filter(item => scene.skillPackageIds.includes(item.id)) : []
@@ -488,22 +491,24 @@ export class ConversationRepository {
         ? '本轮同时检索技能包和当前 Agent 运行环境中的其他 Skill。'
         : skillNames.length ? '本轮优先使用技能包中的 Skill；无法满足时再检索当前 Agent 运行环境中的其他 Skill。' : ''
     const settings = this.deps.settings.getPlatformSettings()
-    const platformModel = bot.runtimeKind === 'codex' ? settings.defaultModel : settings.traexDefaultModel || ''
-    const platformEffort = bot.runtimeKind === 'codex' ? settings.defaultReasoningEffort : settings.traexDefaultReasoningEffort || ''
-    const model = scene?.model || bot.model || platformModel
-    const reasoningEffort = scene?.reasoningEffort || bot.reasoningEffort || platformEffort
-    const modelSource: ModelConfigSource = scene?.model ? 'scene' : bot.model ? 'bot' : platformModel ? 'platform' : bot.runtimeKind === 'traex' ? 'runtime' : 'codex'
-    const reasoningEffortSource: ModelConfigSource = scene?.reasoningEffort ? 'scene' : bot.reasoningEffort ? 'bot' : platformEffort ? 'platform' : bot.runtimeKind === 'traex' ? 'runtime' : 'codex'
+    const platformModel = selectedRuntime === 'codex' ? settings.defaultModel : settings.traexDefaultModel || ''
+    const platformEffort = selectedRuntime === 'codex' ? settings.defaultReasoningEffort : settings.traexDefaultReasoningEffort || ''
+    const botModel = inheritBotModel ? bot.model : ''
+    const botEffort = inheritBotModel ? bot.reasoningEffort : ''
+    const model = scene?.model || botModel || platformModel
+    const reasoningEffort = scene?.reasoningEffort || botEffort || platformEffort
+    const modelSource: ModelConfigSource = scene?.model ? 'scene' : botModel ? 'bot' : platformModel ? 'platform' : selectedRuntime === 'traex' ? 'runtime' : 'codex'
+    const reasoningEffortSource: ModelConfigSource = scene?.reasoningEffort ? 'scene' : botEffort ? 'bot' : platformEffort ? 'platform' : selectedRuntime === 'traex' ? 'runtime' : 'codex'
     const layers = [settings.basePrompt, workspace.prompt, bot.prompt, scene?.prompt ?? '', ...packages.map(item => item.prompt)]
       .map(value => value.trim()).filter(Boolean)
     if (skillNames.length) layers.push(`当前场景技能包：${skillNames.join('、')}。${skillPolicy}`)
-    return { bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, threadChannelId: '', topicId, turnInstructions: layers.join('\n\n'), modelConfig: { model, reasoningEffort, modelSource, reasoningEffortSource, fallbackEnabled: settings.modelFallbackEnabled }, threadRouting: { type: 'fixed', matchedThreadId: '', score: 0, reason: '当前会话固定映射' } }
+    return { runtimeKind: selectedRuntime, bot, workspace, scene, skillPackages: packages, conversationMode: bot.conversationMode, replyInTopic: Boolean(topicId), routeSource, conversationKey, threadChannelId: '', topicId, turnInstructions: layers.join('\n\n'), modelConfig: { model, reasoningEffort, modelSource, reasoningEffortSource, fallbackEnabled: settings.modelFallbackEnabled }, threadRouting: { type: 'fixed', matchedThreadId: '', score: 0, reason: '当前会话固定映射' } }
   }
 
   resolveThreadRouting(route: ResolvedRoute, message: ChannelInboundMessage, options: { allowProfileReuse?: boolean } = {}): ResolvedRoute {
     const existing = this.db.prepare(`SELECT cb.thread_channel_id, tc.core_thread_id, tc.runtime_kind FROM conversation_bindings cb
       JOIN thread_channels tc ON tc.id = cb.thread_channel_id WHERE cb.conversation_key = ?`).get(route.conversationKey) as Row | undefined
-    if (existing && String(existing.runtime_kind || 'codex') === route.bot.runtimeKind) {
+    if (existing && String(existing.runtime_kind || 'codex') === routeRuntimeKind(route)) {
       const timestamp = now()
       this.db.prepare('UPDATE conversation_bindings SET updated_at = ? WHERE conversation_key = ?').run(timestamp, route.conversationKey)
       this.db.prepare('UPDATE thread_channels SET updated_at = ? WHERE id = ?').run(timestamp, String(existing.thread_channel_id))
@@ -524,7 +529,7 @@ export class ConversationRepository {
     }
     const cutoff = new Date(Date.now() - rule.timeWindowHours * 60 * 60_000).toISOString()
     const rows = this.db.prepare(`SELECT * FROM thread_profiles WHERE bot_id = ? AND workspace_id = ? AND scene_id = ? AND runtime_kind = ? AND last_active_at >= ?
-      ORDER BY last_active_at DESC LIMIT ?`).all(route.bot.id, route.workspace.id, route.scene.id, route.bot.runtimeKind, cutoff, rule.maxCandidates) as Row[]
+      ORDER BY last_active_at DESC LIMIT ?`).all(route.bot.id, route.workspace.id, route.scene.id, routeRuntimeKind(route), cutoff, rule.maxCandidates) as Row[]
     const current = extractThreadFeatures(message.text, message.content?.raw)
     let best: { row: Row; score: number; reason: string } | null = null
     for (const row of rows) {
@@ -561,17 +566,17 @@ export class ConversationRepository {
   private bindConversationToChannel(route: ResolvedRoute, message: ChannelInboundMessage, preferredChannelId = ''): { id: string; coreThreadId: string } {
     const current = this.db.prepare(`SELECT tc.id, tc.core_thread_id, tc.runtime_kind FROM conversation_bindings cb JOIN thread_channels tc ON tc.id = cb.thread_channel_id
       WHERE cb.conversation_key = ?`).get(route.conversationKey) as Row | undefined
-    if (current && String(current.runtime_kind || 'codex') === route.bot.runtimeKind) return { id: String(current.id), coreThreadId: String(current.core_thread_id) }
+    if (current && String(current.runtime_kind || 'codex') === routeRuntimeKind(route)) return { id: String(current.id), coreThreadId: String(current.core_thread_id) }
     const timestamp = now()
     const createdChannelId = preferredChannelId || randomUUID()
     this.db.exec('BEGIN IMMEDIATE')
     try {
       if (preferredChannelId) {
-        const target = this.db.prepare('SELECT id FROM thread_channels WHERE id = ? AND bot_id = ? AND runtime_kind = ?').get(preferredChannelId, route.bot.id, route.bot.runtimeKind)
+        const target = this.db.prepare('SELECT id FROM thread_channels WHERE id = ? AND bot_id = ? AND runtime_kind = ?').get(preferredChannelId, route.bot.id, routeRuntimeKind(route))
         if (!target) throw new Error('Thread Channel not found')
       } else {
         this.db.prepare(`INSERT INTO thread_channels (id, bot_id, runtime_kind, core_thread_id, created_at, updated_at) VALUES (?, ?, ?, '', ?, ?)`)
-          .run(createdChannelId, route.bot.id, route.bot.runtimeKind, timestamp, timestamp)
+          .run(createdChannelId, route.bot.id, routeRuntimeKind(route), timestamp, timestamp)
       }
       this.db.prepare(`INSERT INTO conversation_bindings (conversation_key, thread_channel_id, bot_id, conversation_mode, chat_id, topic_id, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)

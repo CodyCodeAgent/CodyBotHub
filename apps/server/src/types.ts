@@ -6,6 +6,7 @@ export type { ThreadRoutingDecisionType, ThreadRoutingDecision, ThreadRoutingRul
 
 
 export interface ResolvedRoute {
+  runtimeKind?: AgentRuntimeKind
   bot: BotRecord
   workspace: WorkspaceRecord
   scene: (SceneRecord & { skillPackageIds: string[] }) | null
