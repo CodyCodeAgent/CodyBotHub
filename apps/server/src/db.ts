@@ -47,6 +47,16 @@ export class HubStore {
     applyMigrations(this.db, [
       { version: 1, name: 'legacy-baseline', up: migrateLegacySchema },
       { version: 2, name: 'scheduled-schema', up: migrateScheduledSchema },
+      { version: 3, name: 'runtime-platform-defaults', up: database => {
+        for (const [table, column, initial] of [
+          ['platform_settings', 'default_runtime_kind', 'codex'],
+          ['platform_settings', 'traex_default_model', ''],
+          ['platform_settings', 'traex_default_reasoning_effort', ''],
+          ['copilot_sessions', 'runtime_kind', 'codex'],
+        ] as const) {
+          if (!database.prepare(`PRAGMA table_info(${table})`).all().some(row => row.name === column)) database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT NOT NULL DEFAULT '${initial}'`)
+        }
+      } },
     ])
   }
 

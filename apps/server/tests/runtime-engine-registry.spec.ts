@@ -5,8 +5,11 @@ describe('EngineRegistry', () => {
   it('allows retry after failed initialization', async () => {
     const registry = new EngineRegistry()
     await expect(registry.ensure('codex', async () => { throw new Error('unavailable') })).rejects.toThrow('unavailable')
+    expect(registry.health().engines.find(engine => engine.kind === 'codex')).toMatchObject({ state: 'failed', error: 'unavailable' })
+    expect(registry.health().engines.find(engine => engine.kind === 'traex')).toMatchObject({ state: 'not_started', error: '' })
     const state = { kind: 'codex', host: { ensureInitialized: async () => {}, diagnostics: () => ({ initialized: true }) }, manager: {}, attached: new Set(), attaching: new Map(), tokenTotals: new Map() }
     await expect(registry.ensure('codex', async () => state as never)).resolves.toBe(state)
+    expect(registry.health().engines.find(engine => engine.kind === 'codex')?.error).toBe('')
   })
 
   it('shares concurrent initialization and disposes every initialized engine', async () => {

@@ -7,6 +7,16 @@ import { handleInsightsRoute } from '../src/http/insights-router.js'
 import { handleConfigurationRoute } from '../src/http/configuration-router.js'
 
 describe('HTTP domain routers', () => {
+  it('discovers models and skills only through the configured default engine', async () => {
+    const store = new HubStore(':memory:')
+    store.setPlatformSettings({ ...store.getPlatformSettings(), defaultRuntimeKind: 'traex', traexDefaultModel: 'traex-model' })
+    expect(store.getPlatformSettings()).toMatchObject({ defaultRuntimeKind: 'traex', traexDefaultModel: 'traex-model', defaultModel: '' })
+    const response = { setHeader: vi.fn(), end: vi.fn() }
+    const runtime = { listModels: vi.fn(async (kind: string) => { if (kind !== 'traex') throw new Error('Codex is not installed'); return { items: [] } }) }
+    await handleSkillRoute({ request: { headers: {} }, response, method: 'GET', store, runtime, url: new URL('http://localhost/api/models') } as never)
+    expect(runtime.listModels).toHaveBeenCalledExactlyOnceWith('traex')
+    store.close()
+  })
   it('dispatches Copilot and account paths without claiming unrelated domains', async () => {
     const store = new HubStore(':memory:')
     const actor = store.createAdminAccount({ loginName: 'admin', displayName: 'Admin', passwordHash: 'hash' })

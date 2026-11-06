@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BookOpenCheck, Bot, Boxes, ClipboardList, Clock3, GitBranch, LayoutDashboard, LibraryBig, LogOut, Menu, MessageSquareText, PackageCheck, Puzzle, Route, Settings, Users, Workflow, Wrench, X } from 'lucide-vue-next'
+import { BookOpenCheck, Cpu, Bot, Boxes, ClipboardList, Clock3, GitBranch, LayoutDashboard, LibraryBig, LogOut, Menu, MessageSquareText, PackageCheck, Puzzle, Route, Settings, Users, Workflow, Wrench, X } from 'lucide-vue-next'
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from './api'
@@ -33,6 +33,7 @@ const groups = [
     { to: '/messages', label: '消息记录', icon: MessageSquareText },
   ] },
   { label: '系统', items: [
+    { to: '/engines', label: 'AI 引擎', icon: Cpu },
     { to: '/accounts', label: '账号管理', icon: Users },
     { to: '/audit-logs', label: '操作记录', icon: ClipboardList },
     { to: '/settings', label: '平台设置', icon: Settings },

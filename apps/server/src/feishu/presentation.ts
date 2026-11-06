@@ -21,7 +21,7 @@ export class FeishuPresentation {
   }
 
   responseNote(route: ResolvedRoute, resolvedModel?: RuntimeResolvedModel): string {
-    const model = resolvedModel?.model || route.modelConfig.model || 'Codex 默认'
+    const model = resolvedModel?.model || route.modelConfig.model || (route.bot.runtimeKind === 'traex' ? 'TraeX 默认' : 'Codex 默认')
     const reasoningEffort = resolvedModel?.reasoningEffort || route.modelConfig.reasoningEffort
     const modelLabel = `${model}${reasoningEffort ? ` · ${reasoningEffort}` : ''}${resolvedModel?.fallback ? ' · 已回退' : ''}`
     return [

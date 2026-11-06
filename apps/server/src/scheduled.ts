@@ -115,7 +115,7 @@ export class ScheduledTaskService {
     this.sync.acknowledgeRecovery(root)
   }
   async validate(body: unknown): Promise<ScheduledTaskInput> {
-    const config = schema.parse(body),
+    const config = schema.parse({ runtimeKind: this.hub.getPlatformSettings().defaultRuntimeKind ?? 'codex', ...(body && typeof body === 'object' ? body : {}) }),
       workspace = this.hub.getWorkspace(config.workspaceId)
     realpathSync.native(workspace.path)
     validatePreservedPaths(config.sync.preserveLocalFiles || [])

@@ -11,7 +11,7 @@ import type { HubStore } from './db.js'
 import { TaskTokenUsageTracker, threadTokenCounters, type TaskTokenUsage } from './task-statistics.js'
 import { readSkillSearchTags, WorkspaceResourceIndex, type KnowledgeResource } from './resources.js'
 import type { AgentRuntimeKind, InvestigationSkillRecord, InvestigationTraceRecord, InvestigationToolRecord, ModelConfigSource, ResolvedModelConfig, ResolvedRoute, ToolPackageRecord } from './types.js'
-import { rankSkillCandidates, resolveRuntimeModel, type RuntimeResolvedModel } from './runtime-selection.js'
+import { rankSkillCandidates, resolveRuntimeModel, scheduledModelRequest, type RuntimeResolvedModel } from './runtime-selection.js'
 import { EngineRegistry, type EngineState } from './runtime-engine-registry.js'
 import { buildCopilotContext, buildRouteContext } from './runtime-contexts.js'
 
@@ -122,7 +122,7 @@ export class CodyBotRuntime {
       attached.add(bindingId)
       const threadId = manager.snapshot(bindingId)!.threadId
       input.onThread(threadId)
-      const model = await this.resolveModel(manager, { model: input.config.model || settings.defaultModel, reasoningEffort: input.config.reasoningEffort || settings.defaultReasoningEffort, modelSource: 'platform', reasoningEffortSource: 'platform', fallbackEnabled: settings.modelFallbackEnabled }, input.config.runtimeKind)
+      const model = await this.resolveModel(manager, scheduledModelRequest(input.config.runtimeKind, { model: input.config.model, reasoningEffort: input.config.reasoningEffort, fallbackEnabled: settings.modelFallbackEnabled }, { model: settings.defaultModel, reasoningEffort: settings.defaultReasoningEffort, traexModel: settings.traexDefaultModel, traexReasoningEffort: settings.traexDefaultReasoningEffort }), input.config.runtimeKind)
       input.onModel(model)
       let answer = ''
       const unsubscribe = manager.subscribe(event => {
@@ -185,7 +185,15 @@ export class CodyBotRuntime {
     return this.workspaceAccess.use(input.workspacePath, () => this.executeCopilotImpl(input))
   }
   private async executeCopilotImpl(input: CopilotExecutionInput): Promise<string> {
-    const engine = await this.ensureEngine('codex'), manager = engine.manager, bindingId = `copilot:${input.sessionId}`
+    const settings = this.store.getPlatformSettings()
+    const kind = settings.defaultRuntimeKind ?? 'codex'
+    const session = this.store.db.prepare('SELECT runtime_kind FROM copilot_sessions WHERE id = ?').get(input.sessionId)
+    if (session && session.runtime_kind !== kind) {
+      this.resetCopilotSession(input.sessionId)
+      this.store.db.prepare("UPDATE copilot_sessions SET core_thread_id = '', runtime_kind = ? WHERE id = ?").run(kind, input.sessionId)
+      input = { ...input, coreThreadId: '' }
+    }
+    const engine = await this.ensureEngine(kind), manager = engine.manager, bindingId = `copilot:${input.sessionId}`
     const context = buildCopilotContext(input)
     if (!engine.attached.has(bindingId)) {
       let threadId = input.coreThreadId
@@ -194,8 +202,7 @@ export class CodyBotRuntime {
       engine.attached.add(bindingId)
       if (threadId) input.onThreadResolved?.(threadId)
     } else manager.setContext(bindingId, context)
-    const settings = this.store.getPlatformSettings()
-    const model = await this.resolveModel(manager, { model: settings.defaultModel, reasoningEffort: settings.defaultReasoningEffort, modelSource: 'platform', reasoningEffortSource: 'platform', fallbackEnabled: settings.modelFallbackEnabled }, 'codex')
+    const model = await this.resolveModel(manager, scheduledModelRequest(kind, { model: '', reasoningEffort: '', fallbackEnabled: settings.modelFallbackEnabled }, { model: settings.defaultModel, reasoningEffort: settings.defaultReasoningEffort, traexModel: settings.traexDefaultModel, traexReasoningEffort: settings.traexDefaultReasoningEffort }), kind)
     let turnId = '', answer = ''
     const unsubscribe = manager.subscribe(event => {
       if (event.threadId !== (manager.snapshot(bindingId)?.threadId ?? input.coreThreadId) || (turnId && event.turnId && event.turnId !== turnId)) return
@@ -211,7 +218,7 @@ export class CodyBotRuntime {
         ...(model.model ? { model: model.model } : {}), ...(model.reasoningEffort ? { effort: model.reasoningEffort as TurnInput['effort'] } : {}),
       }, 'queue', `copilot:${input.sessionId}:${Date.now()}`)
       turnId = (await submission.started).turnId
-      const outcome = await this.waitForCompletion(manager, bindingId, submission.completed, 'codex')
+      const outcome = await this.waitForCompletion(manager, bindingId, submission.completed, kind)
       if (outcome.terminalEvent.type === 'turn.failed') throw new Error(String(outcome.terminalEvent.data.error || 'Copilot Turn failed'))
       return outcome.assistantText.trim() || answer.trim() || '任务已完成，但没有可显示的文本结果。'
     } finally {
@@ -355,11 +362,12 @@ export class CodyBotRuntime {
     if (!model && !reasoningEffort) return
     const catalog = await this.listModels(kind)
     const selected = model ? catalog.items.find(item => item.id === model || item.model === model) : undefined
-    if (model && !selected) throw new Error(`Model ${model} is unavailable for the current Codex account`)
+    const runtimeLabel = kind === 'traex' ? 'TraeX' : 'Codex'
+    if (model && !selected) throw new Error(`Model ${model} is unavailable for the current ${runtimeLabel} account`)
     if (reasoningEffort && selected?.supportedReasoningEfforts.length && !selected.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort'])) {
       throw new Error(`Reasoning effort ${reasoningEffort} is unsupported by model ${selected.id || selected.model}`)
     }
-    if (reasoningEffort && !selected && !catalog.items.some(item => item.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort']))) throw new Error(`Reasoning effort ${reasoningEffort} is unavailable for the current Codex account`)
+    if (reasoningEffort && !selected && !catalog.items.some(item => item.supportedReasoningEfforts.includes(reasoningEffort as CodexModelOption['defaultReasoningEffort']))) throw new Error(`Reasoning effort ${reasoningEffort} is unavailable for the current ${runtimeLabel} account`)
   }
 
   private async ensureEngine(kind: AgentRuntimeKind): Promise<EngineState> {

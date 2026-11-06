@@ -18,9 +18,9 @@ export const handleSkillRoute = async ({ request, response, url, method, store, 
         if (method === 'GET' && url.pathname === '/api/skills') {
           const workspace = store.listWorkspaces().find(item => item.id === url.searchParams.get('workspaceId'))
           if (!workspace) throw new HttpError(404, 'Workspace not found')
-          return sendJson(response, 200, (await runtime.listSkills(workspace.path, runtimeKind(url.searchParams.get('runtimeKind')))).filter(skill => skill.enabled))
+          return sendJson(response, 200, (await runtime.listSkills(workspace.path, runtimeKind(url.searchParams.get('runtimeKind') ?? store.getPlatformSettings().defaultRuntimeKind))).filter(skill => skill.enabled))
         }
-        if (method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, await runtime.listModels(runtimeKind(url.searchParams.get('runtimeKind'))))
+        if (method === 'GET' && url.pathname === '/api/models') return sendJson(response, 200, await runtime.listModels(runtimeKind(url.searchParams.get('runtimeKind') ?? store.getPlatformSettings().defaultRuntimeKind)))
 
         if (method === 'GET' && url.pathname === '/api/skill-sources/page') return sendJson(response, 200, page(store.listSkillSources(), url))
         if (method === 'GET' && url.pathname === '/api/skill-sources') return sendJson(response, 200, store.listSkillSources())
@@ -60,7 +60,7 @@ export const handleSkillRoute = async ({ request, response, url, method, store, 
         }
         if (method === 'GET' && url.pathname === '/api/workspace-resources') {
           const workspace = store.getWorkspace(url.searchParams.get('workspaceId') ?? '')
-          const resources = await runtime.workspaceResources(workspace.path, url.searchParams.get('query') ?? '', runtimeKind(url.searchParams.get('runtimeKind')))
+          const resources = await runtime.workspaceResources(workspace.path, url.searchParams.get('query') ?? '', runtimeKind(url.searchParams.get('runtimeKind') ?? store.getPlatformSettings().defaultRuntimeKind))
           const knowledge = page(resources.knowledge, url)
           return sendJson(response, 200, { ...resources, knowledge: knowledge.items, knowledgeTotal: knowledge.total })
         }

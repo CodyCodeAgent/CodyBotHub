@@ -2,33 +2,37 @@
 import { CircleDot, Pencil, Plus, Trash2, Workflow, X } from 'lucide-vue-next'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { api, type MessageTypeOption } from '../api'
+import { useRuntimeModels } from '../composables/useRuntimeModels'
 import ModelConfigFields from '../components/ModelConfigFields.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import type { Bot, ChatMetadata, ModelCatalog, PlatformSettings, Scene, SkillPackage, Workspace } from '../types'
 const pageSize = 20
 const items = ref<Scene[]>([]), bots = ref<Bot[]>([]), workspaces = ref<Workspace[]>([]), packages = ref<SkillPackage[]>([]), messageTypeOptions = ref<MessageTypeOption[]>([]), total = ref(0), offset = ref(0), loading = ref(false), open = ref(false), saving = ref(false), error = ref('')
-const catalog = ref<ModelCatalog>({ items: [], defaultModel: '', defaultReasoningEffort: '' })
+const { catalog, loading: modelsLoading, error: modelError, load: fetchModels } = useRuntimeModels()
 const platform = ref<PlatformSettings>({ basePrompt: '', defaultModel: '', defaultReasoningEffort: '', modelFallbackEnabled: true, threadProfileRefreshIntervalSeconds: 5, threadProfileBatchSize: 20 })
 const chats = ref<ChatMetadata[]>([]), chatInput = ref<HTMLTextAreaElement | null>(null), chatPickerFocused = ref(false)
 const form = reactive({ turnTimeoutMinutes: 15, requireMention: true, completionStatisticsEnabled: false, id: '', botId: '', workspaceId: '', name: '', prompt: '', priority: 100, enabled: true, model: '', reasoningEffort: '', chatIdsText: '', messageTypes: [] as string[], textIncludesText: '', cardTitleIncludesText: '', skillPackageIds: [] as string[], retrievalBoostsText: '', skillCandidateLimit: 12, knowledgeCandidateLimit: 12, minimumScore: 1 })
 const selectedBot = computed(() => bots.value.find(item => item.id === form.botId))
 const availableWorkspaces = computed(() => workspaces.value.filter(item => selectedBot.value?.workspaceIds.includes(item.id)))
 const availablePackages = computed(() => packages.value.filter(item => item.workspaceId === form.workspaceId))
-const inheritedModel = computed(() => selectedBot.value?.model || platform.value.defaultModel || catalog.value.defaultModel)
+const inheritedModel = computed(() => selectedBot.value?.model || (selectedBot.value?.runtimeKind === 'traex' ? platform.value.traexDefaultModel || catalog.value.defaultModel : platform.value.defaultModel || catalog.value.defaultModel))
 const chatTrigger = computed(() => { const line = form.chatIdsText.split('\n').at(-1)?.trim() ?? ''; return line.startsWith('@') ? line.slice(1).trim().toLocaleLowerCase() : null })
 const chatSuggestions = computed(() => {
   if (!chatPickerFocused.value || chatTrigger.value === null) return []
   const selected = new Set(form.chatIdsText.split('\n').map(value => value.trim()).filter(value => value && !value.startsWith('@')))
   return chats.value.filter(item => item.botId === form.botId && !selected.has(item.chatId) && (!chatTrigger.value || item.name.toLocaleLowerCase().includes(chatTrigger.value) || item.chatId.toLocaleLowerCase().includes(chatTrigger.value))).slice(0, 10)
 })
-const load = async () => { loading.value = true; try { const [page, botItems, workspaceItems, packageItems, typeItems, models, settings] = await Promise.all([api.scenesPage(pageSize, offset.value), api.bots(), api.workspaces(), api.skillPackages(), api.feishuMessageTypes(), api.models(), api.settings()]); items.value = page.items; total.value = page.total; bots.value = botItems; workspaces.value = workspaceItems; packages.value = packageItems; messageTypeOptions.value = typeItems; catalog.value = models; platform.value = settings } finally { loading.value = false } }
+const load = async () => { loading.value = true; try { const [page, botItems, workspaceItems, packageItems, typeItems, settings] = await Promise.all([api.scenesPage(pageSize, offset.value), api.bots(), api.workspaces(), api.skillPackages(), api.feishuMessageTypes(), api.settings()]); items.value = page.items; total.value = page.total; bots.value = botItems; workspaces.value = workspaceItems; packages.value = packageItems; messageTypeOptions.value = typeItems; platform.value = settings } finally { loading.value = false } }
 const move = async (value: number) => { offset.value = value; await load() }
 onMounted(load)
 const loadChats = async (botId: string) => { if (!botId) return; try { const current = await api.chats({ botId }); chats.value = [...chats.value.filter(item => item.botId !== botId), ...current] } catch { /* Chat ID can still be entered manually. */ } }
-const loadRuntimeModels = async () => { try { catalog.value = await api.models(selectedBot.value?.runtimeKind ?? 'codex') } catch (e) { catalog.value = { items: [], defaultModel: '', defaultReasoningEffort: '' }; if (open.value) error.value = `${selectedBot.value?.runtimeKind === 'traex' ? 'TraeX' : 'Codex'} 运行时暂不可用：${e instanceof Error ? e.message : '无法读取模型'}` } }
-watch(() => form.botId, botId => { if (open.value && !availableWorkspaces.value.some(item => item.id === form.workspaceId)) form.workspaceId = selectedBot.value?.defaultWorkspaceId ?? availableWorkspaces.value[0]?.id ?? ''; if (open.value) { form.model = ''; form.reasoningEffort = ''; void loadChats(botId); void loadRuntimeModels() } })
+const loadRuntimeModels = async () => {
+  if (await fetchModels(selectedBot.value?.runtimeKind ?? 'codex')) error.value = modelError.value
+}
+watch(() => form.botId, botId => { if (open.value && !availableWorkspaces.value.some(item => item.id === form.workspaceId)) form.workspaceId = selectedBot.value?.defaultWorkspaceId ?? availableWorkspaces.value[0]?.id ?? ''; if (open.value) { form.model = ''; form.reasoningEffort = ''; void loadChats(botId); void loadRuntimeModels() } }, { flush: 'sync' })
 watch(() => form.workspaceId, () => { if (open.value) form.skillPackageIds = form.skillPackageIds.filter(id => availablePackages.value.some(item => item.id === id)) })
 const edit = (item?: Scene) => {
+  open.value = false
   form.requireMention = item?.requireMention ?? true
   form.turnTimeoutMinutes = item?.turnTimeoutMinutes ?? 15
   form.completionStatisticsEnabled = item?.completionStatisticsEnabled ?? false
@@ -65,7 +69,7 @@ const matcherSummary = (item: Scene) => {
       <div class="field"><span class="field-label">状态</span><label class="check-card"><input v-model="form.enabled" type="checkbox" /><span>启用这个场景</span></label><small>场景只影响每轮路由，不改变 Bot 的会话模式或 Codex Thread。</small></div>
       <div class="field"><span class="field-label">回复触发</span><label class="check-card"><input v-model="form.requireMention" type="checkbox" /><span>仅 @ 当前机器人时回复</span></label><small>开启后，群聊和话题中的消息必须明确 @ 当前机器人；关闭后，匹配场景的消息也可自动回复。私聊不受此开关限制。</small></div>
       <div class="field"><span class="field-label">完成通知与统计</span><label class="check-card"><input v-model="form.completionStatisticsEnabled" type="checkbox" /><span>发送任务统计卡片</span></label><small>仅在用户明确 @ 当前机器人时，完整回复送达后单独 @ 发起人，展示执行耗时、Token 用量和输入输出字符数。自动接话不发送。</small></div>
-      <ModelConfigFields :catalog="catalog" :model="form.model" :reasoning-effort="form.reasoningEffort" inherit-label="继承 Bot / 平台默认模型" :inherited-model="inheritedModel" @update:model="form.model = $event" @update:reasoning-effort="form.reasoningEffort = $event" />
+      <ModelConfigFields :catalog="catalog" :model="form.model" :reasoning-effort="form.reasoningEffort" :runtime-kind="selectedBot?.runtimeKind ?? 'codex'" :disabled="modelsLoading" :inherit-label="selectedBot?.runtimeKind === 'traex' ? '继承 Bot / TraeX 默认模型' : '继承 Bot / 平台默认模型'" :inherited-model="inheritedModel" @update:model="form.model = $event" @update:reasoning-effort="form.reasoningEffort = $event" />
       <div class="field"><label for="scene-chat-ids">群 Chat ID</label><div class="skill-picker"><textarea id="scene-chat-ids" ref="chatInput" v-model="form.chatIdsText" rows="3" class="mono" placeholder="输入 @ 搜索已发现的群，也可每行粘贴一个 oc_xxx" @focus="chatPickerFocused = true" @blur="chatPickerFocused = false" /><div v-if="chatPickerFocused && chatTrigger !== null" class="skill-suggestion-menu" role="listbox"><button v-for="chat in chatSuggestions" :key="chat.chatId" type="button" @mousedown.prevent="selectChat(chat)"><strong>{{ chat.name || '未命名群' }}</strong><span>{{ chat.mode === 'topic' ? '话题群' : '普通群' }}</span><code>{{ chat.chatId }}</code></button><div v-if="!chatSuggestions.length" class="skill-suggestion-status">没有匹配的已发现群，仍可直接填写 Chat ID。</div></div></div><small>输入 <code>@群名</code> 选择当前 Bot 已经接触过的群；每行保存一个 Chat ID，留空表示不限制群。</small></div>
       <div class="field"><span class="field-label">消息类型</span><div class="check-grid message-type-grid"><label v-for="type in messageTypeOptions" :key="type.value" class="check-card"><input type="checkbox" :checked="form.messageTypes.includes(type.value)" @change="toggleMessageType(type.value)" /><span><strong>{{ type.label }}</strong><code>{{ type.value }}</code></span></label></div><small>留空表示匹配所有支持的消息类型。</small></div>
       <div class="field"><label for="text-includes">文本包含</label><textarea id="text-includes" v-model="form.textIncludesText" rows="3" placeholder="故障\n报警" /></div>
