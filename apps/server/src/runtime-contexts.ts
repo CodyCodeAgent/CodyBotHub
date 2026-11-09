@@ -2,10 +2,19 @@ import { realpathSync } from 'node:fs'
 import type { ExecutionContext } from '@codycodeagent/cody-web-core/session'
 import type { CopilotExecutionInput } from './runtime.js'
 import type { ResolvedRoute } from './types.js'
+import { reportingTool, supportsAgentTaskReporting } from './agent-task-reporting.js'
 
 export function buildRouteContext(route: ResolvedRoute, resourceInstructions = '', toolContract = '', authorizedNames = ''): ExecutionContext {
     const cwd = realpathSync.native(route.workspace.path)
-    const developerInstructions = [route.turnInstructions, toolContract].filter(Boolean).join('\n\n')
+    const reporting = supportsAgentTaskReporting(cwd)
+    const reportingInstructions = reporting ? [
+      '## CodyBotHub 机器人任务上报接入',
+      '本宿主使用 codybothub.agent_task 调用工作区 agent-task-lifecycle CLI。真实机器人、会话和当前消息身份由宿主在每次调用时注入，不需要也不得手填 BOTMUX 身份、修改注册表或复制凭证。',
+      '用户主动要求注册时读取 register-agent-reporting Skill，然后调用 agent_task command=register。name 只生成预览，向用户展示名称并取得当前预览的明确确认后，才传 confirmationId 保存。仅 registered=true 表示完成注册。注册对话不记录任务。',
+      '普通问答、oncall、alarm 通过 agent_task start/wait/resume/finish 上报。start 的真实入站消息 ID 由宿主绑定；持续追问沿用 taskKey。未注册返回 skipped 后正常回复，不询问名称或主动注册。',
+      'CodyBotHub 负责原会话通知和最终答复；此受管 CLI 不使用 --notify、--send 或 feedback-send，不调用 BotMux。已有 Skill 的身份变量和投递规则在本宿主以本段受管入口为准。只有拿到 Base 真实回执才能声称远程上报成功。',
+    ].join('\n\n') : ''
+    const developerInstructions = [route.turnInstructions, toolContract, reportingInstructions].filter(Boolean).join('\n\n')
     return {
       thread: {
         cwd,
@@ -33,7 +42,7 @@ export function buildRouteContext(route: ResolvedRoute, resourceInstructions = '
               },
               required: ['packageId', 'arguments', 'reason'], additionalProperties: false,
             },
-          }],
+          }, ...(reporting ? [reportingTool] : [])],
         }],
       },
       turn: {

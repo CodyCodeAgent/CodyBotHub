@@ -15,6 +15,7 @@ import type { AgentRuntimeKind, InvestigationSkillRecord, InvestigationTraceReco
 import { rankSkillCandidates, resolveRuntimeModel, scheduledModelRequest, type RuntimeResolvedModel } from './runtime-selection.js'
 import { EngineRegistry, type EngineState } from './runtime-engine-registry.js'
 import { buildCopilotContext, buildRouteContext } from './runtime-contexts.js'
+import { AgentTaskReporting, reportingContext, reportingRuntimeEnvironment, supportsAgentTaskReporting, type ReportingContext } from './agent-task-reporting.js'
 
 export { rankSkillCandidates, resolveRuntimeModel, type RuntimeResolvedModel } from './runtime-selection.js'
 
@@ -150,10 +151,12 @@ export class CodyBotRuntime {
     }, input.runId, input.signal)
   }
 
-  private static readonly TOOL_CONTRACT_VERSION = 2
+  private static readonly TOOL_CONTRACT_VERSION = 3
   private readonly engines = new EngineRegistry()
   private readonly resources = new WorkspaceResourceIndex()
   private readonly activeToolContexts = new Map<string, { sourceLogId: string; invocationAllowed: boolean }>()
+  private readonly activeReportingContexts = new Map<string, ReportingContext>()
+  private readonly reporting: AgentTaskReporting
   private readonly activeCopilotContexts = new Map<string, { sessionId: string; accountId: string; workspaceId: string }>()
   private toolInvoker: ((call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string; sourceLogId: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>) | null = null
   private copilotToolInvoker: ((call: { tool: string; arguments: Record<string, unknown>; sessionId: string; accountId: string; workspaceId: string }) => Promise<Record<string, unknown>>) | null = null
@@ -163,7 +166,10 @@ export class CodyBotRuntime {
     private readonly runtimeDirectory: string,
     private readonly commands: Partial<Record<AgentRuntimeKind, string>> = { codex: 'codex', traex: 'traex' },
     private readonly turnTimeoutMs = 15 * 60 * 1000,
-  ) { this.workspaceAccess = new WorkspaceAccess(path.join(runtimeDirectory,'workspace-pauses.json')) }
+  ) {
+    this.workspaceAccess = new WorkspaceAccess(path.join(runtimeDirectory,'workspace-pauses.json'))
+    this.reporting = new AgentTaskReporting(runtimeDirectory)
+  }
 
   setToolPackageInvoker(invoker: (call: { callId: string; packageId: string; arguments: Record<string, unknown>; reason: string; sourceLogId: string }, binding: ThreadBinding) => Promise<Record<string, unknown>>): void {
     this.toolInvoker = invoker
@@ -240,7 +246,7 @@ export class CodyBotRuntime {
     onModelResolved?.(model)
     const skillPlan = await this.resolveSkills(manager, route, message)
     onInvestigation?.(skillPlan.trace)
-    const migrationContext = await this.ensureThreadChannel(engine, channel, route, skillPlan.instructions, skillPlan.requiresDynamicTools, sourceLogId)
+    const migrationContext = await this.ensureThreadChannel(engine, channel, route, skillPlan.instructions, skillPlan.requiresDynamicTools || supportsAgentTaskReporting(route.workspace.path), sourceLogId)
     const activeThreadId = manager.snapshot(channel.id)?.threadId ?? channel.threadId
     if (activeThreadId) onThreadResolved?.(activeThreadId)
     const resourceInstructions = [skillPlan.instructions, migrationContext].filter(Boolean).join('\n\n')
@@ -300,6 +306,9 @@ export class CodyBotRuntime {
       const submission = manager.submit(channel.id, turn, 'queue', channelCommandId(message))
       turnId = (await submission.started).turnId
       startedAt = Date.now()
+      // Bind only after native admission: a queued Turn must not replace the
+      // current Turn's identity. Synthetic tool results are not inbound rounds.
+      if (toolInvocationAllowed && message.provider === 'feishu' && supportsAgentTaskReporting(route.workspace.path)) this.activeReportingContexts.set(channel.id, reportingContext(route, message, activeThreadId))
       // Capture the baseline at native admission, after any earlier queued
       // turn finishes, so another task's tokens cannot enter this task.
       tokenTracker = new TaskTokenUsageTracker(engine.tokenTotals.get(activeThreadId) ?? null)
@@ -310,6 +319,7 @@ export class CodyBotRuntime {
       unsubscribeTokens()
       unsubscribe()
       if (this.activeToolContexts.get(channel.id)?.sourceLogId === sourceLogId) this.activeToolContexts.delete(channel.id)
+      if (this.activeReportingContexts.get(channel.id)?.messageId === message.messageId) this.activeReportingContexts.delete(channel.id)
       onTaskStatistics?.({ tokenUsage: tokenTracker?.result() ?? null, startedAt })
     }
   }
@@ -381,10 +391,17 @@ export class CodyBotRuntime {
     const host = createRuntimeAppServerHost(kind, {
       command: this.commands[kind] || kind,
       cwd: this.runtimeDirectory,
+      env: reportingRuntimeEnvironment(),
       initializeParams: { clientInfo: { name: 'cody-bot-hub', title: 'CodyBotHub', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } },
     })
     const dynamicTools: DynamicToolProvider = { invoke: async (call, binding) => {
       const args = call.arguments && typeof call.arguments === 'object' && !Array.isArray(call.arguments) ? call.arguments as Record<string, unknown> : {}
+      if (call.namespace === 'codybothub' && call.tool === 'agent_task') {
+        const active = this.activeReportingContexts.get(binding.id)
+        if (!active) throw new Error('Task reporting has no active Feishu message context')
+        const result = await this.reporting.invoke(active, args)
+        return { contentItems: [{ type: 'inputText', text: JSON.stringify(result) }], success: true }
+      }
       if (call.namespace === 'codybothub_tasks') {
         const runId = this.scheduledContexts.get(binding.id)
         if (!runId || !this.scheduledInvoker) throw new Error('定时任务执行上下文不存在')
