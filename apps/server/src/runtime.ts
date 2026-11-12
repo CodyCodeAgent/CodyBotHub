@@ -15,6 +15,7 @@ import type { AgentRuntimeKind, InvestigationSkillRecord, InvestigationTraceReco
 import { rankSkillCandidates, resolveRuntimeModel, scheduledModelRequest, type RuntimeResolvedModel } from './runtime-selection.js'
 import { EngineRegistry, type EngineState } from './runtime-engine-registry.js'
 import { buildCopilotContext, buildRouteContext } from './runtime-contexts.js'
+import type { SenderIdentity } from './feishu/sender-identity.js'
 
 export { rankSkillCandidates, resolveRuntimeModel, type RuntimeResolvedModel } from './runtime-selection.js'
 
@@ -231,7 +232,7 @@ export class CodyBotRuntime {
     return this.workspaceAccess.use(args[0].workspace.path, () => this.executeImpl(...args))
   }
 
-  private async executeImpl(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true, executionMode: 'default' | 'read_only' = 'default', onTaskStatistics?: (statistics: RuntimeTaskStatistics) => void): Promise<string> {
+  private async executeImpl(route: ResolvedRoute, message: ChannelInboundMessage, attachments: RuntimeAttachment[] = [], onProgress?: (progress: RuntimeProgress) => void, onModelResolved?: (model: RuntimeResolvedModel) => void, onInvestigation?: (trace: InvestigationTraceRecord) => void, onThreadResolved?: (threadId: string) => void, sourceLogId = '', toolInvocationAllowed = true, executionMode: 'default' | 'read_only' = 'default', onTaskStatistics?: (statistics: RuntimeTaskStatistics) => void, senderIdentity?: SenderIdentity): Promise<string> {
     const channel = this.store.getThreadChannel(route.threadChannelId)
     if (channel.runtimeKind !== routeRuntimeKind(route)) throw new Error(`Thread Channel runtime mismatch: ${channel.runtimeKind} != ${routeRuntimeKind(route)}`)
     const engine = await this.ensureEngine(routeRuntimeKind(route))
@@ -244,7 +245,7 @@ export class CodyBotRuntime {
     const activeThreadId = manager.snapshot(channel.id)?.threadId ?? channel.threadId
     if (activeThreadId) onThreadResolved?.(activeThreadId)
     const resourceInstructions = [skillPlan.instructions, migrationContext].filter(Boolean).join('\n\n')
-    manager.setContext(channel.id, this.context(route, resourceInstructions))
+    manager.setContext(channel.id, this.context(route, resourceInstructions, senderIdentity))
     const localImages = attachments.filter(attachment => attachment.type === 'image').map(attachment => ({ path: attachment.path }))
     const turn: TurnInput = {
       input: buildTurnUserInput({
@@ -493,10 +494,10 @@ export class CodyBotRuntime {
     ].join('\n\n')
   }
 
-  private context(route: ResolvedRoute, resourceInstructions = ''): ExecutionContext {
+  private context(route: ResolvedRoute, resourceInstructions = '', senderIdentity?: SenderIdentity): ExecutionContext {
     const toolContract = this.toolPackageContract(route)
     const authorizedNames = this.authorizedToolPackages(route).map(item => `${item.name}=${item.id}`).join('；')
-    return buildRouteContext(route, resourceInstructions, toolContract, authorizedNames)
+    return buildRouteContext(route, resourceInstructions, toolContract, authorizedNames, senderIdentity)
   }
 
 
