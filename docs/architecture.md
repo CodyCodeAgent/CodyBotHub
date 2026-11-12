@@ -120,6 +120,8 @@ The Device Flow creates a Personal Agent application. Tenant-specific permission
 
 The shared provider resolves `nonsupport` and reduced interactive-card events through the message-detail API, retries exhausted WebSocket connections, normalizes inline rich-text mentions and resources, and downloads attachments with bounded size and safe local names.
 
+For human-authored turns, the Hub passes the sender's application-scoped Feishu Open ID, available name, and available email to the Agent as per-turn application context. The email is resolved through Core's cached user metadata lookup; the Bot application needs `contact:user.base:readonly` and `contact:user.email:readonly`, and the sender must be in its visible range. Missing permissions or email do not block a turn: the Open ID remains available. This context is included in the native Agent turn history, so Bot operators should grant email scope only when their use case needs it.
+
 ## Process lifecycle
 
 - One process owns one shared `AppServerHost` and `CodexSessionManager`.

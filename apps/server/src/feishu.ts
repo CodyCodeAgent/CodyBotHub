@@ -12,6 +12,7 @@ import { FeishuChannelDispatcher } from './feishu/dispatch.js'
 import { shouldAcceptRoutedMessage, shouldSendTaskStatistics, senderOpenId } from './feishu/ingress.js'
 import { FeishuPresentation } from './feishu/presentation.js'
 import { FeishuApproval } from './feishu/approval.js'
+import { resolveSenderIdentity } from './feishu/sender-identity.js'
 
 type ManagedProvider = { provider: FeishuProvider; fingerprint: string; botName: string; state: string; error: string }
 
@@ -450,6 +451,7 @@ export class FeishuBotManager {
     }
     try {
       const attachments = await this.downloadAttachments(botId, provider, message)
+      const senderIdentity = await resolveSenderIdentity(provider, message)
       const text = await this.runtime.execute(
         route,
         message,
@@ -468,6 +470,7 @@ export class FeishuBotManager {
           tokenUsage = statistics.tokenUsage
           if (statistics.startedAt !== null) processingStartedAt = statistics.startedAt
         },
+        senderIdentity,
       )
       if (patchTimer) { clearTimeout(patchTimer); patchTimer = null }
       await patchTail
