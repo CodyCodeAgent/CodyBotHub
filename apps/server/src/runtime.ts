@@ -1,3 +1,4 @@
+import { materializeAttachmentText } from '@codycodeagent/cody-web-core/composer'
 import { routeRuntimeKind } from './route-runtime.js'
 import { existsSync, realpathSync } from 'node:fs'
 import { WorkspaceAccess } from './workspace-access.js'
@@ -577,13 +578,9 @@ export class CodyBotRuntime {
   }
 
   private messageText(text: string, attachments: RuntimeAttachment[]): string {
-    const files = attachments.filter(attachment => attachment.type !== 'image')
-    if (!files.length) return text
-    const manifest = files.map(attachment => [
-      `- ${attachment.type}：${attachment.name}`,
-      `  本地路径：${attachment.path}`,
-      `  大小：${attachment.sizeBytes} 字节`,
-    ].join('\n')).join('\n')
-    return [text, `以下飞书附件已经下载到本机。需要读取内容时，请直接读取列出的本地路径：\n${manifest}`].filter(Boolean).join('\n\n')
+    return materializeAttachmentText(text, attachments.filter(attachment => attachment.type !== 'image').map(attachment => ({
+      id: attachment.path, name: attachment.name, path: attachment.path,
+      mimeType: 'application/octet-stream', size: attachment.sizeBytes,
+    })))
   }
 }
