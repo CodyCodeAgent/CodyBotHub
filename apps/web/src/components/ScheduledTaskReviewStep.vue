@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { scheduleLabel } from '../scheduled'
+import { scheduleLabel, scheduledModeLabel } from '../scheduled'
 import type { ScheduledTaskInput, Workspace } from '../types'
 defineProps<{ form: ScheduledTaskInput; workspace: Workspace | undefined; inheritedModel: string; isSync: boolean }>()
 </script>
@@ -10,7 +10,7 @@ defineProps<{ form: ScheduledTaskInput; workspace: Workspace | undefined; inheri
                   <h2>{{ form.name }}</h2>
                   <p class="scheduler-hint">
                     {{ workspace?.name }} · {{ form.runtimeKind }} ·
-                    {{ form.mode === 'maintenance' ? '维护与工具执行' : '只读分析' }}
+                    {{ scheduledModeLabel(form.mode) }}
                   </p>
                   <pre class="scheduler-prompt">{{ form.prompt }}</pre>
                   <dl class="scheduler-definition">

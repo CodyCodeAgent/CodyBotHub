@@ -45,5 +45,5 @@ export interface SystemHealth {
 
 export type { ScheduleConfig, WorkspaceSyncConfig, ScheduledTaskInput, ScheduledTask, ScheduledRunSummary, ScheduledRun, ScheduledRunStatus, ScheduledEvent, ScheduledAction } from '@cody-bot-hub/contracts/scheduled'
 export interface SchedulerHealth { draining:boolean; activeTasks:number; queuedTasks:number; ready:boolean; totalTasks:number; enabledTasks:number; recentRuns:number; recentFailed:number; awaitingApproval:number }
-export interface ScheduledTemplate {id:string;name:string;description:string;mode:'read_only'|'maintenance';prompt:string}
+export interface ScheduledTemplate {id:string;name:string;description:string;mode:'read_only'|'yolo';prompt:string}
 export interface WorkspaceRepository {root:string;branch:string;commit:string;changes:string;submodules:Array<{path:string;initialized:boolean;commit:string}>}

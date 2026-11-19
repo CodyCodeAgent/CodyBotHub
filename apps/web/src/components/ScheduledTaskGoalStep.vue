@@ -3,7 +3,7 @@ import { GitBranch, RefreshCw } from 'lucide-vue-next'
 import EngineSelector from './EngineSelector.vue'
 import ModelConfigFields from './ModelConfigFields.vue'
 import type { ScheduledSubmoduleOption } from '../scheduled-editor'
-import type { ModelCatalog, ScheduledTaskInput, SkillPackage, SkillSource, ToolPackage, Workspace, WorkspaceRepository } from '../types'
+import type { ModelCatalog, ScheduledTaskInput, SkillPackage, SkillSource, Workspace, WorkspaceRepository } from '../types'
 defineProps<{
   form: ScheduledTaskInput
   workspaces: Workspace[]
@@ -12,7 +12,6 @@ defineProps<{
   modelsLoading: boolean
   inheritedModel: string
   eligiblePackages: SkillPackage[]
-  eligibleTools: ToolPackage[]
   eligibleSources: SkillSource[]
   isSync: boolean
   checking: boolean
@@ -89,9 +88,12 @@ const changeWorkspace = () => emit('changeWorkspace')
                   <div class="field">
                     <label for="task-mode">能力模式</label
                     ><select id="task-mode" v-model="form.mode">
-                      <option value="read_only">只读分析</option>
-                      <option value="maintenance">维护与工具执行</option></select
-                    ><small>AI 原生沙箱为只读；受管同步和授权工具包通过平台工具执行。</small>
+                      <option v-if="form.mode === 'maintenance'" value="maintenance" disabled>旧版维护模式（请选择新模式）</option>
+                      <option value="read_only">只读</option>
+                      <option value="yolo">YOLO</option></select
+                    ><small v-if="form.mode === 'yolo'">使用服务账号的完整系统权限自动执行命令和网络操作，不逐次审批。</small>
+                    <small v-else-if="form.mode === 'maintenance'">旧任务仍按原受管规则运行；保存修改前请选择新模式。</small>
+                    <small v-else>只读沙箱允许网络查询；无法直接修改工作区文件。</small>
                   </div>
                   <div class="field">
                     <span class="field-label">技能包</span>
@@ -104,21 +106,9 @@ const changeWorkspace = () => emit('changeWorkspace')
                     </div>
                     <small v-if="!eligiblePackages.length">当前工作区没有技能包，仍可使用原生工作区技能与知识。</small>
                   </div>
-                  <div v-if="form.mode === 'maintenance'" class="field">
-                    <span class="field-label">允许申请或执行的工具包</span>
-                    <div class="check-grid">
-                      <label v-for="t in eligibleTools" :key="t.id" class="check-card"
-                        ><input v-model="form.toolPackageIds" type="checkbox" :value="t.id" /><span
-                          >{{ t.name }}
-                          <small>{{ t.approvalRequired ? '需要人工确认' : '按配置自动执行' }}</small></span
-                        ></label
-                      >
-                    </div>
-                    <small>只有明确选中的工具包可以调用，原审批人和配置规则继续生效。</small>
-                  </div>
                 </div>
               </section>
-              <section v-if="isSync || form.mode === 'maintenance'" class="panel">
+              <section v-if="isSync || form.mode !== 'read_only'" class="panel">
                 <div class="panel-header">
                   <h2><GitBranch :size="17" />工作区资源同步</h2>
                   <button
@@ -132,7 +122,7 @@ const changeWorkspace = () => emit('changeWorkspace')
                 </div>
                 <div class="scheduler-form-body">
                   <p class="scheduler-hint">
-                    这些配置只在 AI 调用受管同步工具时生效。工作区本地修改会被保留，不自动清理。
+                    这些配置只在 AI 调用受管同步工具时生效。YOLO 的原生命令不受这些配置约束。
                   </p>
                   <div v-if="repository" class="notice">
                     当前分支：{{ repository.branch || '游离 HEAD' }} · {{ repository.commit.slice(0, 12) }}<br />{{

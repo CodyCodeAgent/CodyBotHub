@@ -26,7 +26,7 @@ const schema = z.object({
   runtimeKind: z.enum(['codex', 'traex']).default('codex'),
   model: z.string().max(200).default(''),
   reasoningEffort: z.string().max(40).default(''),
-  mode: z.enum(['read_only', 'maintenance']).default('read_only'),
+  mode: z.enum(['read_only', 'yolo', 'maintenance']).default('read_only'),
   skillPackageIds: ids,
   toolPackageIds: ids,
   schedule: z.object({
@@ -114,7 +114,7 @@ export class ScheduledTaskService {
     this.runtime.workspaceAccess.resume(root)
     this.sync.acknowledgeRecovery(root)
   }
-  async validate(body: unknown): Promise<ScheduledTaskInput> {
+  async validate(body: unknown, previous?: ScheduledTask): Promise<ScheduledTaskInput> {
     const config = schema.parse({ runtimeKind: this.hub.getPlatformSettings().defaultRuntimeKind ?? 'codex', ...(body && typeof body === 'object' ? body : {}) }),
       workspace = this.hub.getWorkspace(config.workspaceId)
     realpathSync.native(workspace.path)
@@ -123,10 +123,13 @@ export class ScheduledTaskService {
     for (const id of config.skillPackageIds)
       if (!this.hub.listSkillPackages().some((p) => p.id === id && p.workspaceId === workspace.id))
         throw new Error('技能包不存在或属于其他工作区')
+    if (config.mode === 'maintenance' && previous?.mode !== 'maintenance')
+      throw new Error('旧版维护模式不能用于新任务，请选择只读或 YOLO')
+    if (config.mode !== 'maintenance' && config.toolPackageIds.length)
+      throw new Error('只读和 YOLO 任务不关联工具包')
     for (const id of config.toolPackageIds) {
       const pack = this.hub.getToolPackage(id)
       if (pack.workspaceId !== workspace.id || !pack.enabled) throw new Error('工具包不可用或属于其他工作区')
-      if (config.mode === 'read_only') throw new Error('只读任务不能挂载可执行工具包，请选择维护与工具执行模式')
       if (pack.approvalRequired && (!config.output.botId || !config.output.chatId))
         throw new Error('工具包需要人工确认，请配置发送 Bot 和审批接收群')
     }
@@ -139,14 +142,14 @@ export class ScheduledTaskService {
     for (const id of config.sync.sourceIds)
       if (!this.hub.listSkillSources().some((s) => s.id === id && s.workspaceId === workspace.id))
         throw new Error('技能源不属于当前工作区')
-    if (config.template === 'workspace_sync' && config.mode !== 'maintenance')
-      throw new Error('资源同步模板需要维护与工具执行模式')
+    if (config.template === 'workspace_sync' && config.mode === 'read_only')
+      throw new Error('资源同步模板需要 YOLO 模式')
     await this.runtime.validateModelSelection(config.runtimeKind, config.model, config.reasoningEffort)
     return config
   }
   async save(body: unknown, actor: string, id?: string): Promise<ScheduledTask> {
-    const input = await this.validate(body),
-      previous = id ? this.records.getTask(id) : null
+    const previous = id ? this.records.getTask(id) : undefined,
+      input = await this.validate(body, previous)
     if (previous && this.records.active(id!)) {
       if (previous.workspaceId !== input.workspaceId || previous.runtimeKind !== input.runtimeKind)
         throw new Error('任务尚未结束，不能切换工作区或引擎')
@@ -427,7 +430,7 @@ export class ScheduledTaskService {
       return result
     }
     if (tool === 'sync_workspace') {
-      if (run.snapshot.mode !== 'maintenance') throw new Error('当前任务未授权工作区维护')
+      if (run.snapshot.mode === 'read_only') throw new Error('当前任务未授权工作区维护')
       const selection = z
         .object({
           preserveLocalFiles: z.array(z.string().min(1).max(1000)).max(100).optional(),

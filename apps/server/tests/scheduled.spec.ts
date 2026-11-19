@@ -118,6 +118,8 @@ const toolFixture = (s: ReturnType<typeof setup>, approval = true) => {
   s.input.output = { botId: bot.id, chatId: 'oc_test', when: 'always' }
   return { bot, pack, tool }
 }
+const saveLegacyTask = (s: ReturnType<typeof setup>) =>
+  s.service.records.save(s.input, 'admin', s.input.enabled ? nextScheduleDates(s.input.schedule)[0]! : '')
 describe('scheduled plan calculations', () => {
   it('computes interval dates from activation time', () => {
     expect(
@@ -262,7 +264,7 @@ describe('persistent AI scheduled tasks', () => {
       expect(input.coreThreadId).toBe('approval-thread')
       return 'verified completed action'
     })
-    const task = await s.service.save(s.input, 'admin'),
+    const task = saveLegacyTask(s),
       run = s.service.trigger(task.id, 'admin')
     await finish(s.service)
     let current = s.service.records.getRun(run.id)
@@ -296,7 +298,7 @@ describe('persistent AI scheduled tasks', () => {
       ).rejects.toThrow('拒绝')
       return 'request rejected; no action'
     })
-    const task = await s.service.save(s.input, 'admin'),
+    const task = saveLegacyTask(s),
       run = s.service.trigger(task.id, 'admin')
     await finish(s.service)
     const action = s.service.records.getRun(run.id).actions[0]!
@@ -322,7 +324,7 @@ describe('persistent AI scheduled tasks', () => {
         })
       return 'summary'
     })
-    const task = await s.service.save(s.input, 'admin'),
+    const task = saveLegacyTask(s),
       run = s.service.trigger(task.id, 'admin')
     await finish(s.service)
     const action = s.service.records.getRun(run.id).actions[0]!
@@ -332,17 +334,20 @@ describe('persistent AI scheduled tasks', () => {
     expect(s.service.records.getRun(run.id).actions[0]).toMatchObject({ status: 'failed' })
     expect(s.service.records.getRun(run.id).actions[0]!.error).toContain('配置已变化')
   })
-  it('checks workspace ownership and approval transport before saving', async () => {
+  it('keeps legacy maintenance tasks without allowing new tasks to select it', async () => {
     const s = setup(),
       { pack } = toolFixture(s)
-    await expect(s.service.save({ ...s.input, mode: 'read_only' }, 'admin')).rejects.toThrow('只读')
+    await expect(s.service.save(s.input, 'admin')).rejects.toThrow('旧版维护模式')
+    const task = saveLegacyTask(s)
+    await expect(s.service.save({ ...s.input, mode: 'read_only' }, 'admin', task.id)).rejects.toThrow('不关联工具包')
     await expect(
-      s.service.save({ ...s.input, output: { botId: '', chatId: '', when: 'always' } }, 'admin')
+      s.service.save({ ...s.input, output: { botId: '', chatId: '', when: 'always' } }, 'admin', task.id)
     ).rejects.toThrow('人工确认')
     const other = s.hub.createWorkspace({ name: 'Other', path: tmpdir() })
     await expect(
-      s.service.save({ ...s.input, workspaceId: other.id, toolPackageIds: [pack.id] }, 'admin')
+      s.service.save({ ...s.input, workspaceId: other.id, toolPackageIds: [pack.id] }, 'admin', task.id)
     ).rejects.toThrow('工作区')
+    expect((await s.service.save({ ...s.input, enabled: true }, 'admin', task.id)).mode).toBe('maintenance')
   })
   it('keeps native thread reuse scoped to unchanged task configuration', async () => {
     const s = setup(),
@@ -353,6 +358,24 @@ describe('persistent AI scheduled tasks', () => {
     await finish(s.service)
     expect(s.runtime.executeScheduled.mock.calls[1]![0].coreThreadId).toBe('native-thread')
   })
+  it('starts a new thread after switching from read-only to YOLO', async () => {
+    const s = setup(),
+      task = await s.service.save({ ...s.input, contextMode: 'reuse' }, 'admin')
+    s.service.trigger(task.id, 'admin')
+    await finish(s.service)
+    expect(s.service.records.getTask(task.id).coreThreadId).toBe('native-thread')
+    const updated = await s.service.save({ ...s.input, contextMode: 'reuse', mode: 'yolo' }, 'admin', task.id)
+    expect(updated.coreThreadId).toBe('')
+    s.service.trigger(task.id, 'admin')
+    await finish(s.service)
+    expect(s.runtime.executeScheduled.mock.calls[1]![0].coreThreadId).toBe('')
+  })
+  it('accepts YOLO without tool packages and rejects tool linkage', async () => {
+    const s = setup()
+    expect((await s.service.save({ ...s.input, mode: 'yolo' }, 'admin')).toolPackageIds).toEqual([])
+    await expect(s.service.save({ ...s.input, mode: 'yolo', toolPackageIds: ['any-package'] }, 'admin'))
+      .rejects.toThrow('不关联工具包')
+  })
   it('allows AI selections only within configured preserved files and submodules', async () => {
     const s = setup()
     const spy = vi.spyOn(WorkspaceSyncService.prototype, 'run').mockResolvedValue({})
@@ -360,7 +383,7 @@ describe('persistent AI scheduled tasks', () => {
       const task = await s.service.save(
         {
           ...s.input,
-          mode: 'maintenance',
+          mode: 'yolo',
           sync: {
             ...s.input.sync,
             preserveLocalFiles: ['local.toml', 'other.toml'],

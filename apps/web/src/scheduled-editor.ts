@@ -60,22 +60,16 @@ export const applySyncDraft = (
     .map(({ path, mode, branch, required }) => ({ path, mode, branch, required }))
 }
 
-export const validateTaskStep = (form: ScheduledTaskInput): string =>
-  !form.name.trim() || !form.prompt.trim() || !form.workspaceId
-    ? '请填写任务名称、工作区与 Prompt。'
-    : ''
+export const validateTaskStep = (form: ScheduledTaskInput): string => {
+  if (!form.name.trim() || !form.prompt.trim() || !form.workspaceId) return '请填写任务名称、工作区与 Prompt。'
+  if (form.mode === 'maintenance') return '旧版维护任务请先选择只读或 YOLO 模式，再保存修改。'
+  if (form.template === 'workspace_sync' && form.mode === 'read_only') return '工作区资源同步需要 YOLO 模式。'
+  return ''
+}
 
-export const validateDeliveryStep = (
-  form: ScheduledTaskInput,
-  toolPackages: Array<{ id: string; approvalRequired: boolean }>
-): string => {
+export const validateDeliveryStep = (form: ScheduledTaskInput): string => {
   if (Boolean(form.output.botId) !== Boolean(form.output.chatId)) {
     return '发送 Bot 和接收群需要同时配置。'
   }
-  const requiresApproval = form.toolPackageIds.some(id =>
-    toolPackages.some(toolPackage => toolPackage.id === id && toolPackage.approvalRequired)
-  )
-  return requiresApproval && (!form.output.botId || !form.output.chatId)
-    ? '所选工具包需要人工审批，请设置发送 Bot 与接收群。'
-    : ''
+  return ''
 }

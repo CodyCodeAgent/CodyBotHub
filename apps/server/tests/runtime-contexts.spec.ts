@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { buildCopilotContext, buildRouteContext } from '../src/runtime-contexts.js'
+import { buildCopilotContext, buildRouteContext, scheduledRuntimePermissions } from '../src/runtime-contexts.js'
 
 describe('runtime execution contexts', () => {
+  it('uses native read-only or full-access permissions for scheduled runs', () => {
+    expect(scheduledRuntimePermissions('read_only')).toEqual({ sandbox: 'read-only', sandboxPolicy: { type: 'readOnly', networkAccess: true } })
+    expect(scheduledRuntimePermissions('yolo')).toEqual({ sandbox: 'danger-full-access', sandboxPolicy: { type: 'dangerFullAccess' } })
+    expect(scheduledRuntimePermissions('maintenance').sandbox).toBe('read-only')
+  })
   it('keeps the admin Copilot read-only and route execution explicitly privileged', () => {
     const input = { workspacePath: process.cwd(), accountId: 'admin', workspaceName: 'test', workspaceId: 'ws', platformContext: 'context' }
     expect(buildCopilotContext(input as never).turn.sandboxPolicy).toEqual({ type: 'readOnly' })

@@ -23,7 +23,7 @@ export type ScheduledTaskInput = {
   runtimeKind: 'codex' | 'traex'
   model: string
   reasoningEffort: string
-  mode: 'read_only' | 'maintenance'
+  mode: 'read_only' | 'yolo' | 'maintenance' // maintenance is retained for existing task snapshots
   skillPackageIds: string[]
   toolPackageIds: string[]
   schedule: ScheduleConfig

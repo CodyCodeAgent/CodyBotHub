@@ -4,7 +4,7 @@ export const scheduledTemplates = [
     id: 'workspace_sync',
     name: '工作区资源同步',
     description: '更新代码与子模块，安装技能、同步知识库并验证资源。',
-    mode: 'maintenance',
+    mode: 'yolo',
     prompt:
       '维护当前工作区。先调用 inspect_workspace 检查仓库、本地修改和资源配置；有更新时调用 sync_workspace 完成受管更新。保留本地修改、认证信息和运行环境。完成后调用 verify_resources 验证技能与知识库可被识别。根据工具实际结果，报告更新前后版本、新增/更新/冲突的技能、知识变化、失败原因和未闭合项。不要通过 shell 绕过同步工具更新文件，不要部署或重启平台。'
   },
