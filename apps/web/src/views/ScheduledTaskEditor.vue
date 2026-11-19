@@ -3,9 +3,9 @@ import { ArrowLeft, ArrowRight, Check, Clock3, Archive } from 'lucide-vue-next'
 import ScheduledTaskGoalStep from '../components/ScheduledTaskGoalStep.vue'
 import ScheduledTaskPlanStep from '../components/ScheduledTaskPlanStep.vue'
 import ScheduledTaskReviewStep from '../components/ScheduledTaskReviewStep.vue'
-import { formatTime } from '../scheduled'
+import { formatTime, scheduledModeLabel } from '../scheduled'
 import { useScheduledTaskEditor } from '../composables/useScheduledTaskEditor'
-const { modelsLoading, id, step, loading, saving, error, notice, dirty, workspaces, catalog, inheritedModel, dates, previewError, repository, checking, skillRoots, preserveLocalFiles, moduleOptions, form, workspace, eligiblePackages, eligibleTools, eligibleSources, eligibleBots, eligibleChats, isSync, editTitle, inspect, changeWorkspace, next, previousStep, save, archive } = useScheduledTaskEditor()
+const { modelsLoading, id, step, loading, saving, error, notice, dirty, workspaces, catalog, inheritedModel, dates, previewError, repository, checking, skillRoots, preserveLocalFiles, moduleOptions, form, workspace, eligiblePackages, eligibleSources, eligibleBots, eligibleChats, isSync, editTitle, inspect, changeWorkspace, next, previousStep, save, archive } = useScheduledTaskEditor()
 </script>
 <template>
   <div class="page scheduler">
@@ -33,7 +33,7 @@ const { modelsLoading, id, step, loading, saving, error, notice, dirty, workspac
       <form @submit.prevent="step === 3 ? save() : next()">
         <div class="scheduler-editor-grid">
           <div class="scheduler-editor-main">
-            <ScheduledTaskGoalStep v-if="step === 1" :form="form" :workspaces="workspaces" :workspace="workspace" :catalog="catalog" :models-loading="modelsLoading" :inherited-model="inheritedModel" :eligible-packages="eligiblePackages" :eligible-tools="eligibleTools" :eligible-sources="eligibleSources" :is-sync="isSync" :checking="checking" :repository="repository" :module-options="moduleOptions" v-model:skill-roots="skillRoots" v-model:preserve-local-files="preserveLocalFiles" @inspect="inspect" @change-workspace="changeWorkspace" />
+            <ScheduledTaskGoalStep v-if="step === 1" :form="form" :workspaces="workspaces" :workspace="workspace" :catalog="catalog" :models-loading="modelsLoading" :inherited-model="inheritedModel" :eligible-packages="eligiblePackages" :eligible-sources="eligibleSources" :is-sync="isSync" :checking="checking" :repository="repository" :module-options="moduleOptions" v-model:skill-roots="skillRoots" v-model:preserve-local-files="preserveLocalFiles" @inspect="inspect" @change-workspace="changeWorkspace" />
             <ScheduledTaskPlanStep v-else-if="step === 2" :form="form" :preview-error="previewError" :eligible-bots="eligibleBots" :eligible-chats="eligibleChats" />
             <ScheduledTaskReviewStep v-else :form="form" :workspace="workspace" :inherited-model="inheritedModel" :is-sync="isSync" />
             <div v-if="error" class="error-banner" role="alert">{{ error }}</div>
@@ -57,7 +57,7 @@ const { modelsLoading, id, step, loading, saving, error, notice, dirty, workspac
                   </div>
                   <div>
                     <dt>模式</dt>
-                    <dd>{{ form.mode === 'maintenance' ? '维护与工具执行' : '只读分析' }}</dd>
+                    <dd>{{ scheduledModeLabel(form.mode) }}</dd>
                   </div>
                   <div>
                     <dt>Thread</dt>

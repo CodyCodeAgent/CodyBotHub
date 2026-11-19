@@ -3,6 +3,12 @@ import type { ExecutionContext } from '@codycodeagent/cody-web-core/session'
 import type { CopilotExecutionInput } from './runtime.js'
 import type { ResolvedRoute } from './types.js'
 import type { SenderIdentity } from './feishu/sender-identity.js'
+import type { ScheduledTaskInput } from './scheduled-types.js'
+
+export const scheduledRuntimePermissions = (mode: ScheduledTaskInput['mode']) =>
+  mode === 'yolo'
+    ? { sandbox: 'danger-full-access' as const, sandboxPolicy: { type: 'dangerFullAccess' as const } }
+    : { sandbox: 'read-only' as const, sandboxPolicy: { type: 'readOnly' as const, networkAccess: true } }
 
 const xmlAttribute = (value: string): string => value.replace(/&/gu, '&amp;').replace(/"/gu, '&quot;').replace(/</gu, '&lt;').replace(/>/gu, '&gt;')
 

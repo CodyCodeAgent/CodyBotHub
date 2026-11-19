@@ -3,7 +3,7 @@ import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import { useRuntimeModels } from './useRuntimeModels'
 import { applySyncDraft, createScheduledTaskInput, validateDeliveryStep, validateTaskStep, type ScheduledSubmoduleOption } from '../scheduled-editor'
-import type { Bot, ChatMetadata, ModelCatalog, ScheduledTaskInput, ScheduledTemplate, SkillPackage, SkillSource, ToolPackage, Workspace, WorkspaceRepository } from '../types'
+import type { Bot, ChatMetadata, ScheduledTaskInput, ScheduledTemplate, SkillPackage, SkillSource, Workspace, WorkspaceRepository } from '../types'
 
 export function useScheduledTaskEditor() {
 const route = useRoute(),
@@ -18,7 +18,6 @@ const route = useRoute(),
   loaded = ref(false)
 const workspaces = ref<Workspace[]>([]),
   packages = ref<SkillPackage[]>([]),
-  tools = ref<ToolPackage[]>([]),
   sources = ref<SkillSource[]>([]),
   bots = ref<Bot[]>([]),
   chats = ref<ChatMetadata[]>([])
@@ -39,7 +38,6 @@ let alive = true,
   previewTimer: ReturnType<typeof setTimeout> | undefined
 const workspace = computed(() => workspaces.value.find((w) => w.id === form.workspaceId)),
   eligiblePackages = computed(() => packages.value.filter((p) => p.workspaceId === form.workspaceId)),
-  eligibleTools = computed(() => tools.value.filter((t) => t.workspaceId === form.workspaceId && t.enabled)),
   eligibleSources = computed(() => sources.value.filter((s) => s.workspaceId === form.workspaceId)),
   eligibleBots = computed(() => bots.value.filter((b) => b.workspaceIds.includes(form.workspaceId))),
   eligibleChats = computed(() => chats.value.filter((c) => c.botId === form.output.botId && c.chatId.startsWith('oc_')))
@@ -108,7 +106,7 @@ const next = async () => {
       error.value = previewError.value
       return
     }
-    error.value = validateDeliveryStep(form, eligibleTools.value)
+    error.value = validateDeliveryStep(form)
     if (error.value) return
   }
   step.value++
@@ -120,8 +118,9 @@ const previousStep = () => {
 }
 const save = async () => {
   syncConfig()
+  error.value = validateTaskStep(form) || validateDeliveryStep(form)
+  if (error.value) return
   saving.value = true
-  error.value = ''
   try {
     const task = await api.saveScheduledTask(JSON.parse(JSON.stringify(form)) as ScheduledTaskInput, id || undefined)
     dirty.value = false
@@ -170,7 +169,7 @@ watch(
 watch(
   () => form.mode,
   (value) => {
-    if (value === 'read_only') form.toolPackageIds = []
+    if (value !== 'maintenance') form.toolPackageIds = []
   }
 )
 watch(
@@ -191,10 +190,9 @@ watch(
 )
 onMounted(async () => {
   try {
-    const [ws, pk, tp, so, bo, settings, ts, ch] = await Promise.all([
+    const [ws, pk, so, bo, settings, ts, ch] = await Promise.all([
       api.workspaces(),
       api.skillPackages(),
-      api.toolPackages(),
       api.skillSources(),
       api.bots(),
       api.settings(),
@@ -203,7 +201,6 @@ onMounted(async () => {
     ])
     workspaces.value = ws
     packages.value = pk
-    tools.value = tp
     sources.value = so
     bots.value = bo
     chats.value = ch
@@ -213,6 +210,7 @@ onMounted(async () => {
     if (id) {
       const task = await api.scheduledTask(id)
       Object.assign(form, task)
+      if (task.mode === 'maintenance') notice.value = '这是旧版维护任务，现有计划保持原权限运行。修改任务前，请明确选择只读或 YOLO 模式。'
       moduleOptions.value = task.sync.submodules.map((m) => ({ ...m, selected: true, initialized: true, commit: '' }))
       skillRoots.value = task.sync.skillRoots.join('\n')
       preserveLocalFiles.value = (task.sync.preserveLocalFiles || []).join('\n')
@@ -262,5 +260,5 @@ onUnmounted(() => {
   alive = false
   if (previewTimer) clearTimeout(previewTimer)
 })
-  return { modelsLoading, id, step, loading, saving, error, notice, dirty, workspaces, catalog, inheritedModel, dates, previewError, repository, checking, skillRoots, preserveLocalFiles, moduleOptions, form, workspace, eligiblePackages, eligibleTools, eligibleSources, eligibleBots, eligibleChats, isSync, editTitle, inspect, changeWorkspace, next, previousStep, save, archive }
+  return { modelsLoading, id, step, loading, saving, error, notice, dirty, workspaces, catalog, inheritedModel, dates, previewError, repository, checking, skillRoots, preserveLocalFiles, moduleOptions, form, workspace, eligiblePackages, eligibleSources, eligibleBots, eligibleChats, isSync, editTitle, inspect, changeWorkspace, next, previousStep, save, archive }
 }

@@ -17,7 +17,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
 import PaginationBar from '../components/PaginationBar.vue'
-import { formatTime, duration, runLabels, runColor, scheduleLabel } from '../scheduled'
+import { formatTime, duration, runLabels, runColor, scheduleLabel, scheduledModeLabel } from '../scheduled'
 import type { ScheduledTask, ScheduledRunSummary, ScheduledTemplate, SchedulerHealth, Workspace } from '../types'
 const route = useRoute(),
   router = useRouter(),
@@ -281,8 +281,8 @@ watch(
               <tr v-for="task in items" :key="task.id">
                 <td>
                   <RouterLink class="scheduler-title" :to="`/scheduled-tasks/${task.id}`">{{ task.name }}</RouterLink
-                  ><small>{{
-                    task.description || (task.mode === 'maintenance' ? '维护与工具执行' : '只读分析')
+                  ><span :class="['badge', task.mode === 'yolo' ? 'orange' : 'gray']">{{ scheduledModeLabel(task.mode) }}</span><small>{{
+                    task.description || scheduledModeLabel(task.mode)
                   }}</small>
                 </td>
                 <td>
@@ -410,8 +410,8 @@ watch(
         <article v-for="template in templates" :key="template.id" class="panel">
           <component :is="templateIcon(template.id)" :size="27" />
           <h2>{{ template.name }}</h2>
-          <span :class="['badge', template.mode === 'maintenance' ? 'blue' : 'gray']">{{
-            template.mode === 'maintenance' ? '维护与工具执行' : '只读分析'
+          <span :class="['badge', template.mode === 'yolo' ? 'blue' : 'gray']">{{
+            scheduledModeLabel(template.mode)
           }}</span>
           <p>{{ template.description }}</p>
           <RouterLink

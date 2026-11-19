@@ -15,7 +15,7 @@ import { readSkillSearchTags, WorkspaceResourceIndex, type KnowledgeResource } f
 import type { AgentRuntimeKind, InvestigationSkillRecord, InvestigationTraceRecord, InvestigationToolRecord, ModelConfigSource, ResolvedModelConfig, ResolvedRoute, ToolPackageRecord } from './types.js'
 import { rankSkillCandidates, resolveRuntimeModel, scheduledModelRequest, type RuntimeResolvedModel } from './runtime-selection.js'
 import { EngineRegistry, type EngineState } from './runtime-engine-registry.js'
-import { buildCopilotContext, buildRouteContext } from './runtime-contexts.js'
+import { buildCopilotContext, buildRouteContext, scheduledRuntimePermissions } from './runtime-contexts.js'
 import type { SenderIdentity } from './feishu/sender-identity.js'
 
 export { rankSkillCandidates, resolveRuntimeModel, type RuntimeResolvedModel } from './runtime-selection.js'
@@ -94,30 +94,37 @@ export class CodyBotRuntime {
       input.signal.throwIfAborted()
       const workspace = realpathSync.native(input.workspacePath), settings = this.store.getPlatformSettings()
       const packages = input.config.skillPackageIds.map(id => this.store.listSkillPackages().find(p => p.id === id)).filter((p): p is NonNullable<typeof p> => Boolean(p))
-      const authorized = input.config.toolPackageIds.map(id => this.store.getToolPackage(id))
+      const legacyMaintenance = input.config.mode === 'maintenance'
+      const yolo = input.config.mode === 'yolo'
+      const { sandbox, sandboxPolicy } = scheduledRuntimePermissions(input.config.mode)
+      const authorized = legacyMaintenance ? input.config.toolPackageIds.map(id => this.store.getToolPackage(id)) : []
       const knowledge = await this.resources.listKnowledge(workspace, input.config.prompt, 12)
       const skills = await manager.listSkills([workspace], true)
       const requested = packages.flatMap(p => p.skills)
       const selected = rankSkillCandidates(skills.filter(s => s.enabled), requested.join(' ')).filter(s => requested.some(name => name === s.name || name === s.path))
       const instructions = [settings.basePrompt, input.workspacePrompt,
         '你正在执行 CodyBotHub 的 AI 定时任务。按任务要求自主使用已授权技能与查询能力。以真实工具结果为依据，报告结论、证据和未完成项，不展示推理摘要。',
-        '当前原生沙箱为只读。需要更新工作区时必须调用 codybothub_tasks.sync_workspace；需要执行已授权业务工具包时调用 invoke_tool_package，沿用其审批规则。人工拒绝后不得重复申请相同操作。',
+        yolo
+          ? '当前为 YOLO 模式，原生沙箱允许使用服务账号权限执行命令和访问网络，无逐次人工审批。工作区资源同步可调用 codybothub_tasks.sync_workspace；业务操作可直接使用原生工具，不依赖工具包。'
+          : legacyMaintenance
+            ? '当前为旧版维护模式，原生沙箱只读。更新工作区必须调用 codybothub_tasks.sync_workspace；执行已授权业务工具包时调用 invoke_tool_package，沿用其审批规则。人工拒绝后不得重复申请相同操作。'
+            : '当前原生沙箱为只读。只能检查工作区和资源，不得修改文件或执行业务写入。',
         `任务：${input.config.name}；执行 ID：${input.runId}。当前能力模式：${input.config.mode}。`,
         ...packages.map(p => `技能包 ${p.name}（${p.fallbackMode}；${p.skills.join(', ')}）：${p.prompt}`),
-        `授权工具包：${authorized.map(p => `${p.name}（${p.id}）：${p.prompt}`).join('；') || '无'}`,
+        legacyMaintenance ? `授权工具包：${authorized.map(p => `${p.name}（${p.id}）：${p.prompt}`).join('；') || '无'}` : '',
         `知识资源索引（按需读取原文）：${knowledge.map(k => `${k.title}: ${k.path}`).join('\n')}`,
         `任务要求：${input.config.prompt}`,
-        `同步授权配置：${JSON.stringify(input.config.sync)}。sync_workspace 默认使用全部配置；可通过 preserveLocalFiles、submodulePaths 选择其中一部分，不得扩展配置范围。本机保留文件维持原内容，远端对这些文件的变更会记录并提示。`,
+        input.config.mode !== 'read_only' ? `受管同步配置：${JSON.stringify(input.config.sync)}。sync_workspace 默认使用全部配置；可通过 preserveLocalFiles、submodulePaths 选择其中一部分。本机保留文件维持原内容，远端对这些文件的变更会记录并提示。` : '',
       ].filter(Boolean).join('\n\n')
       const tools = [
         { type: 'function' as const, name: 'inspect_workspace', description: '只读检查工作区仓库、子模块与本地修改。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
         { type: 'function' as const, name: 'verify_resources', description: '刷新并验证当前引擎能识别的技能和知识资源。', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
-        { type: 'function' as const, name: 'sync_workspace', description: '按任务配置安全同步代码、子模块、技能与知识库。可在已授权范围内选择本机保留文件和子模块；省略参数则沿用任务配置。仅维护模式允许。', inputSchema: { type: 'object', properties: { preserveLocalFiles: { type: 'array', items: { type: 'string' } }, submodulePaths: { type: 'array', items: { type: 'string' } } }, additionalProperties: false } },
-        { type: 'function' as const, name: 'invoke_tool_package', description: '申请或执行本任务授权的工具包；需人工确认时发送飞书卡片，后续结果回到本任务线程。', inputSchema: { type: 'object', properties: { packageId: { type: 'string' }, arguments: { type: 'object' }, reason: { type: 'string' } }, required: ['packageId','arguments','reason'], additionalProperties: false } },
+        ...(input.config.mode !== 'read_only' ? [{ type: 'function' as const, name: 'sync_workspace', description: '按任务配置同步代码、子模块、技能与知识库；省略参数则沿用任务配置。', inputSchema: { type: 'object', properties: { preserveLocalFiles: { type: 'array', items: { type: 'string' } }, submodulePaths: { type: 'array', items: { type: 'string' } } }, additionalProperties: false } }] : []),
+        ...(legacyMaintenance ? [{ type: 'function' as const, name: 'invoke_tool_package', description: '申请或执行旧版任务授权的工具包；需人工确认时发送飞书卡片。', inputSchema: { type: 'object', properties: { packageId: { type: 'string' }, arguments: { type: 'object' }, reason: { type: 'string' } }, required: ['packageId','arguments','reason'], additionalProperties: false } }] : []),
       ]
       const context: ExecutionContext = {
-        thread: { cwd: workspace, approvalPolicy: 'never', sandbox: 'read-only', runtimeWorkspaceRoots: [workspace], baseInstructions: null, developerInstructions: instructions, experimentalRawEvents: false, ephemeral: false, dynamicTools: [{ type: 'namespace', name: 'codybothub_tasks', description: '定时任务的受管维护与业务操作', tools }] },
-        turn: { cwd: workspace, runtimeWorkspaceRoots: [workspace], approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: true }, summary: 'concise', additionalContext: { 'scheduled-task': { kind: 'application', value: instructions } } },
+        thread: { cwd: workspace, approvalPolicy: 'never', sandbox, runtimeWorkspaceRoots: [workspace], baseInstructions: null, developerInstructions: instructions, experimentalRawEvents: false, ephemeral: false, dynamicTools: [{ type: 'namespace', name: 'codybothub_tasks', description: '定时任务的工作区检查与资源同步', tools }] },
+        turn: { cwd: workspace, runtimeWorkspaceRoots: [workspace], approvalPolicy: 'never', sandboxPolicy, summary: 'concise', additionalContext: { 'scheduled-task': { kind: 'application', value: instructions } } },
       }
       try {
       if (input.coreThreadId) await manager.resume({ id: bindingId, threadId: input.coreThreadId }, context)
@@ -140,7 +147,7 @@ export class CodyBotRuntime {
       input.signal.addEventListener('abort', abort, { once: true })
       try {
         input.signal.throwIfAborted()
-        const turn = manager.submit(bindingId, { input: buildTurnUserInput({ text: input.prompt, ...(selected.length ? { skills: selected.map(s => ({ name: s.name, path: s.path })) } : {}) }), runtimeWorkspaceRoots: [workspace], approvalPolicy: 'never', sandboxPolicy: { type: 'readOnly', networkAccess: true }, ...(model.model ? { model: model.model } : {}), ...(model.reasoningEffort ? { effort: model.reasoningEffort as TurnInput['effort'] } : {}) }, 'queue', `${input.runId}:${randomUUID()}`)
+        const turn = manager.submit(bindingId, { input: buildTurnUserInput({ text: input.prompt, ...(selected.length ? { skills: selected.map(s => ({ name: s.name, path: s.path })) } : {}) }), runtimeWorkspaceRoots: [workspace], approvalPolicy: 'never', sandboxPolicy, ...(model.model ? { model: model.model } : {}), ...(model.reasoningEffort ? { effort: model.reasoningEffort as TurnInput['effort'] } : {}) }, 'queue', `${input.runId}:${randomUUID()}`)
         const result = await this.waitForCompletion(manager, bindingId, turn.completed, input.config.runtimeKind, input.config.timeoutMinutes)
         input.signal.throwIfAborted()
         if (result.terminalEvent.type === 'turn.failed') throw new Error(String(result.terminalEvent.data.error || 'AI 定时任务失败'))

@@ -1,4 +1,6 @@
-import type { ScheduledRunStatus, ScheduleConfig } from './types'
+import type { ScheduledRunStatus, ScheduleConfig, ScheduledTaskInput } from './types'
+export const scheduledModeLabel = (mode: ScheduledTaskInput['mode']): string =>
+  mode === 'yolo' ? 'YOLO' : mode === 'maintenance' ? '旧版维护模式' : '只读'
 export const runLabels: Record<ScheduledRunStatus, string> = {
   queued: '排队中',
   running: '执行中',

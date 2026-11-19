@@ -54,9 +54,9 @@ defineProps<{ form: ScheduledTaskInput; previewError: string; eligibleBots: Bot[
                 </div>
               </section>
               <section class="panel">
-                <div class="panel-header"><h2>结果与审批发送到哪里</h2></div>
+                <div class="panel-header"><h2>结果发送到哪里</h2></div>
                 <div class="scheduler-form-body">
-                  <div class="notice">最终报告始终保存到平台。需要发送群报告或审批卡片时，再配置下面的 Bot 和群。</div>
+                  <div class="notice">最终报告始终保存到平台。需要发送群报告时，再配置下面的 Bot 和群。</div>
                   <div class="field-grid">
                     <div class="field">
                       <label for="output-bot">发送 Bot</label
@@ -85,7 +85,7 @@ defineProps<{ form: ScheduledTaskInput; previewError: string; eligibleBots: Bot[
                     ><select id="output-when" v-model="form.output.when">
                       <option value="always">每次有最终结果都发送</option>
                       <option value="attention">仅失败、警告或中断时发送</option></select
-                    ><small>工具包审批卡片独立发送；报告发送失败可单独重试，不重跑任务。</small>
+                    ><small>报告发送失败可单独重试，不重跑任务。</small>
                   </div>
                 </div>
               </section>
@@ -112,10 +112,10 @@ defineProps<{ form: ScheduledTaskInput; previewError: string; eligibleBots: Bot[
                       ><select id="task-context" v-model="form.contextMode">
                         <option value="fresh">每次新建 Thread，参考上次成功摘要</option>
                         <option value="reuse">复用该任务专属 Thread</option></select
-                      ><small>任务线程独立于群会话，不会与机器人对话抢占绑定。审批结果续写本次任务 Thread。</small>
+                      ><small>任务线程独立于群会话，不会与机器人对话抢占绑定。</small>
                     </div>
                     <p class="scheduler-hint">
-                      进程中断后的未知副作用不会自动重试整轮；审批最长等待 6 小时，拒绝后本轮不重复申请。
+                      进程中断后的未知副作用不会自动重试整轮；YOLO 任务请核实外部操作是否已完成。
                     </p>
                   </details>
                 </div>

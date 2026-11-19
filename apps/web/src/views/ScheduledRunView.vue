@@ -4,7 +4,7 @@ import { ArrowLeft, Copy, CheckCircle2, AlertTriangle, RefreshCw, Square, Clock3
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { api } from '../api'
-import { duration, formatTime, runLabels, runColor } from '../scheduled'
+import { duration, formatTime, runLabels, runColor, scheduledModeLabel } from '../scheduled'
 import type { ScheduledRun } from '../types'
 const route = useRoute(),
   router = useRouter(),
@@ -275,7 +275,7 @@ onUnmounted(() => {
                   <dt>引擎 / 模式</dt>
                   <dd>
                     {{ run.snapshot.runtimeKind }} ·
-                    {{ run.snapshot.mode === 'maintenance' ? '维护与工具执行' : '只读分析' }}
+                    {{ scheduledModeLabel(run.snapshot.mode) }}
                   </dd>
                 </div>
               </dl>

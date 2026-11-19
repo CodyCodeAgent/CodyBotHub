@@ -88,7 +88,7 @@ export class ScheduledStore {
           +input.enabled,
           next,
           at,
-          previous.workspaceId === input.workspaceId && previous.runtimeKind === input.runtimeKind
+          previous.workspaceId === input.workspaceId && previous.runtimeKind === input.runtimeKind && previous.mode === input.mode
             ? previous.coreThreadId
             : '',
           id

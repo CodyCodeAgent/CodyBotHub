@@ -41,16 +41,22 @@ describe('scheduled task editor state', () => {
     expect(validateTaskStep(form)).toBe('')
   })
 
-  it('requires complete delivery settings and an approval destination', () => {
+  it('requires complete delivery settings without linking tool approvals', () => {
     const form = createScheduledTaskInput()
     form.output.botId = 'bot-1'
-    expect(validateDeliveryStep(form, [])).toBe('发送 Bot 和接收群需要同时配置。')
+    expect(validateDeliveryStep(form)).toBe('发送 Bot 和接收群需要同时配置。')
     form.output.chatId = 'chat-1'
-    expect(validateDeliveryStep(form, [])).toBe('')
+    expect(validateDeliveryStep(form)).toBe('')
     form.output = { botId: '', chatId: '', when: 'always' }
-    form.toolPackageIds = ['tool-1']
-    expect(validateDeliveryStep(form, [{ id: 'tool-1', approvalRequired: true }])).toBe(
-      '所选工具包需要人工审批，请设置发送 Bot 与接收群。'
-    )
+    form.mode = 'yolo'
+    expect(validateDeliveryStep(form)).toBe('')
+  })
+
+  it('requires explicit migration before editing a legacy maintenance task', () => {
+    const form = createScheduledTaskInput()
+    Object.assign(form, { name: 'Legacy', workspaceId: 'ws', prompt: 'Sync', mode: 'maintenance' })
+    expect(validateTaskStep(form)).toContain('旧版维护任务')
+    form.mode = 'yolo'
+    expect(validateTaskStep(form)).toBe('')
   })
 })
